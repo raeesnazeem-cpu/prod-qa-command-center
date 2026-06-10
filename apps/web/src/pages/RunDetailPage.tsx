@@ -1405,7 +1405,7 @@ export const RunDetailPage = () => {
 
                                 if (hasUrlTabCompare) {
                                   // Safely find the homepage locally
-                                  const localHomepage = run.pages.find(
+                                  const localHomepage = run.pages?.find(
                                     (p) =>
                                       p.url
                                         .replace(/^https?:\/\//, "")
