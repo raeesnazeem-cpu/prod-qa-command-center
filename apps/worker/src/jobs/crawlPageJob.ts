@@ -260,7 +260,7 @@ export async function processCrawlPageJob(job: Job) {
         page = await context.newPage()
 
         // Console error check listener must be attached before goto
-        page.on("console", (msg) => {
+        page.on("console", (msg: any) => {
           if (
             msg.type() === "error" &&
             consoleErrors.length + criticalErrors.length < 80
@@ -269,7 +269,7 @@ export async function processCrawlPageJob(job: Job) {
           }
         })
 
-        page.on("pageerror", (err) => {
+        page.on("pageerror", (err: any) => {
           if (consoleErrors.length + criticalErrors.length < 80) {
             criticalErrors.push(err.message)
           }
@@ -756,7 +756,7 @@ export async function processCrawlPageJob(job: Job) {
       if (browser) {
         await browser
           .close()
-          .catch((e) => logger.error({ err: e }, "Failed to close browser"))
+          .catch((e: any) => logger.error({ err: e }, "Failed to close browser"))
       }
     }
   } catch (error: any) {

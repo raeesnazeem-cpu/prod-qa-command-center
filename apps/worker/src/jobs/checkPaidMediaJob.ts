@@ -1,6 +1,6 @@
 import { Job } from "bullmq"
 import { supabase } from "../lib/supabase"
-import { decrypt } from "../../../api/src/lib/encryption"
+import { decrypt } from "@qacc/shared/encryption"
 import axios from "axios"
 import pino from "pino"
 

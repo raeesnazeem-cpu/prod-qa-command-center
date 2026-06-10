@@ -5,7 +5,8 @@ import { requireRole } from "../middleware/requireRole"
 import { zodValidate } from "../middleware/zodValidate"
 import { CreateProjectSchema, UpdateProjectSchema } from "@qacc/shared"
 import { logger } from "../lib/logger"
-import { encrypt, decrypt } from "../lib/encryption"
+import { encrypt, decrypt } from "@qacc/shared/encryption"
+
 import * as activityService from "../services/activityService"
 import axios from "axios"
 
@@ -641,7 +642,8 @@ router.post(
         return res.status(400).json({ error: "Basecamp configuration missing" })
       }
 
-      const { decrypt } = await import("../lib/encryption")
+      const { decrypt } = await import("@qacc/shared/encryption")
+
       const decryptedToken = decrypt(settings.basecamp_token_encrypted)
 
       const response = await axios.get(

@@ -168,6 +168,8 @@ apps/worker/scripts/
 # Scratch and Temporary Development Notes
 scratch/
 **/scratch/
+scratch*
+**/scratch*
 basecamp-push-debug-report.md
 newfixes.md
 fixes.md

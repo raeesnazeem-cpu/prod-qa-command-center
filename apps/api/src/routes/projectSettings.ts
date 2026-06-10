@@ -2,7 +2,8 @@ import { Router, Request, Response } from "express"
 import { supabase } from "../lib/supabase"
 import { clerkAuth } from "../middleware/clerkAuth"
 import { requireRole } from "../middleware/requireRole"
-import { encrypt, decrypt } from "../lib/encryption"
+import { encrypt, decrypt } from "@qacc/shared/encryption"
+
 import axios from "axios"
 
 const router: Router = Router()

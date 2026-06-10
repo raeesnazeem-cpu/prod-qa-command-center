@@ -1,6 +1,6 @@
 import { Job } from "bullmq"
 import { supabase } from "../lib/supabase"
-import { decrypt } from "../../../api/src/lib/encryption"
+import { decrypt } from "@qacc/shared/encryption"
 import { checkProjectPlan } from "../checks/projectPlanCheck"
 import pino from "pino"
 
@@ -198,7 +198,10 @@ export async function processCheckProjectPlanJob(job: Job) {
   }
 
   if (isApiOnly && pageId) {
-    await supabase.from("pages").update({ status: "done", progress: 100 }).eq("id", pageId);
+    await supabase
+      .from("pages")
+      .update({ status: "done", progress: 100 })
+      .eq("id", pageId)
   }
 
   // Step 5: Broadcast progress update

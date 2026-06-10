@@ -187,7 +187,7 @@ export async function processStartRunJob(job: Job) {
       )
     }
 
-    let insertedPages = []
+    let insertedPages: any[] = []
     if (needsPageScan && urls.length > 0) {
       // Step 5 & 6: For each URL, add a 'crawl_page' job AND insert into pages table
       logger.info(

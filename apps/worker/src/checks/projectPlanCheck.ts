@@ -245,7 +245,8 @@ export async function checkProjectPlan(
           .first()
         if ((await contextLocator.count()) > 0) {
           logger.info("Taking crop screenshot of plan details block")
-          screenshotBuffer = await contextLocator.screenshot({ padding: 10 })
+          await contextLocator.evaluate((el) => (el.style.padding = "10px"))
+          screenshotBuffer = await contextLocator.screenshot()
         } else {
           logger.info("Taking direct text screenshot of plan details")
           screenshotBuffer = await planLocator.screenshot()
