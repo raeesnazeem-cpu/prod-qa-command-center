@@ -310,9 +310,9 @@ BASECAMP_CLIENT_SECRET="..."
             <li>Name it: <code>qa-command-web</code></li>
             <li>Source: Select your GitHub repository.</li>
             <li><strong>Build Command:</strong> Since it is a monorepo, you need to tell it how to build the web part. Type:<br>
-            <div class="code-block">pnpm install && pnpm build:web</div></li>
+            <div class="code-block">pnpm install && pnpm build</div></li>
             <li><strong>Start Command:</strong> How to turn it on.<br>
-            <div class="code-block">pnpm start:web</div></li>
+            <div class="code-block">pnpm --filter web start</div></li>
             <li><strong>Environment Variables:</strong> Open your local <code>.env</code> or <code>.env.local</code> file on your Mac. Copy all the text inside it, and paste it into the Environment Variables section in Dokploy.</li>
             <li>Click <strong>Deploy</strong>. Dokploy will now install everything, build the React app, and make it live!</li>
         </ul>
@@ -327,9 +327,9 @@ BASECAMP_CLIENT_SECRET="..."
             <li>Name it: <code>qa-command-worker</code></li>
             <li>Source: Select the exact same GitHub repository.</li>
             <li><strong>Build Command:</strong><br>
-            <div class="code-block">pnpm install && pnpm build:worker</div></li>
+            <div class="code-block">pnpm install && pnpm build</div></li>
             <li><strong>Start Command:</strong><br>
-            <div class="code-block">pnpm start:worker</div></li>
+            <div class="code-block">pnpm --filter worker start</div></li>
             <li><strong>Environment Variables:</strong> Paste the exact same <code>.env</code> file contents here too. <i>(Make sure your Upstash Redis and Supabase URLs are correct here, because the worker needs the database!)</i></li>
             <li>Click <strong>Deploy</strong>. Now your worker is running 24x7 in the background doing its job!</li>
         </ul>
@@ -406,7 +406,7 @@ BASECAMP_CLIENT_SECRET="..."
             <li>Click the <strong>New +</strong> button at the top right and select <strong>Static Site</strong>.</li>
             <li>Select your <code>qa-command-center</code> GitHub repository.</li>
             <li><strong>Name:</strong> <code>qa-command-web</code></li>
-            <li><strong>Build Command:</strong> Type exactly this: <br><div class="code-block">pnpm install && pnpm build:web</div></li>
+            <li><strong>Build Command:</strong> Type exactly this: <br><div class="code-block">pnpm install && pnpm build</div></li>
             <li><strong>Publish Directory:</strong> Type exactly this: <br><div class="code-block">apps/web/dist</div></li>
             <li>Scroll down and click <strong>Advanced</strong> -> <strong>Add Environment Variable</strong>.</li>
             <li>Paste your <code>VITE_CLERK_PUBLISHABLE_KEY</code> and any other <code>VITE_</code> variables from your <code>.env</code> file here.</li>
@@ -460,9 +460,9 @@ BASECAMP_CLIENT_SECRET="..."
             <li>Go to Dashboard, click <strong>Create Application</strong>. Name it <code>qa-worker</code>.</li>
             <li>Source: Select your GitHub repository.</li>
             <li><strong>Build Command:</strong> Type exactly this:<br>
-            <div class="code-block">pnpm install && pnpm build:worker</div></li>
+            <div class="code-block">pnpm install && pnpm build</div></li>
             <li><strong>Start Command:</strong> Type exactly this:<br>
-            <div class="code-block">pnpm start:worker</div></li>
+            <div class="code-block">pnpm --filter worker start</div></li>
             <li><strong>Environment Variables:</strong> Go to the environment section and paste all your `.env` variables (Clerk keys, Supabase DB string, Redis queue URLs, Google Cloud JSON).</li>
             <li>Click <strong>Deploy</strong>.</li>
         </ul>
