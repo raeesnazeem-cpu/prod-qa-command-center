@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-User Basecamp Sign-In Plan</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9fafb;
+        }
+        h1, h2, h3 {
+            color: #111827;
+        }
+        h1 {
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        h2 {
+            margin-top: 30px;
+            color: #2563eb;
+        }
+        .step {
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 15px 20px;
+            margin-bottom: 15px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        .step-title {
+            font-weight: 600;
+            font-size: 1.1em;
+            margin-bottom: 10px;
+            color: #1f2937;
+        }
+        .note {
+            background-color: #eef2ff;
+            border-left: 4px solid #4f46e5;
+            padding: 10px 15px;
+            margin: 15px 0;
+            border-radius: 0 4px 4px 0;
+            font-style: italic;
+        }
+        .highlight {
+            background-color: #fee2e2;
+            color: #991b1b;
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-family: monospace;
+        }
+        ul {
+            margin-top: 5px;
+            padding-left: 20px;
+        }
+        li {
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Multi-User Basecamp Sign-In Implementation Plan</h1>
+    <p>
+        Hello! This document explains how we will build the <strong>Multi-User Basecamp Sign-In</strong> feature.
+        The goal is to allow every regular user to push to Basecamp using their very own profile.
+    </p>
+    <div class="note">
+        <strong>Important Requirement:</strong> This change will be <strong>purely additive</strong>. 
+        We will not break any existing code. If the user is a <code>superadmin</code>, the system will gracefully fall back to using the common project token. For everyone else, it will enforce the use of a personal token.
+    </div>
+
+    <h2>Part 1: Database Changes (Backend Storage)</h2>
+    <p>
+        We are only adding new things, not deleting anything. Since we <strong>already have</strong> the <code>basecamp_person_id</code> for each user in our system, half of our job is already done! We just need a place to securely store their actual login keys.
+    </p>
+    <div class="step">
+        <div class="step-title">Step 1: Add new token columns to the `users` table</div>
+        <p>We will add the following columns to the Supabase <code>users</code> table:</p>
+        <ul>
+            <li><code>basecamp_access_token</code> (Text): The main key used to push messages on behalf of the user.</li>
+            <li><code>basecamp_refresh_token</code> (Text): A backup key used to get a new main key when the main one expires.</li>
+            <li><code>basecamp_token_expires_at</code> (Timestamp): To check if the main key is expired and needs refreshing.</li>
+        </ul>
+        <p><em>In simple terms: We are just creating new blank boxes in our database row for each user's secret keys. No existing data is touched.</em></p>
+    </div>
+
+    <h2>Part 2: The Basecamp Login Flow (Backend APIs)</h2>
+    <p>
+        Basecamp uses a system called OAuth2. A user clicks a button, goes to the Basecamp website, clicks "Allow", and Basecamp sends a secret code back to us.
+    </p>
+    <div class="step">
+        <div class="step-title">Step 2: Create a "Start Login" API route (New Code)</div>
+        <p>We will make a new backend link: <code>GET /api/basecamp/user-auth</code>.</p>
+        <p>When the user clicks "Connect Basecamp" on our frontend, it hits this API, which redirects their browser to the Basecamp login page.</p>
+    </div>
+    <div class="step">
+        <div class="step-title">Step 3: Create a "Callback" API route (New Code)</div>
+        <p>After the user says "Allow", they come back to a special link like <code>GET /api/basecamp/callback</code>.</p>
+        <p>Our backend takes the secret code from the URL, talks to Basecamp secretly, and exchanges it for the user's <code>basecamp_access_token</code>. We then save this token into the <code>users</code> table.</p>
+    </div>
+    <div class="step">
+        <div class="step-title">Step 4: Make a Token Refresher (New Code)</div>
+        <p>Basecamp tokens expire after a while. We will write a small helper function in the backend that automatically fetches a fresh token using the <code>basecamp_refresh_token</code> just before doing any push.</p>
+    </div>
+
+    <h2>Part 3: Additive Push Logic Update (Backend APIs)</h2>
+    <p>We are going to carefully wrap the existing push logic in a new <code>if/else</code> condition.</p>
+    <div class="step">
+        <div class="step-title">Step 5: Safely change the push route (`POST /:id/basecamp`)</div>
+        <p>When someone tries to push to Basecamp, the backend will do the following check:</p>
+        <ol>
+            <li><strong>Check the User's Role</strong>: Is this person a <code>superadmin</code>?</li>
+            <li><strong>Check the User's Token</strong>: Does this person have a personal <code>basecamp_access_token</code> saved in their profile?</li>
+        </ol>
+        <p><strong>The Logic rules:</strong></p>
+        <ul>
+            <li><strong>If they have a personal token:</strong> Use their personal token to push the task.</li>
+            <li><strong>If they DO NOT have a personal token AND they are a <code>superadmin</code>:</strong> Fall back to the old logic. Use the common <code>projectSettings.basecamp_token</code>.</li>
+            <li><strong>If they DO NOT have a personal token AND they are NOT a <code>superadmin</code>:</strong> Stop the process. Send an error back saying <span class="highlight">"Please connect your personal Basecamp account to push tasks."</span></li>
+        </ul>
+        <p><em>This guarantees we don't break anything for superadmins, but we strictly force everyone else to connect.</em></p>
+    </div>
+
+    <h2>Part 4: Frontend UI Changes (HTML/CSS & React side)</h2>
+    <p>This is what the user will actually see on the screen.</p>
+    <div class="step">
+        <div class="step-title">Step 6: Update Existing User Settings Page</div>
+        <p>Since we <strong>already have</strong> a SettingsPage per user, we will use it to store and manage these user settings.</p>
+        <p>Add a "Connect to Basecamp" button inside this existing page. If they are already connected, show a green tick ✅ "Connected" with a "Disconnect" option.</p>
+    </div>
+    <div class="step">
+        <div class="step-title">Step 7: Check before pushing (Additive UI Update)</div>
+        <p>On the page where they click "Push to Basecamp", we check if they are allowed.</p>
+        <ul>
+            <li><strong>For Superadmins:</strong> Show the push button normally, always.</li>
+            <li><strong>For Regular Users:</strong> 
+                <ul>
+                    <li>If connected: Show the push button.</li>
+                    <li>If NOT connected: Show a popup modal saying, "Kindly connect your Basecamp account first before pushing," with a button that takes them to their Settings page.</li>
+                </ul>
+            </li>
+        </ul>
+    </div>
+
+    <h2>Summary of the Effort Required</h2>
+    <ul>
+        <li><strong>Database Additions:</strong> ~1 hour</li>
+        <li><strong>Basecamp OAuth Login Flow:</strong> ~4-5 hours</li>
+        <li><strong>Additive Push Logic Updates:</strong> ~2-3 hours</li>
+        <li><strong>Frontend UI:</strong> ~3-4 hours</li>
+    </ul>
+    <p><strong>Total Estimated Time:</strong> About 2 full working days (10 to 14 hours of development and testing).</p>
+
+</body>
+</html>

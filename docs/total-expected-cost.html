@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Detailed Application Cost Analysis</title>
+    <style>
+      :root {
+        --primary: #4f46e5;
+        --primary-light: #e0e7ff;
+        --success: #059669;
+        --success-light: #d1fae5;
+        --warning: #d97706;
+        --warning-light: #fef3c7;
+        --bg: #f8fafc;
+        --card-bg: #ffffff;
+        --text-main: #0f172a;
+        --text-muted: #475569;
+        --border: #e2e8f0;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+          Arial, sans-serif;
+        background-color: var(--bg);
+        color: var(--text-main);
+        line-height: 1.6;
+        padding: 40px 20px;
+        max-width: 1000px;
+        margin: 0 auto;
+      }
+
+      .header {
+        text-align: center;
+        margin-bottom: 50px;
+        padding-bottom: 30px;
+        border-bottom: 2px solid var(--border);
+      }
+
+      .header h1 {
+        font-size: 2.5rem;
+        color: var(--primary);
+        margin-bottom: 12px;
+      }
+
+      .header p {
+        color: var(--text-muted);
+        font-size: 1.1rem;
+        max-width: 700px;
+        margin: 0 auto;
+      }
+
+      .service-card {
+        background-color: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 30px;
+        margin-bottom: 30px;
+        box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05);
+        position: relative;
+        overflow: hidden;
+      }
+
+      .service-card::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 6px;
+        height: 100%;
+      }
+
+      .border-blue::before {
+        background-color: var(--primary);
+      }
+      .border-green::before {
+        background-color: var(--success);
+      }
+      .border-orange::before {
+        background-color: var(--warning);
+      }
+
+      .service-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 15px;
+      }
+
+      .service-title {
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .cost-tag {
+        background-color: var(--primary-light);
+        color: var(--primary);
+        padding: 6px 16px;
+        border-radius: 9999px;
+        font-weight: 800;
+        font-size: 1.2rem;
+      }
+
+      .service-desc {
+        color: var(--text-muted);
+        margin-bottom: 20px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 15px;
+        background: var(--bg);
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+      }
+
+      th,
+      td {
+        padding: 12px 16px;
+        text-align: left;
+        border-bottom: 1px dashed var(--border);
+      }
+
+      th {
+        background-color: #f1f5f9;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        font-size: 0.85rem;
+        letter-spacing: 0.05em;
+        border-bottom: 1px solid var(--border);
+      }
+
+      tr:last-child td {
+        border-bottom: none;
+      }
+
+      .math-column {
+        font-family: monospace;
+        color: var(--primary);
+        font-weight: 600;
+      }
+      .price-column {
+        font-weight: 700;
+        text-align: right;
+      }
+      .total-row {
+        background-color: var(--primary-light);
+        font-weight: 800;
+      }
+      .total-row td {
+        border-top: 2px solid var(--primary);
+        color: var(--primary);
+      }
+
+      .grand-total {
+        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        color: white;
+        padding: 40px;
+        border-radius: 16px;
+        text-align: center;
+        margin-top: 50px;
+        box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+      }
+
+      .grand-total h2 {
+        margin-bottom: 10px;
+        color: #94a3b8;
+        font-size: 1.2rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .total-number {
+        font-size: 4rem;
+        font-weight: 900;
+        color: #10b981;
+        margin-bottom: 10px;
+        line-height: 1;
+      }
+      .total-subtext {
+        color: #cbd5e1;
+        max-width: 600px;
+        margin: 0 auto;
+      }
+
+      .alert-box {
+        background-color: #fffbeb;
+        border-left: 4px solid #f59e0b;
+        padding: 15px;
+        margin-bottom: 30px;
+        border-radius: 0 8px 8px 0;
+        color: #92400e;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>Full Infrastructure Cost Breakdown</h1>
+      <p>
+        A detailed mathematical breakdown of exactly why the system costs what
+        it does, based on an assumed workload statistics of 5 pre/post release
+        tasks per day with 50 pages average per project.
+      </p>
+    </div>
+
+    <!-- WORKLOAD FOUNDATION -->
+    <div class="service-card border-blue">
+      <div class="service-header">
+        <h3 class="service-title">📊 The Workload Foundation</h3>
+      </div>
+      <p class="service-desc">
+        Every calculation below is based on this foundational workload matrix.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Calculation</th>
+            <th class="price-column">Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Websites per day</td>
+            <td class="math-column">User Input</td>
+            <td class="price-column">5</td>
+          </tr>
+          <tr>
+            <td>Pages per website</td>
+            <td class="math-column">User Input</td>
+            <td class="price-column">50</td>
+          </tr>
+          <tr>
+            <td>Views (Desktop, Tablet, Mobile)</td>
+            <td class="math-column">User Input</td>
+            <td class="price-column">3</td>
+          </tr>
+          <tr>
+            <td>Daily Video Recordings</td>
+            <td class="math-column">5 x 50 x 3</td>
+            <td class="price-column">750 / day</td>
+          </tr>
+          <tr class="total-row">
+            <td>Total Monthly Jobs</td>
+            <td class="math-column">750 x 30 days</td>
+            <td class="price-column">22,500 / month</td>
+          </tr>
+          <tr class="total-row">
+            <td>Total Monthly Data Generated</td>
+            <td class="math-column">22,500 x ~3MB per video</td>
+            <td class="price-column">~67.5 GB / month</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="alert-box">
+      <strong>Why are there two main costs?</strong> <br />
+      1. <strong>GCP Compute:</strong> Charged ~$2.01/mo strictly for the CPU
+      power to encode 450 consolidated videos.<br />
+      2. <strong>Core Worker:</strong> Charged $0 to ~$25/mo to host the
+      separate Node.js background process that listens to the queue, runs AI
+      checks, and triggers those GCP video jobs.
+    </div>
+
+    <!-- GCP VIDEO RECORDING COMPUTE -->
+    <div class="service-card border-blue">
+      <div class="service-header">
+        <h3 class="service-title">
+          🎥 Video Recording Compute (Google Cloud Run)
+        </h3>
+        <div class="cost-tag">~$2.01 / mo</div>
+      </div>
+      <p class="service-desc">
+        This is the cost of renting Google's CPUs to launch Playwright, scroll
+        the page, and compress the video 450 times (3 videos per website).
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Calculation</th>
+            <th class="price-column">Monthly Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Total Execution Time</td>
+            <td class="math-column">450 jobs x 360 seconds</td>
+            <td class="price-column">162,000 seconds</td>
+          </tr>
+          <tr>
+            <td>vCPU Requirement</td>
+            <td class="math-column">2 vCPUs (Required for video)</td>
+            <td class="price-column">324,000 vCPU-seconds</td>
+          </tr>
+          <tr>
+            <td>RAM Requirement</td>
+            <td class="math-column">2 GB (Required for Playwright)</td>
+            <td class="price-column">324,000 GB-seconds</td>
+          </tr>
+          <tr>
+            <td>Free Tier Discount</td>
+            <td class="math-column">-240k vCPU-s / -480k GB-s</td>
+            <td class="price-column" style="color: #059669">-$0.00</td>
+          </tr>
+          <tr>
+            <td>Billable vCPU Cost</td>
+            <td class="math-column">84,000 secs x $0.00002400</td>
+            <td class="price-column">$2.01</td>
+          </tr>
+          <tr>
+            <td>Billable RAM Cost</td>
+            <td class="math-column">Fully covered by Free Tier</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr class="total-row">
+            <td>Total Compute Cost</td>
+            <td class="math-column">$2.01 + $0.00</td>
+            <td class="price-column">$2.01 / mo</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- GCP VIDEO STORAGE -->
+    <div class="service-card border-blue">
+      <div class="service-header">
+        <h3 class="service-title">💽 Video Storage (Google Cloud Storage)</h3>
+        <div class="cost-tag">~$0.30 / mo</div>
+      </div>
+      <p class="service-desc">
+        The cost to store the videos in a bucket in the
+        <strong>same region</strong> as the Cloud Run job.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Calculation</th>
+            <th class="price-column">Monthly Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Total Data to Store</td>
+            <td class="math-column">450 videos x 45MB</td>
+            <td class="price-column">20.2 GB</td>
+          </tr>
+          <tr>
+            <td>Free Tier Storage</td>
+            <td class="math-column">First 5 GB</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td>Billable Storage</td>
+            <td class="math-column">15.2 GB x $0.02</td>
+            <td class="price-column">$0.30</td>
+          </tr>
+          <tr>
+            <td>Egress (Internal GCR to GCS)</td>
+            <td class="math-column">Same Region Transfer</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td>Egress (Internet Downloads)</td>
+            <td class="math-column">100 GB Free Tier (Covers the 20.2GB)</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr class="total-row">
+            <td>Total Storage Cost</td>
+            <td class="math-column">$0.30 + $0.00</td>
+            <td class="price-column">$0.30 / mo</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- CORE WORKER HOSTING -->
+    <div class="service-card border-orange">
+      <div class="service-header">
+        <h3 class="service-title">
+          🖥️ Core Worker Hosting (The Background Process)
+        </h3>
+        <div class="cost-tag" style="background: #fef3c7; color: #d97706">
+          ~$6.00 to $25.00 / mo
+        </div>
+      </div>
+      <p class="service-desc">
+        This is the persistent Node.js background worker that consumes the
+        BullMQ queue and runs AI scripts.
+      </p>
+      <h4 style="margin-top: 10px; margin-bottom: 5px; color: var(--text-main)">
+        Option A: Render.com Managed Background Worker
+      </h4>
+      <table>
+        <thead>
+          <tr>
+            <th>Resource Breakdown</th>
+            <th>Specifications / Logic</th>
+            <th class="price-column">Monthly Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Compute Base Price</td>
+            <td class="math-column">"Starter" Instance (1 vCPU, 2GB RAM)</td>
+            <td class="price-column">$25.00</td>
+          </tr>
+          <tr>
+            <td>Network Bandwidth</td>
+            <td class="math-column">Includes 100 GB Egress</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td>Platform Management</td>
+            <td class="math-column">Automated GitHub deployments, SSL</td>
+            <td class="price-column" style="color: #059669">Included</td>
+          </tr>
+          <tr class="total-row">
+            <td>Render.com Total</td>
+            <td class="math-column">Flat monthly rate</td>
+            <td class="price-column">$25.00 / mo</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h4 style="margin-top: 30px; margin-bottom: 5px; color: var(--text-main)">
+        Option B: Self-Hosted VPS with aaPanel
+      </h4>
+      <table>
+        <thead>
+          <tr>
+            <th>Resource Breakdown</th>
+            <th>Specifications / Logic</th>
+            <th class="price-column">Monthly Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Raw Server Lease (Hetzner)</td>
+            <td class="math-column">
+              ARM64 Server (2 vCPU, 4GB RAM, 40GB SSD)
+            </td>
+            <td class="price-column">~$4.50</td>
+          </tr>
+          <tr>
+            <td>IPv4 Address Fee</td>
+            <td class="math-column">Standard Hetzner IPv4 allocation</td>
+            <td class="price-column">~$1.50</td>
+          </tr>
+          <tr>
+            <td>Network Bandwidth</td>
+            <td class="math-column">Includes 20,000 GB (20 TB) Egress</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td>Control Panel (aaPanel)</td>
+            <td class="math-column">Open-source Linux control panel</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr class="total-row">
+            <td>VPS Total</td>
+            <td class="math-column">Flat monthly rate</td>
+            <td class="price-column">~$6.00 / mo</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h4 style="margin-top: 30px; margin-bottom: 5px; color: var(--text-main)">
+        Option C: Self-Hosted VPS (Worker + Frontend)
+      </h4>
+      <table>
+        <thead>
+          <tr>
+            <th>Resource Breakdown</th>
+            <th>Specifications / Logic</th>
+            <th class="price-column">Monthly Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Raw Server Lease</td>
+            <td class="math-column">Server (2 vCPU, 6GB RAM)</td>
+            <td class="price-column">~$8.00</td>
+          </tr>
+          <tr>
+            <td>IPv4 Address Fee</td>
+            <td class="math-column">Standard IPv4 allocation</td>
+            <td class="price-column">~$1.50</td>
+          </tr>
+          <tr>
+            <td>Network Bandwidth</td>
+            <td class="math-column">Includes Generous Egress</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td>Frontend Hosting</td>
+            <td class="math-column">Hosted on the same server</td>
+            <td class="price-column" style="color: #059669">Included</td>
+          </tr>
+          <tr class="total-row">
+            <td>VPS Total</td>
+            <td class="math-column">Flat monthly rate</td>
+            <td class="price-column">~$9.50 / mo</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h4 style="margin-top: 30px; margin-bottom: 5px; color: var(--text-main)">
+        Option D: Self-Hosted on Pre-subscribed AWS VPS (Worker + Frontend)
+      </h4>
+      <table>
+        <thead>
+          <tr>
+            <th>Resource Breakdown</th>
+            <th>Specifications / Logic</th>
+            <th class="price-column">Monthly Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>AWS VPS</td>
+            <td class="math-column">Already owned by firm</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td>Network Bandwidth</td>
+            <td class="math-column">Included in existing AWS plan</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td>Core Worker Hosting</td>
+            <td class="math-column">Hosted on firm's AWS VPS</td>
+            <td class="price-column" style="color: #059669">Included</td>
+          </tr>
+          <tr>
+            <td>Frontend Hosting</td>
+            <td class="math-column">Hosted on firm's AWS VPS</td>
+            <td class="price-column" style="color: #059669">Included</td>
+          </tr>
+          <tr class="total-row">
+            <td>AWS Total</td>
+            <td class="math-column">Leveraging existing resources</td>
+            <td class="price-column" style="color: #059669">$0.00 / mo</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- DATABASE & QUEUE -->
+    <div class="service-card border-green">
+      <div class="service-header">
+        <h3 class="service-title">
+          🗄️ Auxiliary Services (Queue, DB, Frontend)
+        </h3>
+        <div class="cost-tag" style="background: #d1fae5; color: #059669">
+          ~$1.00 / mo
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Service</th>
+            <th>Calculation</th>
+            <th class="price-column">Monthly Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Upstash Redis (Queue)</strong></td>
+            <td class="math-column">225k commands x $0.20 per 100k</td>
+            <td class="price-column">$0.45</td>
+          </tr>
+          <tr>
+            <td><strong>Supabase (Database Storage)</strong></td>
+            <td class="math-column">
+              22.5k text rows = ~5MB. Free tier allows 500MB
+            </td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td><strong>Supabase (Database Connections)</strong></td>
+            <td class="math-column">
+              Pgbouncer handles connection spikes automatically
+            </td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td><strong>Supabase (Image Storage)</strong></td>
+            <td class="math-column">
+              Evidence screenshots. Fits within 1GB Free Tier
+            </td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td><strong>Clerk (Authentication)</strong></td>
+            <td class="math-column">~100 users. Free tier allows 10,000 MAU</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td><strong>Vercel / Netlify (Frontend - optional)</strong></td>
+            <td class="math-column">
+              &lt; 1GB bandwidth (Fits in 100GB Free Tier)
+            </td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+          <tr>
+            <td><strong>Basecamp</strong></td>
+            <td class="math-column">Pre-existing subscription</td>
+            <td class="price-column" style="color: #059669">$0.00</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- FINAL TOTAL -->
+    <div class="grand-total">
+      <h2>Total Estimated App Cost</h2>
+      <div class="total-number">
+        ~$2.76
+        <span style="font-size: 1.5rem; color: #94a3b8">to</span> ~$27.76
+      </div>
+      <p class="total-subtext">
+        <strong>$2.76/mo</strong> if pre-subscribed AWS VPS is used (Option
+        D).<br />
+        <strong>$8.76/mo</strong> if $6 Self-Hosted VPS is used (Option B).<br />
+        <strong>$12.26/mo</strong> if $9.50 VPS + Frontend is used (Option
+        C).<br />
+        <strong>$27.76/mo</strong> if $25 Render.com service is used (Option A).
+      </p>
+    </div>
+  </body>
+</html>

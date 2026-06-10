@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A Check of Checks - Playwright Audit Report</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; margin: 40px auto; max-width: 900px; padding: 0 20px; color: #333; }
+        h1 { color: #111; border-bottom: 2px solid #eaeaea; padding-bottom: 10px; margin-bottom: 20px; }
+        p.intro { font-size: 1.1em; margin-bottom: 30px; color: #555; }
+        .check-item { margin-bottom: 24px; padding: 20px; border: 1px solid #e1e4e8; border-radius: 8px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+        .check-title { font-size: 1.25em; font-weight: 600; margin-bottom: 12px; color: #24292e; display: flex; align-items: center; justify-content: space-between; }
+        .status-needed { color: #22863a; font-weight: 600; background: #e6ffed; padding: 2px 8px; border-radius: 4px; }
+        .status-not-needed { color: #cb2431; font-weight: 600; background: #ffeef0; padding: 2px 8px; border-radius: 4px; }
+        .playwright-badge { font-size: 0.8em; padding: 4px 10px; border-radius: 20px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+        .playwright-yes { background: #fff5b1; color: #b08800; border: 1px solid #ffe564; }
+        .playwright-no { background: #f6f8fa; color: #586069; border: 1px solid #e1e4e8; }
+        .details { font-size: 1em; color: #444; }
+        .details strong { color: #24292e; }
+        .details p { margin: 8px 0 0 0; }
+    </style>
+</head>
+<body>
+    <h1>General Checks - Playwright Audit Report</h1>
+    <p class="intro">This report analyzes all 18 general checks. For each check, we consider what the UI FindingCard strictly requires, identify if Playwright is instantiated, and determine if Playwright is <strong>absolutely not needed</strong>.</p>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>1) Privacy Policy (privacy_policy)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>PrivacyPolicyFindingCard</code> requires visual proof screenshots of the footer (containing the privacy link), the checkout page (for WooCommerce notices), and the full policy page. Navigating to multiple paths, evaluating the DOM, and capturing accurate screenshots requires Playwright.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>2) Project Plan (project_plan)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>ProjectPlanFindingCard</code> explicitly requires and renders two screenshots: "Plan Highlight" and "Reviews Page". While the plan highlight is generated from Basecamp text, the check must navigate to the live <code>/reviews</code> page to capture a viewport screenshot. Because this screenshot from the actual website is required by the UI, Playwright is absolutely needed here.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>3) Paid Media (paid_media)</span>
+            <span class="playwright-badge playwright-no">Playwright: Not Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-not-needed">Not needed</span>
+            <p><strong>Analysis:</strong> The <code>PaidMediaFindingCard</code> displays data based on scanning Basecamp APIs for campaign mentions. No UI screenshot or browser interaction is required. It correctly uses <code>axios</code> instead of Playwright.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>4) Hero Media (hero_media)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>HeroMediaFindingCard</code> relies on metrics for video load times and fallback image validation. Playwright is required to evaluate browser-level events (like the <code>playing</code> event on a <code>&lt;video&gt;</code> element) and to capture targeted fallback/hero screenshots for visual inspection.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>5) Footer Logo (footer_logo)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>LogoCheckFindingCard</code> explicitly requires multi-viewport screenshots (Desktop, Tablet, Mobile) of the footer section so users can manually verify if a tagline is present. Capturing and isolating the footer element accurately necessitates Playwright.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>6) Single Script (single_script)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>SingleScriptFindingCard</code> needs screenshots of the injected <code>#feature-buttons</code> widget across all viewports to verify visual injection and alignment, plus a code snippet screenshot. Playwright is required for layout rendering and capturing.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>7) Top Bar &amp; Sticky Header (top_bar_sticky)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>HeaderFindingCard</code> visually verifies the layout and presence of social/contact links inside the top bar. Playwright is needed to capture the header element screenshot accurately.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>8) Favicon (favicon)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>FaviconFindingCard</code> requires a screenshot of a mocked browser tab UI displaying the injected favicon, along with the code snippet. This visual proof requires Playwright's rendering engine and DOM evaluation.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>9) Chatbot Consultation (chatbot_consultation)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> While the FindingCard doesn't explicitly display a screenshot, the check relies on simulating a physical <code>click()</code> event on the launcher button and verifying if the chatbot window transitions to a visible state. This interactive testing is impossible with static HTML parsers and requires Playwright.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>10) Text Share (text_share)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-not-needed">Not needed</span>
+            <p><strong>Analysis:</strong> The FindingCard only needs the string values of the Open Graph metadata (<code>og:title</code>, <code>og:site_name</code>, <code>twitter:title</code>) to check for WordPress boilerplate. No screenshots are taken. A simple, much faster HTTP GET using <code>axios</code> and <code>cheerio</code> would easily suffice here. Playwright is absolutely not needed.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>11) Learn More Buttons (learn_more_buttons)</span>
+            <span class="playwright-badge playwright-no">Playwright: Not Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-not-needed">Not needed</span>
+            <p><strong>Analysis:</strong> The <code>LearnMoreButtonsFindingCard</code> lists elements containing generic CTA text. It intelligently uses <code>got</code> and <code>cheerio</code> to parse the DOM without needing Playwright.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>12) URL &amp; Tab Compare (url_tab_compare)</span>
+            <span class="playwright-badge playwright-no">Playwright: Not Present (Imported but unused)</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-not-needed">Not needed</span>
+            <p><strong>Analysis:</strong> The check logic crawls sitemaps and compares dev vs live URLs. The FindingCard parses a JSON payload to display a comparison table. It uses <code>axios</code> and <code>cheerio</code> under the hood. Playwright is not needed.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>13) Verify Plugin Updates (verify_plugin_updates)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>PluginUpdatesFindingCard</code> requires a screenshot of the WordPress plugins dashboard. Playwright is needed to bypass login screens, navigate the WP admin area, and screenshot the plugin list.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>14) Social Share Heading (social_share_heading)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>SocialShareHeadingFindingCard</code> displays screenshots generated by an external tool (socialsharepreview.com). Navigating to that site, submitting the form, and capturing screenshots of the Facebook, X, and LinkedIn tabs mandates Playwright.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>15) Logo on Chatbot (logo_chatbot)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>LogoOnChatbotFindingCard</code> requires screenshots of the homepage and the explicitly opened chatbot window to verify branding. Triggering the chatbot to open and capturing the result requires Playwright.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>16) Contact Form (contact_form)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>ContactFormFindingCard</code> requires visual proof of the form. Furthermore, the check actively fills out the form in an iframe, submits it, and captures the "Thank You" screen. Playwright is strictly necessary for this interaction.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>17) Dead Links (dead_links / broken_links)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-not-needed">Not needed</span>
+            <p><strong>Analysis:</strong> The <code>DeadLinksFindingCard</code> outputs a text list of broken HTTP response codes and uses a pre-existing full-page screenshot (<code>pageRecord.desktopUrl</code>) as its generic image. Currently, Playwright is used to extract <code>&lt;a href&gt;</code> tags from the DOM, but this could easily be achieved with <code>axios</code> and <code>cheerio</code>. Playwright is absolutely not needed here.</p>
+        </div>
+    </div>
+
+    <div class="check-item">
+        <div class="check-title">
+            <span>18) Callnow Links (callnow_links)</span>
+            <span class="playwright-badge playwright-yes">Playwright: Present</span>
+        </div>
+        <div class="details">
+            <strong>Verdict:</strong> <span class="status-needed">Needed</span>
+            <p><strong>Analysis:</strong> The <code>CallnowFindingCard</code> requires visual proof of the Call Now button plugin setup inside the WordPress admin panel, as well as a mobile-viewport screenshot of the homepage showing the button. Playwright is necessary for the authentication, navigation, and specific viewport captures.</p>
+        </div>
+    </div>
+
+</body>
+</html>

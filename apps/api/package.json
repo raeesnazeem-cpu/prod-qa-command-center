@@ -1,0 +1,44 @@
+{
+  "name": "api",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "eslint . --ext .ts"
+  },
+  "dependencies": {
+    "@bull-board/api": "^6.20.6",
+    "@bull-board/express": "^6.20.6",
+    "@clerk/backend": "^1.2.0",
+    "@clerk/express": "^2.0.7",
+    "@google/genai": "^2.2.0",
+    "@qacc/ai": "workspace:*",
+    "@qacc/shared": "workspace:*",
+    "@supabase/supabase-js": "^2.39.3",
+    "axios": "^1.14.0",
+    "bullmq": "^5.71.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.3",
+    "express-rate-limit": "^7.2.0",
+    "fast-xml-parser": "^5.5.9",
+    "groq-sdk": "^1.2.0",
+    "helmet": "^7.1.0",
+    "ioredis": "^5.3.2",
+    "pino": "^8.19.0",
+    "pino-pretty": "^11.0.0",
+    "svix": "^1.89.0",
+    "xss": "^1.0.15",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.30",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.2"
+  }
+}

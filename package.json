@@ -1,0 +1,19 @@
+{
+  "name": "qacc-monorepo",
+  "private": true,
+  "scripts": {
+    "dev:web": "pnpm --filter web dev",
+    "dev:api": "pnpm --filter api dev",
+    "dev:worker": "pnpm --filter worker dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint"
+  },
+  "devDependencies": {
+    "@bull-board/api": "^6.20.6",
+    "@bull-board/express": "^6.20.6",
+    "bullmq": "^5.71.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["puppeteer"]
+  }
+}

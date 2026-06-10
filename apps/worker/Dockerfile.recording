@@ -1,0 +1,35 @@
+# Use official Playwright image as base
+FROM mcr.microsoft.com/playwright:v1.44.0-jammy
+
+# Set working directory
+WORKDIR /app
+
+# Install pnpm
+RUN npm install -g pnpm@9
+
+# Copy root workspace files
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+
+# Copy internal packages
+COPY packages ./packages/
+
+# Copy worker package.json
+COPY apps/worker/package.json ./apps/worker/
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile
+
+# Copy the rest of the worker code
+COPY apps/worker ./apps/worker/
+
+# Build the worker
+RUN pnpm --filter worker run build
+
+# Set environment variables for Playwright
+# We use the browsers already installed in the Playwright image
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+# Command to run the recording worker
+# This will be used by Cloud Run Jobs
+CMD ["node", "apps/worker/dist/recordingWorker.js"]

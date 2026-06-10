@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Detailed Implementation Plan: Cloudinary Storage</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 900px; margin: 0 auto; padding: 2rem; }
+        h1 { color: #2c3e50; }
+        .intro { background: #e8f4f8; padding: 15px; border-left: 4px solid #3498db; margin-bottom: 20px; border-radius: 4px; }
+        .step { background: #fdfdfd; border: 1px solid #e0e0e0; padding: 20px; border-radius: 6px; margin-bottom: 30px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+        .step h2 { margin-top: 0; color: #1976d2; }
+        .instruction { font-weight: bold; color: #d32f2f; margin-bottom: 10px; font-size: 1.1em; background: #ffebee; padding: 10px; border-radius: 4px; border: 1px solid #ffcdd2;}
+        .filepath { font-family: monospace; background: #eee; padding: 2px 6px; border-radius: 4px; color: #000; }
+        pre { background: #272822; color: #f8f8f2; padding: 15px; border-radius: 6px; overflow-x: auto; position: relative; font-size: 14px; margin-top: 5px; }
+        .copy-btn { position: absolute; top: 10px; right: 10px; background: #4caf50; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .copy-btn:hover { background: #45a049; }
+    </style>
+</head>
+<body>
+
+    <h1>Cloudinary Implementation Plan</h1>
+    
+    <div class="intro">
+        <strong>Namaste!</strong> Here is your extremely granular, step-by-step guide.<br><br>
+        <strong>Zero Image Drops Guarantee:</strong> We are strictly changing the inside of the <code>uploadScreenshot</code> function. Because the rest of your app (Findings, Task Staging, Basecamp Push) treats the URL as a simple string, they won't even know it changed. The flow remains 100% unbreakable.<br>
+        <strong>Automatic Deletion:</strong> We will add a small hook in the API when a "Run" is deleted to find all Cloudinary URLs for that run and wipe them instantly.
+    </div>
+
+    <!-- Step 1 -->
+    <div class="step">
+        <h2>Step 1: Install Package & Configure Environment</h2>
+        <p>First, we need to add the Cloudinary package to both your worker and api folders.</p>
+        <div class="instruction">
+            Run this command in your terminal:
+        </div>
+        <pre><code>cd apps/worker && pnpm add cloudinary && cd ../api && pnpm add cloudinary</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+        <br>
+        <div class="instruction">
+            Add these 3 lines to your <span class="filepath">.env</span> file anywhere:
+        </div>
+        <pre><code>CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+    </div>
+
+    <!-- Step 2 -->
+    <div class="step">
+        <h2>Step 2: Update Worker Storage Logic</h2>
+        <p>We will replace the Supabase storage logic with Cloudinary logic. All other files that use this function will automatically start uploading to Cloudinary without any changes needed.</p>
+        <div class="instruction">
+            Open file: <span class="filepath">apps/worker/src/lib/supabaseStorage.ts</span><br><br>
+            Replace from this code line: <code>const DEFAULT_BUCKET = 'screenshots';</code> at line number <strong>12</strong><br>
+            To these lines (stop before end of file): <code>}</code> at line number <strong>88</strong>
+        </div>
+        <p>Replace with this exact new code:</p>
+        <pre><code>import { v2 as cloudinary } from 'cloudinary';
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+export async function uploadScreenshot(
+  buffer: Buffer, 
+  path: string, 
+  options: { bucket?: string; isPublic?: boolean } = {}
+): Promise&lt;string&gt; {
+  logger.info({ path }, 'Uploading screenshot to Cloudinary');
+  
+  const publicId = path.replace(/\.[^/.]+$/, "");
+
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { 
+        public_id: publicId,
+        resource_type: 'image'
+      },
+      (error, result) => {
+        if (error) {
+          logger.error({ error, path }, 'Failed to upload to Cloudinary');
+          return reject(error);
+        }
+        if (result) {
+          resolve(result.secure_url);
+        }
+      }
+    );
+    uploadStream.end(buffer);
+  });
+}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+    </div>
+
+    <!-- Step 3 -->
+    <div class="step">
+        <h2>Step 3: Update API Storage Logic</h2>
+        <p>We will do the exact same thing for the API package so fallback screenshot logic (like Basecamp Playwright proofs) also goes to Cloudinary.</p>
+        <div class="instruction">
+            Open file: <span class="filepath">apps/api/src/lib/supabaseStorage.ts</span><br><br>
+            Replace from this code line: <code>const DEFAULT_BUCKET = 'screenshots';</code> at line number <strong>4</strong><br>
+            To these lines (stop before end of file): <code>}</code> at line number <strong>80</strong>
+        </div>
+        <p>Replace with this exact new code:</p>
+        <pre><code>import { v2 as cloudinary } from 'cloudinary';
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+export async function uploadScreenshot(
+  buffer: Buffer, 
+  path: string, 
+  options: { bucket?: string; isPublic?: boolean } = {}
+): Promise&lt;string&gt; {
+  logger.info({ path }, 'Uploading screenshot to Cloudinary');
+  
+  const publicId = path.replace(/\.[^/.]+$/, "");
+
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { 
+        public_id: publicId,
+        resource_type: 'image'
+      },
+      (error, result) => {
+        if (error) {
+          logger.error({ error, path }, 'Failed to upload to Cloudinary');
+          return reject(error);
+        }
+        if (result) {
+          resolve(result.secure_url);
+        }
+      }
+    );
+    uploadStream.end(buffer);
+  });
+}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+    </div>
+
+    <!-- Step 4 -->
+    <div class="step">
+        <h2>Step 4: Delete Images when Run is Deleted</h2>
+        <p>To ensure we keep Cloudinary clean and completely free, we will delete the images right before the run gets deleted.</p>
+        <div class="instruction">
+            Open file: <span class="filepath">apps/api/src/routes/runs.ts</span><br><br>
+            Replace this single line of code: <code>const { error } = await supabase.from("qa_runs").delete().in("id", runIds)</code> at line number <strong>809</strong>
+        </div>
+        <p>Replace that single line with this exact new code:</p>
+        <pre><code>      // 1. Get findings and pages to find Cloudinary URLs
+      const { data: findings } = await supabase.from("findings").select("screenshot_url").in("run_id", runIds);
+      const { data: pages } = await supabase.from("pages").select("screenshot_url_desktop, screenshot_url_tablet, screenshot_url_mobile").in("run_id", runIds);
+
+      const publicIdsToDelete: string[] = [];
+      
+      const extractCloudinaryId = (url: string) => {
+        if (!url || !url.includes("cloudinary.com")) return;
+        const match = url.match(/\/upload\/(?:v\d+\/)?(.+?)\.[a-z]+$/i);
+        if (match && match[1]) publicIdsToDelete.push(match[1]);
+      };
+
+      if (findings) {
+        findings.forEach((f: any) => {
+          if (f.screenshot_url) f.screenshot_url.split(",").forEach(extractCloudinaryId);
+        });
+      }
+      if (pages) {
+        pages.forEach((p: any) => {
+          if (p.screenshot_url_desktop) extractCloudinaryId(p.screenshot_url_desktop);
+          if (p.screenshot_url_tablet) extractCloudinaryId(p.screenshot_url_tablet);
+          if (p.screenshot_url_mobile) extractCloudinaryId(p.screenshot_url_mobile);
+        });
+      }
+
+      // 2. Delete from Cloudinary
+      if (publicIdsToDelete.length > 0) {
+        const cloudinary = require("cloudinary").v2;
+        cloudinary.config({
+          cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+          api_key: process.env.CLOUDINARY_API_KEY,
+          api_secret: process.env.CLOUDINARY_API_SECRET,
+        });
+        
+        // Cloudinary bulk delete allows max 100 per request
+        for (let i = 0; i < publicIdsToDelete.length; i += 100) {
+          await cloudinary.api.delete_resources(publicIdsToDelete.slice(i, i + 100));
+        }
+      }
+
+      const { error } = await supabase.from("qa_runs").delete().in("id", runIds);</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+    </div>
+
+    <script>
+        function copyCode(button) {
+            const codeBlock = button.parentElement.querySelector('code');
+            const textToCopy = codeBlock.innerText;
+            navigator.clipboard.writeText(textToCopy).then(() => {
+                const originalText = button.innerText;
+                button.innerText = 'Copied!';
+                button.style.background = '#2e7d32';
+                setTimeout(() => {
+                    button.innerText = originalText;
+                    button.style.background = '#4caf50';
+                }, 2000);
+            });
+        }
+    </script>
+</body>
+</html>

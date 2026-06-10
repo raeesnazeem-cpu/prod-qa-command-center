@@ -1,0 +1,24 @@
+# .antigravityignore
+# Directories
+node_modules/
+# Build outputs
+
+dist/
+.build/
+build/
+out/
+# Package manager stores
+.pnpm-store/
+# Test coverage
+coverage/
+# Next.js / Turborepo artifacts
+.next/
+.turbo/
+# Log files
+*.log
+# Misc temporary files
+*.tmp
+*.cache
+# Archive files
+*.zip
+*.tar.gz

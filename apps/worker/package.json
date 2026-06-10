@@ -1,0 +1,40 @@
+{
+  "name": "worker",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@playwright/test": "^1.42.1",
+    "@qacc/ai": "workspace:*",
+    "@qacc/shared": "workspace:*",
+    "@supabase/supabase-js": "^2.39.3",
+    "@upstash/ratelimit": "^1.0.1",
+    "@upstash/redis": "^1.28.4",
+    "axios": "^1.14.0",
+    "bullmq": "^5.71.1",
+    "cheerio": "^1.2.0",
+    "dictionary-en": "^4.0.0",
+    "dotenv": "^16.4.5",
+    "fast-xml-parser": "^5.5.9",
+    "got": "^14.6.6",
+    "ioredis": "^5.3.2",
+    "nspell": "^2.1.5",
+    "p-limit": "^7.3.0",
+    "pino": "^8.19.0",
+    "pino-pretty": "^11.3.0",
+    "playwright": "^1.42.1",
+    "puppeteer": "^24.43.0",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/sharp": "^0.32.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.2"
+  }
+}

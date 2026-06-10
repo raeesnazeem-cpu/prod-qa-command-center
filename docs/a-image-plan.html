@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Storage Plan: Cloudinary Integration</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 2rem; }
+        h1, h2, h3 { color: #2c3e50; }
+        code { background-color: #f8f9fa; padding: 0.2rem 0.4rem; border-radius: 4px; font-family: monospace; font-size: 0.9em; }
+        pre { background-color: #f8f9fa; padding: 1rem; border-radius: 6px; overflow-x: auto; }
+        .highlight { background-color: #e8f4f8; padding: 1rem; border-left: 4px solid #3498db; margin: 1rem 0; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+        th, td { padding: 0.75rem; border: 1px solid #ddd; text-align: left; }
+        th { background-color: #f8f9fa; }
+    </style>
+</head>
+<body>
+    <h1>Cloudinary Image Storage Plan</h1>
+    
+    <div class="highlight">
+        <strong>Goal:</strong> Migrate thumbnail and screenshot storage to a reliable, free image hosting service (Cloudinary) and ensure images are automatically deleted when their parent "Runs" are deleted.
+    </div>
+
+    <h2>1. Why are current Supabase images "disappearing"?</h2>
+    <p>Currently, depending on the bucket configuration (e.g., private buckets), the system might be generating <strong>Signed URLs</strong> that expire after a certain time (e.g., 1 hour). When you check the database later, the URL is broken, making it look like the image was deleted. Some jobs use public buckets, but the private ones will definitely exhibit this "disappearing" behavior.</p>
+
+    <h2>2. Is Cloudinary the right choice?</h2>
+    <p><strong>Yes, absolutely.</strong> Cloudinary is the industry standard for this exact use case.</p>
+    <table>
+        <tr>
+            <th>Feature</th>
+            <th>Cloudinary Free Tier</th>
+        </tr>
+        <tr>
+            <td><strong>Storage</strong></td>
+            <td>1 GB (or 25 Credits total where 1 credit = 1GB or 1k transformations)</td>
+        </tr>
+        <tr>
+            <td><strong>Transformations</strong></td>
+            <td>Automatic thumbnail sizing and compression on the fly via URL parameters</td>
+        </tr>
+        <tr>
+            <td><strong>Permanence</strong></td>
+            <td>URLs never expire unless you explicitly delete the image</td>
+        </tr>
+    </table>
+
+    <h2>3. Proposed Architecture & Workflow</h2>
+    
+    <h3>A. Uploading Images</h3>
+    <ol>
+        <li>Update the <code>uploadScreenshot</code> logic in the Worker and API.</li>
+        <li>Instead of uploading to Supabase, we upload the buffer directly to Cloudinary.</li>
+        <li><strong>Crucial Step:</strong> We will tag every uploaded image with a tag matching the Run ID (e.g., <code>run_12345</code>). This makes bulk deletion extremely easy.</li>
+        <li>Cloudinary returns a permanent secure URL (e.g., <code>https://res.cloudinary.com/...</code>) which we save to the Supabase database.</li>
+    </ol>
+
+    <h3>B. Deleting Images (Cleanup)</h3>
+    <p>We need to ensure images don't accumulate when runs are deleted. There are two ways to handle this:</p>
+    <ul>
+        <li><strong>Option 1 (API Triggered):</strong> When a DELETE request is made to <code>/api/runs/:id</code>, before deleting the run from Supabase, we call the Cloudinary API: <code>cloudinary.api.delete_resources_by_tag("run_12345")</code>. This instantly wipes all screenshots and thumbnails associated with that run.</li>
+        <li><strong>Option 2 (Supabase Webhook):</strong> Create a database webhook in Supabase that listens for DELETE events on the <code>runs</code> table and triggers an Edge Function to delete the Cloudinary resources. (Option 1 is simpler and recommended for now).</li>
+    </ul>
+
+    <h2>4. Implementation Steps</h2>
+    <ol>
+        <li><strong>Account Setup:</strong> Create a free Cloudinary account and get the <code>CLOUD_NAME</code>, <code>API_KEY</code>, and <code>API_SECRET</code>. Add these to the <code>.env</code> file.</li>
+        <li><strong>Install SDK:</strong> Run <code>pnpm add cloudinary</code> in the worker and api packages.</li>
+        <li><strong>Create Cloudinary Helper:</strong> Create <code>lib/cloudinaryStorage.ts</code> containing the upload and delete logic.</li>
+        <li><strong>Update Workers & API:</strong> Modify <code>captureScreenshotJob</code>, <code>captureMultiviewScreenshotsJob</code>, and routes to use the new uploader and pass the <code>run_id</code> as a tag.</li>
+        <li><strong>Update Delete Logic:</strong> Modify the Run deletion logic in the API to call the Cloudinary deletion helper using the tag.</li>
+    </ol>
+
+    <h2>5. Example Code Sneak Peek</h2>
+    <pre><code>// lib/cloudinaryStorage.ts
+import { v2 as cloudinary } from 'cloudinary';
+
+cloudinary.config({ 
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
+  api_key: process.env.CLOUDINARY_API_KEY, 
+  api_secret: process.env.CLOUDINARY_API_SECRET 
+});
+
+export async function uploadToCloudinary(buffer: Buffer, runId: string) {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { tags: [\`run_\${runId}\`], folder: 'qa-command-center' },
+      (error, result) => {
+        if (result) resolve(result.secure_url);
+        else reject(error);
+      }
+    );
+    uploadStream.end(buffer);
+  });
+}
+
+export async function deleteRunImages(runId: string) {
+  // Deletes all images tagged with this run ID instantly
+  await cloudinary.api.delete_resources_by_tag(\`run_\${runId}\`);
+}
+</code></pre>
+</body>
+</html>

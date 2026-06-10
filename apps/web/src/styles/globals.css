@@ -1,0 +1,191 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    outline: none !important;
+  }
+  html,
+  body {
+    @apply transition-colors duration-300 ease-in-out;
+  }
+  body {
+    @apply text-slate-900 bg-bg-main font-sans dark:bg-slate-900 dark:text-slate-100;
+  }
+}
+
+@layer components {
+  .btn-unified {
+    display: inline-block;
+    outline: 0;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    border-radius: 4px;
+    font-size: 13px;
+    height: 30px;
+    background-color: #000000;
+    color: white;
+    padding: 0 10px;
+    transition: background-color 0.2s;
+    position: relative;
+    z-index: 1;
+    overflow: hidden;
+  }
+
+  .btn-unified::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 250%;
+    height: 250%;
+    background: conic-gradient(
+      transparent 0deg,
+      transparent 178deg,
+      #39ff14 250deg,
+      transparent 360deg
+    );
+    animation: btn-border-spin 8s linear infinite;
+    z-index: -1;
+    pointer-events: none;
+  }
+
+  .btn-unified::after {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    background-color: inherit;
+    border-radius: inherit;
+    z-index: -1;
+    pointer-events: none;
+  }
+
+  .btn-unified:not(:disabled):hover {
+    background-color: #93c0b1;
+  }
+
+  .btn-unified-secondary {
+    display: inline-block;
+    outline: 0;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    border-radius: 4px;
+    font-size: 13px;
+    height: 30px;
+    background-color: #f1f1f1;
+    color: #000000;
+    padding: 0 10px;
+    transition: background-color 0.2s;
+  }
+
+  .btn-unified:not(:disabled):hover {
+    background-color: #93c0b1;
+  }
+
+  .btn-unified-danger {
+    display: inline-block;
+    outline: 0;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    border-radius: 4px;
+    font-size: 13px;
+    height: 30px;
+    background-color: #ff4747;
+    color: white;
+    padding: 0 10px;
+    transition: background-color 0.2s;
+  }
+
+  .btn-unified-danger:hover {
+    background-color: #cc0000;
+  }
+}
+
+/* Global Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #93c0b1;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #7da89a;
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #93c0b1 transparent;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  @apply bg-gradient-to-r from-transparent via-white/50 to-transparent dark:via-slate-700/50;
+  background-size: 200% 100%;
+  animation: shimmer 2s infinite linear;
+}
+
+.skeleton-base {
+  @apply bg-slate-200 dark:bg-slate-800 rounded relative overflow-hidden;
+}
+
+.skeleton-base::after {
+  content: "";
+  @apply absolute inset-0 animate-shimmer;
+}
+
+@keyframes btn-border-spin {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+@keyframes gemini-glow-motion {
+  0% {
+    transform: translate(-50%, -50%) scale(1) rotate(0deg);
+    border-radius: 50% 50% 50% 50%;
+    opacity: 0.85;
+  }
+  33% {
+    transform: translate(-30%, -70%) scale(1.25) rotate(120deg);
+    border-radius: 30% 70% 70% 30% / 30% 30% 70% 70%;
+    opacity: 1;
+  }
+  66% {
+    transform: translate(-70%, -30%) scale(0.75) rotate(240deg);
+    border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
+    opacity: 0.8;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1) rotate(360deg);
+    border-radius: 50% 50% 50% 50%;
+    opacity: 0.85;
+  }
+}
+
+.animate-gemini-glow {
+  animation: gemini-glow-motion 12s ease-in-out infinite;
+}

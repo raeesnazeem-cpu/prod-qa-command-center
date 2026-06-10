@@ -1,0 +1,21 @@
+.git
+node_modules
+.pnpm-store
+# Include lockfile for builds
+!pnpm-lock.yaml
+# Ignore local env files
+.env
+.env.*
+apps/*/.env
+apps/*/.env.*
+packages/*/.env
+packages/*/.env.*
+# Ignore build outputs
+dist
+build
+.next
+out
+apps/*/dist
+apps/*/build
+packages/*/dist
+packages/*/build

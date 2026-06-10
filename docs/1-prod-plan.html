@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Production Deployment Plan - Plan B</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --secondary: #f8fafc;
+            --text-dark: #1e293b;
+            --text-light: #64748b;
+            --border: #e2e8f0;
+            --success: #10b981;
+            --warning: #f59e0b;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f1f5f9;
+            color: var(--text-dark);
+            line-height: 1.7;
+            padding: 40px 20px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .header-box {
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            color: white;
+            padding: 40px;
+            border-radius: 12px;
+            text-align: center;
+            margin-bottom: 40px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        .header-box h1 {
+            margin: 0 0 15px 0;
+            font-size: 2.2rem;
+            color: #38bdf8;
+        }
+
+        .header-box p {
+            margin: 0;
+            font-size: 1.1rem;
+            color: #cbd5e1;
+            max-width: 700px;
+            margin: 0 auto;
+        }
+
+        .intro-text {
+            background: white;
+            padding: 25px;
+            border-radius: 8px;
+            border-left: 5px solid var(--primary);
+            margin-bottom: 30px;
+            font-size: 1.1rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .step-card {
+            background-color: white;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+            position: relative;
+        }
+
+        .step-number {
+            background-color: var(--primary);
+            color: white;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            font-weight: bold;
+            border-radius: 50%;
+            position: absolute;
+            top: -20px;
+            left: -20px;
+            box-shadow: 0 4px 6px rgba(37, 99, 235, 0.3);
+        }
+
+        .step-title {
+            font-size: 1.5rem;
+            color: var(--primary);
+            margin-top: 0;
+            margin-bottom: 15px;
+            border-bottom: 2px solid var(--secondary);
+            padding-bottom: 10px;
+        }
+
+        .code-block {
+            background-color: #0f172a;
+            color: #38bdf8;
+            font-family: 'Courier New', Courier, monospace;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 15px 0;
+            font-size: 0.95rem;
+        }
+
+        .note-box {
+            background-color: #fffbeb;
+            border-left: 4px solid var(--warning);
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 0 6px 6px 0;
+            color: #92400e;
+        }
+
+        .success-box {
+            background-color: #ecfdf5;
+            border-left: 4px solid var(--success);
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 0 6px 6px 0;
+            color: #065f46;
+        }
+
+        ul {
+            padding-left: 20px;
+        }
+
+        li {
+            margin-bottom: 10px;
+        }
+
+        .highlight {
+            font-weight: 600;
+            color: #ef4444;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header-box">
+        <h1>Plan B: Production Deployment Guide</h1>
+        <p>A step-by-step granular guide to push your React/Node app to a live Contabo Server using Dokploy (or aaPanel).</p>
+    </div>
+
+    <div class="intro-text">
+        <strong>Hello brother!</strong> Since you are coming from a basic HTML/CSS background, don't worry at all. I have broken down the entire complex backend deployment into very simple, copy-paste steps. <br><br>
+        Basically, what we are doing is shifting our code from <i>localhost</i> to a live internet server so everyone can use it. We will use a <strong>Contabo VPS</strong> (which is like a blank computer kept in Germany/US) and we will install a Control Panel called <strong>Dokploy</strong> on it. This panel will give us a very nice UI, so we don't have to deal with scary black screens too much! Let's start.
+    </div>
+
+    <div class="header-box" style="background: linear-gradient(135deg, #0f766e 0%, #064e3b 100%); margin-top: 40px; padding: 30px;">
+        <h2 style="color: #5eead4; margin-top: 0; font-size: 2rem;">Phase 0: Granular Level Preparation (Very Important)</h2>
+        <p style="color: #ccfbf1;">Before we even touch the Contabo server, we need to gather all our API keys and setup our 3rd party accounts. Open a simple Notepad on your laptop and copy-paste these keys as we generate them.</p>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number" style="background-color: #0f766e;">A</div>
+        <h2 class="step-title" style="color: #0f766e;">Clerk (Login & Signup System)</h2>
+        <p>We use Clerk so we don't have to code the login/password security ourselves. It handles all the headache of sessions and tokens.</p>
+        <ul>
+            <li>Log in to your existing <strong>clerk.com</strong> account where the <code>QA Command Center</code> application is currently set up.</li>
+            <li>Go to the API Keys section for your application.</li>
+            <li>Copy the <strong>Live</strong> <code>NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY</code> and the <code>CLERK_SECRET_KEY</code>. Paste them in your Notepad.</li>
+            <li><strong>Crucial Note:</strong> Once your app is live on a real domain (like <i>yourwebsite.com</i>), you MUST come back to Clerk, go to <strong>"Domains"</strong>, and add your new live production domain. This tells Clerk to accept logins from your actual website instead of just localhost.</li>
+            <li>Make sure to update any Redirect URLs in Clerk settings to point to your new production domain.</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number" style="background-color: #0f766e;">B</div>
+        <h2 class="step-title" style="color: #0f766e;">Supabase (Your Database)</h2>
+        <p>This is where all the scan results, projects, and user data are stored forever. It's basically a free online PostgreSQL database.</p>
+        <ul>
+            <li>Log in to your existing <strong>supabase.com</strong> account and open your current <code>qa-command-db</code> project.</li>
+            <li>Since we are migrating to production, we will continue using this existing database to keep all your current data intact.</li>
+            <li>Go to the <strong>Settings (Gear icon at the bottom left) -> API</strong> section.</li>
+            <li>Copy the <strong>Project URL</strong> and the <strong>anon public key</strong>. Put them in your Notepad.</li>
+            <li>Next, go to <strong>Settings -> Database</strong>. Scroll down to "Connection String (URI)" and copy the string.</li>
+            <li>Replace the password placeholder with your actual existing database password. Put this final connection string in your Notepad.</li>
+            <li>If you need to make any production-specific schema changes, run your existing migrations against this database.</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number" style="background-color: #0f766e;">C</div>
+        <h2 class="step-title" style="color: #0f766e;">Upstash Redis (The Task Queue)</h2>
+        <p>When someone clicks "Scan", we can't do it instantly if 100 people click at the same time. We need a Queue (a waiting line). Redis acts like a super-fast manager handling this waiting line.</p>
+        <ul>
+            <li>Log in to your existing <strong>upstash.com</strong> account and open your current <code>qa-queue</code> database.</li>
+            <li>We will reuse this existing Redis queue for production as well.</li>
+            <li>Scroll down to the REST API section and find the <strong>UPSTASH_REDIS_REST_URL</strong> and <strong>UPSTASH_REDIS_REST_TOKEN</strong>.</li>
+            <li>Copy and put them in your Notepad.</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number" style="background-color: #0f766e;">D</div>
+        <h2 class="step-title" style="color: #0f766e;">Google Cloud Platform (GCP - For Video Recording)</h2>
+        <p>Our background worker uses Google Cloud Run to open a fake browser, record the video, and save it to Google Cloud Storage. We need permission keys for this.</p>
+        <ul>
+            <li>Go to <strong>console.cloud.google.com</strong> and select your existing <code>qa-video-recorder</code> project.</li>
+            <li>Since everything is already set up, we just need to retrieve your credentials.</li>
+            <li>If you already have your <code>GCP_SERVICE_ACCOUNT_JSON</code> saved locally, simply copy it to your Notepad.</li>
+            <li>If you lost it: go to <strong>IAM & Admin -> Service Accounts</strong>, click your existing `video-bot` service account, go to the <strong>Keys</strong> tab, click "Add Key" -> "Create new key" -> Choose <strong>JSON</strong>.</li>
+            <li>Open the downloaded JSON file, copy all the text inside, and put it in your Notepad. This block is your <code>GCP_SERVICE_ACCOUNT_JSON</code>.</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number" style="background-color: #0f766e;">E</div>
+        <h2 class="step-title" style="color: #0f766e;">Preparing the Final Environment Variables (.env)</h2>
+        <p>Now, combine all the things from your Notepad into your final `.env` file structure. This text block is EXACTLY what you will copy-paste into Dokploy later for both the Web and the Worker apps.</p>
+        <div class="code-block">
+# 1. Clerk Auth Keys
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="pk_live_..."
+CLERK_SECRET_KEY="sk_live_..."
+
+# 2. Supabase DB Keys
+NEXT_PUBLIC_SUPABASE_URL="https://xyz.supabase.co"
+NEXT_PUBLIC_SUPABASE_ANON_KEY="eyJhbG..."
+DATABASE_URL="postgresql://postgres.[xyz]:[password]@aws-0.../postgres"
+
+# 3. Upstash Redis Queue
+UPSTASH_REDIS_REST_URL="https://...upstash.io"
+UPSTASH_REDIS_REST_TOKEN="AYZ..."
+
+# 4. Google Cloud (Paste the exact full JSON string inside single quotes)
+GCP_PROJECT_ID="qa-video-recorder-123"
+GCP_SERVICE_ACCOUNT_JSON='{ "type": "service_account", "project_id": "..." }'
+
+# 5. Basecamp (If you are using the Basecamp integration)
+BASECAMP_CLIENT_ID="..."
+BASECAMP_CLIENT_SECRET="..."
+        </div>
+        <div class="success-box">
+            <strong>Excellent!</strong> Now that your Notepad is ready with all the live production keys, we can move on to actually buying the server.
+        </div>
+    </div>
+
+    <div class="header-box" style="margin-top: 50px;">
+        <h2 style="margin: 0 0 15px 0; font-size: 2rem; color: #38bdf8;">Phase 1: Server Setup & Deployment</h2>
+        <p>Now we will put the code on the Contabo server using Dokploy.</p>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number">1</div>
+        <h2 class="step-title">Purchasing the Contabo Server (VPS)</h2>
+        <p>First of all, we need to rent the computer.</p>
+        <ul>
+            <li>Go to <strong>Contabo.com</strong> and go to the "Cloud VPS" section.</li>
+            <li>Select the basic "VPS 1" or "VPS 2" plan. It is very cheap and has plenty of RAM (6GB/8GB) for our background worker and web app.</li>
+            <li><strong>Most Important:</strong> During checkout, it will ask for the "Operating System" (OS). You MUST select <strong>Ubuntu 22.04</strong> or <strong>Ubuntu 24.04</strong>. Please do not select Windows.</li>
+            <li>Make the payment. Within a few hours, Contabo will send you a welcome email.</li>
+            <li>In that email, you will get an <strong>IP Address</strong> (something like <i>123.45.67.89</i>) and a <strong>Root Password</strong>. Keep this safe!</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number">2</div>
+        <h2 class="step-title">Connecting to your Server (SSH)</h2>
+        <p>Now we need to login to that blank Contabo computer from your Mac.</p>
+        <ul>
+            <li>Open the <strong>Terminal</strong> app on your Mac.</li>
+            <li>Type the following command (replace with your actual IP from the email):</li>
+        </ul>
+        <div class="code-block">ssh root@123.45.67.89</div>
+        <ul>
+            <li>It will show a message asking <i>"Are you sure you want to continue connecting?"</i>. Type <code>yes</code> and press Enter.</li>
+            <li>Then it will ask for the password. <strong>Note:</strong> When you type the password, the screen will NOT show any stars or dots. It will look like nothing is typing. Just type it carefully and press Enter.</li>
+            <li>Congratulations! You are now inside your Contabo server.</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number">3</div>
+        <h2 class="step-title">Installing the Control Panel (Dokploy)</h2>
+        <p>You mentioned "aa panel on dokploy". Both are control panels, but for React/Node.js apps, <strong>Dokploy</strong> is currently the absolute best. It works exactly like Vercel but on your own cheap server. If you strictly want aaPanel, that is also fine, but Dokploy is highly recommended here for zero-headache React hosting.</p>
+        <p>To install Dokploy, simply copy and paste this one single magic command in your terminal and press Enter:</p>
+        <div class="code-block">curl -sSL https://dokploy.com/install.sh | sh</div>
+        
+        <div class="note-box">
+            <strong>Now, go drink a cup of chai ☕.</strong> This will automatically download and install everything needed (Docker, Nginx, etc.). It takes about 5 to 10 minutes.
+        </div>
+        <ul>
+            <li>Once it finishes, it will give you a link in the terminal. It will look like this: <code>http://123.45.67.89:3000</code></li>
+            <li>Open that link in your Chrome browser.</li>
+            <li>It will ask you to create an Admin Username and Password. Set it up. Now you have a beautiful dashboard!</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number">4</div>
+        <h2 class="step-title">Connecting your GitHub</h2>
+        <p>Your code is currently on your local Mac. Dokploy needs to fetch it.</p>
+        <ul>
+            <li>Make sure you have pushed all your latest code to a private repository on GitHub.</li>
+            <li>Inside your new Dokploy browser dashboard, go to <strong>Settings</strong> -> <strong>GitHub</strong>.</li>
+            <li>Click "Connect GitHub". This will allow your server to securely download your code without needing passwords every time.</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number">5</div>
+        <h2 class="step-title">Deploying the Frontend (Web App)</h2>
+        <p>Now we will make the actual React website live.</p>
+        <ul>
+            <li>In Dokploy, click on <strong>Create Application</strong> (or Project).</li>
+            <li>Name it: <code>qa-command-web</code></li>
+            <li>Source: Select your GitHub repository.</li>
+            <li><strong>Build Command:</strong> Since it is a monorepo, you need to tell it how to build the web part. Type:<br>
+            <div class="code-block">pnpm install && pnpm build:web</div></li>
+            <li><strong>Start Command:</strong> How to turn it on.<br>
+            <div class="code-block">pnpm start:web</div></li>
+            <li><strong>Environment Variables:</strong> Open your local <code>.env</code> or <code>.env.local</code> file on your Mac. Copy all the text inside it, and paste it into the Environment Variables section in Dokploy.</li>
+            <li>Click <strong>Deploy</strong>. Dokploy will now install everything, build the React app, and make it live!</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number">6</div>
+        <h2 class="step-title">Deploying the Background Worker</h2>
+        <p>Our app has two parts. The website, and the invisible background worker that checks the AI videos and tasks. We need to run that too.</p>
+        <ul>
+            <li>Go back to the Dokploy dashboard and click <strong>Create Application</strong> again.</li>
+            <li>Name it: <code>qa-command-worker</code></li>
+            <li>Source: Select the exact same GitHub repository.</li>
+            <li><strong>Build Command:</strong><br>
+            <div class="code-block">pnpm install && pnpm build:worker</div></li>
+            <li><strong>Start Command:</strong><br>
+            <div class="code-block">pnpm start:worker</div></li>
+            <li><strong>Environment Variables:</strong> Paste the exact same <code>.env</code> file contents here too. <i>(Make sure your Upstash Redis and Supabase URLs are correct here, because the worker needs the database!)</i></li>
+            <li>Click <strong>Deploy</strong>. Now your worker is running 24x7 in the background doing its job!</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number">7</div>
+        <h2 class="step-title">External Cloud Services Check</h2>
+        <p>Just to remind you, to keep things simple and cheap, we are not hosting the heavy Database on Contabo. We are using external free tiers.</p>
+        <ul>
+            <li><strong>Supabase (Database):</strong> All your user data and rows are stored here. Double check that the Supabase keys are present in your Dokploy Environment variables.</li>
+            <li><strong>Upstash Redis (Queue):</strong> The worker uses this to line up tasks. Double check the Redis URL is correct.</li>
+            <li><strong>Google Cloud (GCP):</strong> For the video recording part, we are using GCP Cloud Run. Make sure the GCP Service Account keys (JSON format) are properly pasted into the Environment Variables so the worker can talk to Google.</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number">8</div>
+        <h2 class="step-title">Attaching your Domain Name (yourwebsite.com)</h2>
+        <p>Finally, we don't want users to type <code>123.45.67.89</code> in the browser. We want them to type your actual domain name.</p>
+        <ul>
+            <li>Go to GoDaddy, Namecheap, or wherever you bought your domain.</li>
+            <li>Find the <strong>DNS Management</strong> or DNS Settings page.</li>
+            <li>Add a new Record:
+                <ul>
+                    <li>Type: <strong>A Record</strong></li>
+                    <li>Name/Host: <strong>@</strong></li>
+                    <li>Value/Points to: <strong>Your Contabo IP (123.45.67.89)</strong></li>
+                </ul>
+            </li>
+            <li>Save it. (It might take 10-30 mins to update globally).</li>
+            <li>Now, go back to Dokploy -> Open your <code>qa-command-web</code> app -> Go to the <strong>Domains</strong> tab.</li>
+            <li>Type your domain (e.g., <code>yourwebsite.com</code>) and click Add.</li>
+            <li>Dokploy will automatically generate a free SSL (the green padlock for HTTPS) for you!</li>
+        </ul>
+    </div>
+
+    <div class="success-box">
+        <strong>🎉 You are Live!</strong> <br>
+        That's it! The best part about this setup is that next time you make a change in your code on your Mac, you just do a normal <code>git push</code>. Dokploy will detect the change, automatically pull the new code, rebuild it, and restart your server without zero downtime. Very smooth!
+    </div>
+
+    <div class="header-box" style="margin-top: 60px; background: linear-gradient(135deg, #1e3a8a 0%, #172554 100%);">
+        <h2 style="margin: 0 0 15px 0; font-size: 2rem; color: #93c5fd;">Option B: The Hybrid Master Setup (Render + Hetzner + Dokploy)</h2>
+        <p style="color: #bfdbfe;">This is the absolute best way to host our app. We put the Website on a free global network (Render), and our heavy background Worker on a cheap, powerful European server (Hetzner).</p>
+    </div>
+
+    <div class="step-card" style="border-left: 4px solid #3b82f6;">
+        <h2 class="step-title" style="color: #1d4ed8; border-bottom: none;">Why this Hybrid approach?</h2>
+        <p>Instead of cramming everything onto one server, we split the work. It is very smart and saves money.</p>
+        <ul>
+            <li><strong>Frontend on Render.com (Cost: $0):</strong> Render gives us "Static Site" hosting for free. Because React/Vite websites are just plain HTML/JS/CSS files, Render hosts them on super-fast global servers. It <strong>never sleeps</strong>, it <strong>never slows down</strong>, and it loads instantly for everyone everywhere.</li>
+            <li><strong>Backend Worker on Hetzner + Dokploy (Cost: ~$6/mo):</strong> The background worker is heavy. It talks to Google, runs AI, and manages queues. We buy a very cheap but very powerful "ARM64" server from Hetzner just for this. We install Dokploy on it so we get a beautiful dashboard (like Vercel) instead of dealing with scary black Linux screens.</li>
+        </ul>
+        
+        <h3 style="color: #1e40af; margin-top: 20px;">Total Monthly Bill</h3>
+        <ul style="list-style-type: none; padding-left: 0;">
+            <li style="padding: 10px; background: #f8fafc; border-radius: 6px; margin-bottom: 8px;"><strong>Render Frontend:</strong> $0.00</li>
+            <li style="padding: 10px; background: #f8fafc; border-radius: 6px; margin-bottom: 8px;"><strong>Hetzner Server (2 CPU, 4GB RAM):</strong> ~$4.50</li>
+            <li style="padding: 10px; background: #f8fafc; border-radius: 6px; margin-bottom: 8px;"><strong>Hetzner IPv4 Address (Required):</strong> ~$1.50</li>
+            <li style="padding: 10px; background: #f8fafc; border-radius: 6px; margin-bottom: 8px;"><strong>Dokploy Panel:</strong> $0.00</li>
+            <li style="padding: 12px; background: #eff6ff; border-radius: 6px; border-left: 3px solid #3b82f6; font-weight: bold; color: #1e40af; margin-top: 10px;">Total Hosting Cost: ~$6.00 / month</li>
+        </ul>
+        <p style="font-size: 0.9em; color: #64748b;"><em>Note: You can run this for 5 days of testing and then delete the Hetzner server. You will only pay for the 5 days (about $1.00)!</em></p>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number" style="background-color: #3b82f6;">1</div>
+        <h2 class="step-title" style="color: #2563eb;">Deploying the Frontend on Render.com (Free & Fast)</h2>
+        <p>Let's make the actual website live first.</p>
+        <ul>
+            <li>Make sure your code is pushed to your GitHub.</li>
+            <li>Go to <strong>Render.com</strong> and sign up using your GitHub account.</li>
+            <li>Click the <strong>New +</strong> button at the top right and select <strong>Static Site</strong>.</li>
+            <li>Select your <code>qa-command-center</code> GitHub repository.</li>
+            <li><strong>Name:</strong> <code>qa-command-web</code></li>
+            <li><strong>Build Command:</strong> Type exactly this: <br><div class="code-block">pnpm install && pnpm build:web</div></li>
+            <li><strong>Publish Directory:</strong> Type exactly this: <br><div class="code-block">apps/web/dist</div></li>
+            <li>Scroll down and click <strong>Advanced</strong> -> <strong>Add Environment Variable</strong>.</li>
+            <li>Paste your <code>VITE_CLERK_PUBLISHABLE_KEY</code> and any other <code>VITE_</code> variables from your <code>.env</code> file here.</li>
+            <li>Click <strong>Create Static Site</strong>.</li>
+        </ul>
+        <div class="success-box" style="border-left-color: #3b82f6; color: #1e40af; background-color: #eff6ff;">
+            In 2 minutes, Render will give you a live URL (like <code>qa-command-web.onrender.com</code>). Your website is now live globally and will never go to sleep!
+        </div>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number" style="background-color: #3b82f6;">2</div>
+        <h2 class="step-title" style="color: #2563eb;">Buying the Hetzner Server (For Backend)</h2>
+        <p>Now we need a strong computer just to run the background tasks.</p>
+        <ul>
+            <li>Go to <strong>Hetzner.com</strong> and sign up. (They are a strict German company and might ask for an ID photo to verify you aren't a spammer. This is normal because their servers are very cheap and high quality).</li>
+            <li>Go to their <strong>Cloud Console</strong> and create a New Project.</li>
+            <li>Click <strong>Add Server</strong>.</li>
+            <li><strong>Location:</strong> Choose whatever is closest to your team (e.g., Falkenstein, Germany or Singapore if available).</li>
+            <li><strong>OS Image:</strong> Select <strong>Ubuntu 22.04</strong>. (Do not select Windows).</li>
+            <li><strong>Type:</strong> Switch the tab to <strong>ARM64</strong>. Choose the cheapest <strong>CAX11</strong> plan (2 CPUs, 4GB RAM). It is extremely powerful for Node.js.</li>
+            <li><strong>Networking:</strong> Make sure "Public IPv4" is checked. This costs the extra $1.50 but is 100% required so your team and external APIs can talk to the server without crazy network errors.</li>
+            <li><strong>SSH Keys/Password:</strong> They will email you a root password.</li>
+            <li>Click <strong>Create & Buy now</strong>. You will get an IP address in your email.</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number" style="background-color: #3b82f6;">3</div>
+        <h2 class="step-title" style="color: #2563eb;">Installing Dokploy on Hetzner</h2>
+        <p>We don't want to manage the server manually. We will install Dokploy to give us a visual dashboard.</p>
+        <ul>
+            <li>Open the <strong>Terminal</strong> app on your Mac.</li>
+            <li>Type: <code>ssh root@your-hetzner-ip-address</code> and press Enter. Type `yes` if it asks. Then type the password from the email. (The screen won't show the password as you type it, just type and press enter).</li>
+            <li>You are now inside the Hetzner server! Copy and paste this exact magic command to install Dokploy:</li>
+        </ul>
+        <div class="code-block">curl -sSL https://dokploy.com/install.sh | sh</div>
+        <ul>
+            <li>Go drink some chai ☕. Wait 5 to 10 minutes.</li>
+            <li>When it is done, go to your Chrome browser and type: <code>http://your-hetzner-ip-address:3000</code></li>
+            <li>Create an Admin username and password. You now have a beautiful dashboard!</li>
+        </ul>
+    </div>
+
+    <div class="step-card">
+        <div class="step-number" style="background-color: #3b82f6;">4</div>
+        <h2 class="step-title" style="color: #2563eb;">Deploying the Backend Worker via Dokploy</h2>
+        <p>Finally, let's put our worker code on this server.</p>
+        <ul>
+            <li>In your new Dokploy dashboard, go to <strong>Settings -> GitHub</strong> and connect your account so it has permission to read your private code.</li>
+            <li>Go to Dashboard, click <strong>Create Application</strong>. Name it <code>qa-worker</code>.</li>
+            <li>Source: Select your GitHub repository.</li>
+            <li><strong>Build Command:</strong> Type exactly this:<br>
+            <div class="code-block">pnpm install && pnpm build:worker</div></li>
+            <li><strong>Start Command:</strong> Type exactly this:<br>
+            <div class="code-block">pnpm start:worker</div></li>
+            <li><strong>Environment Variables:</strong> Go to the environment section and paste all your `.env` variables (Clerk keys, Supabase DB string, Redis queue URLs, Google Cloud JSON).</li>
+            <li>Click <strong>Deploy</strong>.</li>
+        </ul>
+        <div class="note-box" style="border-left-color: #3b82f6; background-color: #eff6ff; color: #1e40af;">
+            <strong>That's it!</strong> <br>
+            Your frontend is now live on Render.com for users to visit. When they click "Scan", it goes into the Redis queue. Your heavy backend worker living on the Hetzner server picks it up, processes it using Google Cloud, and saves the result to Supabase. <br><br>
+            If you ever change your code and push to GitHub, Render updates the frontend automatically, and Dokploy updates the backend automatically. Zero stress!
+        </div>
+    </div>
+
+</body>
+</html>
