@@ -454,10 +454,13 @@ export async function deleteTasksBulk(
 /**
  * Delete all tasks for a specific user in a project.
  */
-export async function deleteUserTasksInProject(args: {
-  user_id: string
-  project_id: string
-}) {
+export async function deleteUserTasksInProject(
+  args: {
+    user_id: string
+    project_id: string
+  },
+  performer?: any,
+) {
   const { user_id, project_id } = args
 
   // Get task IDs first for embedding sync

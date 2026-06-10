@@ -357,7 +357,8 @@ router.all(
       })
 
       const contentType =
-        response.headers["content-type"] || "application/octet-stream"
+        (response.headers["content-type"] as string) ||
+        "application/octet-stream"
       let data = response.data
 
       // Only rewrite if it's an HTML page
@@ -376,9 +377,11 @@ router.all(
 
       // Optional: Forward caching headers for performance
       if (response.headers["cache-control"]) {
-        res.setHeader("Cache-Control", response.headers["cache-control"])
+        res.setHeader(
+          "Cache-Control",
+          response.headers["cache-control"] as string,
+        )
       }
-
       return res.send(data)
     } catch (error: any) {
       console.error("[Proxy Error]:", error.message)

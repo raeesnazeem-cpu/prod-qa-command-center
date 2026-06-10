@@ -44,7 +44,6 @@ export const qaQueue = new Queue("qa-jobs", { connection })
  */
 export const qaQueueEvents = new QueueEvents("qa-jobs", {
   connection,
-  stalledInterval: 300000, // 5 minutes
 })
 
 /**
