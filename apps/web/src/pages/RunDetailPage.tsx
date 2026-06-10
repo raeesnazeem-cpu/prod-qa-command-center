@@ -539,7 +539,7 @@ export const RunDetailPage = () => {
         if (
           task.users &&
           !map[task.finding_id].assignedUsers.some(
-            (u) => u.id === task.users.id,
+            (u) => u.email === task.users?.email,
           )
         ) {
           map[task.finding_id].assignedUsers.push(task.users)
