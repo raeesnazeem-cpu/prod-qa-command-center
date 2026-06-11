@@ -5,6 +5,9 @@
     "dev:web": "pnpm --filter web dev",
     "dev:api": "pnpm --filter api dev",
     "dev:worker": "pnpm --filter worker dev",
+    "build:web": "pnpm --filter web build",
+    "build:api": "pnpm --filter api build",
+    "build:worker": "pnpm --filter worker build",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint"
   },
@@ -14,7 +17,9 @@
     "bullmq": "^5.71.1"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["puppeteer"],
+    "onlyBuiltDependencies": [
+      "puppeteer"
+    ],
     "overrides": {
       "ioredis": "^5.3.2"
     }
