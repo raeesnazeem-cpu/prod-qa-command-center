@@ -64,40 +64,40 @@ export const OnboardingPage = () => {
   }
 
   return (
-    <div className="min-h-screen bg-bg-main flex flex-col items-center justify-center p-4 font-sans">
-      <div className="w-full max-w-md bg-slate-50 rounded-md border border-slate-200 shadow-sm p-8">
+    <div className="min-h-screen bg-[#131d22] flex flex-col items-center justify-center p-4 font-sans">
+      <div className="w-full max-w-md bg-[#1d2a31] rounded-md border border-[#1d2a31] shadow-xl p-8">
         <div className="mb-8 text-center">
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
+          <h1 className="text-2xl font-bold text-white tracking-tight">
             Complete your profile
           </h1>
-          <p className="text-slate-500 mt-2 text-sm">
+          <p className="text-slate-400 mt-2 text-sm">
             Tell us a bit more about yourself to get started.
           </p>
         </div>
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
           <div className="space-y-2">
-            <label className="text-sm font-semibold text-slate-700 uppercase tracking-wider">
+            <label className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
               Full Name
             </label>
             <input
               {...register("fullName")}
-              className={`w-full px-4 h-[44px] rounded-md border text-slate-900 focus:outline-none focus:ring-2 focus:ring-accent/20 transition-all ${
+              className={`w-full px-4 h-[44px] rounded-md border bg-[#131d22] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-accent/20 transition-all ${
                 errors.fullName
-                  ? "border-red-500 bg-red-50"
-                  : "border-slate-200 focus:border-accent"
+                  ? "border-red-500 bg-red-900/20"
+                  : "border-slate-600/50 focus:border-accent"
               }`}
               placeholder="Enter your full name"
             />
             {errors.fullName && (
-              <p className="text-xs font-medium text-red-500 mt-1">
+              <p className="text-xs font-medium text-red-400 mt-1">
                 {errors.fullName.message}
               </p>
             )}
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-semibold text-slate-700 uppercase tracking-wider">
+            <label className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
               Your Role
             </label>
             <div className="grid grid-cols-2 gap-4">
@@ -108,7 +108,7 @@ export const OnboardingPage = () => {
                   {...register("role")}
                   className="hidden peer"
                 />
-                <div className="w-full flex items-center justify-center h-8 rounded-md border border-slate-200 bg-slate-50 text-slate-500 font-bold text-xs uppercase tracking-wider hover:bg-slate-50 hover:text-slate-700 transition-all shadow-sm peer-checked:bg-accent peer-checked:text-white peer-checked:border-accent peer-checked:shadow-[0_0_10px_rgba(var(--accent-rgb),0.2)]">
+                <div className="w-full flex items-center justify-center h-8 rounded-md border border-slate-600/50 bg-[#131d22] text-slate-400 font-bold text-xs uppercase tracking-wider hover:bg-[#131d22]/80 hover:border-slate-500 hover:text-slate-200 transition-all shadow-sm peer-checked:bg-accent peer-checked:text-white peer-checked:border-accent peer-checked:shadow-[0_0_10px_rgba(var(--accent-rgb),0.2)]">
                   Developer
                 </div>
               </label>
@@ -120,13 +120,13 @@ export const OnboardingPage = () => {
                   {...register("role")}
                   className="hidden peer"
                 />
-                <div className="w-full flex items-center justify-center h-8 rounded-md border border-slate-200 bg-slate-50 text-slate-500 font-bold text-xs uppercase tracking-wider hover:bg-slate-50 hover:text-slate-700 transition-all shadow-sm peer-checked:bg-accent peer-checked:text-white peer-checked:border-accent peer-checked:shadow-[0_0_10px_rgba(var(--accent-rgb),0.2)]">
+                <div className="w-full flex items-center justify-center h-8 rounded-md border border-slate-600/50 bg-[#131d22] text-slate-400 font-bold text-xs uppercase tracking-wider hover:bg-[#131d22]/80 hover:border-slate-500 hover:text-slate-200 transition-all shadow-sm peer-checked:bg-accent peer-checked:text-white peer-checked:border-accent peer-checked:shadow-[0_0_10px_rgba(var(--accent-rgb),0.2)]">
                   QA
                 </div>
               </label>
             </div>
             {errors.role && (
-              <p className="text-xs font-medium text-red-500 mt-1">
+              <p className="text-xs font-medium text-red-400 mt-1">
                 {errors.role.message}
               </p>
             )}
@@ -134,32 +134,32 @@ export const OnboardingPage = () => {
 
           <div className="space-y-2">
             <div className="flex justify-between items-center">
-              <label className="text-sm font-semibold text-slate-700 uppercase tracking-wider">
+              <label className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
                 Basecamp ID
               </label>
-              <span className="text-xs text-slate-400 font-medium lowercase">
+              <span className="text-xs text-slate-500 font-medium lowercase">
                 optional
               </span>
             </div>
             <input
               {...register("basecampId")}
-              className="w-full px-4 h-[44px] rounded-md border border-slate-200 text-slate-900 focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-all"
+              className="w-full px-4 h-[44px] rounded-md border border-slate-600/50 bg-[#131d22] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-all"
               placeholder="e.g. 12345678"
             />
           </div>
 
           <div className="space-y-2">
             <div className="flex justify-between items-center">
-              <label className="text-sm font-semibold text-slate-700 uppercase tracking-wider">
+              <label className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
                 Google Chat ID
               </label>
-              <span className="text-xs text-slate-400 font-medium lowercase">
+              <span className="text-xs text-slate-500 font-medium lowercase">
                 optional
               </span>
             </div>
             <input
               {...register("googleChatId")}
-              className="w-full px-4 h-[44px] rounded-md border border-slate-200 text-slate-900 focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-all"
+              className="w-full px-4 h-[44px] rounded-md border border-slate-600/50 bg-[#131d22] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-all"
               placeholder="e.g. 1029384756"
             />
           </div>
