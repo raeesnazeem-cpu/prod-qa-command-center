@@ -194,3 +194,8 @@ docs/*
 
 #backup files
 apps/web/src/components/FindingCardBackup.tsx
+
+# Dockerfile recordings
+*.recordings
+Dockerfile.recordings
+dockefile.recordings
