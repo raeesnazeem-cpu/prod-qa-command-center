@@ -33,6 +33,14 @@ export const SettingsPage = () => {
     fetchProfile()
   }, [axios])
 
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search)
+    if (urlParams.get("basecamp") === "connected") {
+      toast.success("Successfully connected to Basecamp!")
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
+  }, [])
+
   const handleSaveGoogle = async () => {
     if (!googleChatUserId.trim()) {
       toast.error("Google Chat ID cannot be empty")
@@ -102,6 +110,11 @@ export const SettingsPage = () => {
           value: basecampId,
           type: "input",
           placeholder: "Enter your Basecamp ID",
+        },
+        {
+          label: "Basecamp Integration",
+          value: "",
+          type: "oauth",
         },
       ],
     },
@@ -228,6 +241,17 @@ export const SettingsPage = () => {
                         {item.value as string}
                       </span>
                     )}
+                    {item.type === "oauth" && (
+                      <button
+                        onClick={() =>
+                          (window.location.href = `${import.meta.env.VITE_API_URL || "http://localhost:3001"}/api/basecamp/user-auth`)
+                        }
+                        className="bg-[#F5D88D] text-black hover:bg-[#E5C87D] border border-[#D4A643] font-bold text-xs py-1.5 px-4 rounded shadow-sm transition-all"
+                      >
+                        Connect Personal Basecamp
+                      </button>
+                    )}
+
                     {item.type === "toggle" && (
                       <label className="relative inline-flex items-center cursor-pointer">
                         <input

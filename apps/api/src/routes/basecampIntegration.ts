@@ -19,6 +19,67 @@ import axios from "axios"
 
 const router = Router()
 
+const BASECAMP_CLIENT_ID = process.env.BASECAMP_CLIENT_ID || ""
+const BASECAMP_CLIENT_SECRET = process.env.BASECAMP_CLIENT_SECRET || ""
+const BASECAMP_REDIRECT_URI =
+  process.env.BASECAMP_REDIRECT_URI ||
+  "http://localhost:3000/api/basecamp/callback"
+
+router.get("/user-auth", clerkAuth, (req: Request, res: Response) => {
+  const state = crypto.randomBytes(16).toString("hex")
+  res.cookie("basecamp_oauth_state", state, {
+    httpOnly: true,
+    maxAge: 1000 * 60 * 10,
+  })
+  const authUrl = `https://launchpad.37signals.com/authorization/new?type=web_server&client_id=${BASECAMP_CLIENT_ID}&redirect_uri=${encodeURIComponent(BASECAMP_REDIRECT_URI)}&state=${state}`
+  return res.redirect(authUrl)
+})
+
+router.get("/callback", clerkAuth, async (req: Request, res: Response) => {
+  const { code, state } = req.query
+  if (!state) {
+    return res.status(400).json({ error: "Invalid state parameter." })
+  }
+
+  try {
+    const tokenResponse = await axios.post(
+      "https://launchpad.37signals.com/authorization/token",
+      null,
+      {
+        params: {
+          type: "web_server",
+          client_id: BASECAMP_CLIENT_ID,
+          redirect_uri: BASECAMP_REDIRECT_URI,
+          client_secret: BASECAMP_CLIENT_SECRET,
+          code,
+        },
+      },
+    )
+    const { access_token, refresh_token, expires_in } = tokenResponse.data
+    await supabase
+      .from("users")
+      .update({
+        basecamp_access_token: access_token,
+        basecamp_refresh_token: refresh_token,
+        basecamp_token_expires_at: new Date(
+          Date.now() + expires_in * 1000,
+        ).toISOString(),
+      })
+      .eq("id", req.auth?.userId)
+
+    res.clearCookie("basecamp_oauth_state")
+    return res.redirect(
+      `${process.env.FRONTEND_URL || "http://localhost:5173"}/settings?basecamp=connected`,
+    )
+  } catch (error: any) {
+    console.error(
+      "Basecamp token error:",
+      error.response?.data || error.message,
+    )
+    return res.status(500).json({ error: "Failed to connect to Basecamp." })
+  }
+})
+
 /**
  * GET /api/basecamp/people
  * Fetch all people from Basecamp for a specific project.
@@ -93,23 +154,33 @@ router.post(
         siblingsQuery.eq("title", task.title)
       }
 
-      const [projectSettings, projectRecordResult, pageResult, siblingsResult] =
-        await Promise.all([
-          getProjectSettings(task.project_id),
-          supabase
-            .from("projects")
-            .select("is_pre_release, is_post_release, name")
-            .eq("id", task.project_id)
-            .single(),
-          task.findings?.page_id
-            ? supabase
-                .from("pages")
-                .select("url")
-                .eq("id", task.findings.page_id)
-                .single()
-            : Promise.resolve({ data: null }),
-          siblingsQuery,
-        ])
+      const [
+        projectSettings,
+        projectRecordResult,
+        pageResult,
+        siblingsResult,
+        currentUserResult,
+      ] = await Promise.all([
+        getProjectSettings(task.project_id),
+        supabase
+          .from("projects")
+          .select("is_pre_release, is_post_release, name")
+          .eq("id", task.project_id)
+          .single(),
+        task.findings?.page_id
+          ? supabase
+              .from("pages")
+              .select("url")
+              .eq("id", task.findings.page_id)
+              .single()
+          : Promise.resolve({ data: null }),
+        siblingsQuery,
+        supabase
+          .from("users")
+          .select("basecamp_access_token, role")
+          .eq("id", req.auth?.userId)
+          .single(),
+      ])
 
       const projectRecord = projectRecordResult.data
       if (projectRecordResult.error || !projectRecord) {
@@ -139,10 +210,27 @@ router.post(
 
       const threadComments = threadCommentsResult.data
       const threadRebuttals = threadRebuttalsResult.data
+      const currentUser = currentUserResult.data
+
+      let activeBasecampToken = currentUser?.basecamp_access_token
+
+      if (!activeBasecampToken) {
+        if (
+          req.auth?.role === "super_admin" ||
+          currentUser?.role === "super_admin"
+        ) {
+          activeBasecampToken = projectSettings?.basecamp_token
+        } else {
+          return res.status(403).json({
+            error:
+              "Please connect your personal Basecamp account to push tasks.",
+          })
+        }
+      }
 
       if (
         !projectSettings ||
-        !projectSettings.basecamp_token ||
+        !activeBasecampToken ||
         !projectSettings.basecamp_account_id ||
         !projectSettings.basecamp_project_id
       ) {
@@ -208,7 +296,7 @@ router.post(
         )
 
         const headers = {
-          Authorization: `Bearer ${projectSettings.basecamp_token}`,
+          Authorization: `Bearer ${activeBasecampToken}`,
           "User-Agent": "QACC (raees.nazeem@growth99.com)",
           "Content-Type": "application/json",
           Accept: "application/json",
@@ -371,7 +459,7 @@ router.post(
         const mentionsList = await Promise.all(
           bpIds.map(async (id: any) => {
             const person = await getBasecampPerson(
-              projectSettings!.basecamp_token!,
+              activeBasecampToken,
               projectSettings!.basecamp_account_id!,
               Number(id),
             )
@@ -525,7 +613,7 @@ Created via QA Command Center`.trim()
       console.log(`[BasecampPush] Calling Basecamp API: Create Comment...`)
 
       const mainCommentResult = await createBasecampComment({
-        token: projectSettings!.basecamp_token,
+        token: activeBasecampToken,
         accountId: projectSettings!.basecamp_account_id,
         projectId: projectSettings!.basecamp_project_id || task.project_id,
         recordingId: todolistId!,
@@ -553,7 +641,7 @@ Created via QA Command Center`.trim()
         Promise.all(
           mergedThread.map((item) =>
             createBasecampComment({
-              token: projectSettings!.basecamp_token!,
+              token: activeBasecampToken,
               accountId: projectSettings!.basecamp_account_id!,
               projectId:
                 projectSettings!.basecamp_project_id || task.project_id,
@@ -592,7 +680,7 @@ Created via QA Command Center`.trim()
         )
         try {
           await deleteBasecampComment({
-            token: projectSettings!.basecamp_token,
+            token: activeBasecampToken,
             accountId: projectSettings!.basecamp_account_id,
             projectId: projectSettings!.basecamp_project_id || task.project_id,
             recordingId: todolistId!,
@@ -812,11 +900,35 @@ router.post(
         return res.status(404).json({ error: "Project not found" })
       }
 
-      const projectSettings = await getProjectSettings(projectId)
+      const [projectSettings, currentUserResult] = await Promise.all([
+        getProjectSettings(projectId),
+        supabase
+          .from("users")
+          .select("basecamp_access_token, role")
+          .eq("id", req.auth?.userId)
+          .single(),
+      ])
+
+      const currentUser = currentUserResult.data
+      let activeBasecampToken = currentUser?.basecamp_access_token
+
+      if (!activeBasecampToken) {
+        if (
+          req.auth?.role === "super_admin" ||
+          currentUser?.role === "super_admin"
+        ) {
+          activeBasecampToken = projectSettings?.basecamp_token
+        } else {
+          return res.status(403).json({
+            error:
+              "Please connect your personal Basecamp account to push tasks.",
+          })
+        }
+      }
 
       console.log(`[BasecampBulkPush] 3/6.5 Project settings retrieved:`, {
         projectId,
-        hasToken: !!projectSettings?.basecamp_token,
+        hasToken: !!activeBasecampToken,
         accountId: projectSettings?.basecamp_account_id,
         basecampProjectId: projectSettings?.basecamp_project_id,
         preReleaseList: projectSettings?.basecamp_todolist_id,
@@ -833,18 +945,19 @@ router.post(
       }
 
       if (
-        !projectSettings.basecamp_token ||
+        !activeBasecampToken ||
         !projectSettings.basecamp_account_id ||
         !projectSettings.basecamp_project_id
       ) {
         console.error(
           `[BasecampBulkPush] Error: Incomplete Basecamp configuration`,
           {
-            hasToken: !!projectSettings.basecamp_token,
+            hasToken: !!activeBasecampToken,
             hasAccount: !!projectSettings.basecamp_account_id,
             hasProject: !!projectSettings.basecamp_project_id,
           },
         )
+
         return res.status(400).json({
           error: "Basecamp integration not configured for this project",
         })
@@ -892,7 +1005,7 @@ router.post(
               : null
             if (bpId) {
               const person = await getBasecampPerson(
-                projectSettings.basecamp_token!,
+                activeBasecampToken,
                 projectSettings.basecamp_account_id!,
                 Number(bpId),
               )
@@ -947,7 +1060,7 @@ router.post(
 
         try {
           await createBasecampComment({
-            token: projectSettings!.basecamp_token,
+            token: activeBasecampToken,
             accountId: projectSettings!.basecamp_account_id,
             projectId: projectSettings!.basecamp_project_id || projectId,
             recordingId: todolistId,
@@ -985,7 +1098,7 @@ router.post(
           for (const item of groupMergedThread) {
             if (!projectSettings) continue
             await createBasecampComment({
-              token: projectSettings!.basecamp_token,
+              token: activeBasecampToken,
               accountId: projectSettings!.basecamp_account_id,
               projectId: projectSettings!.basecamp_project_id || projectId,
               recordingId: todolistId,
@@ -1076,11 +1189,35 @@ router.post(
       }
 
       const projectId = tasks[0].project_id
-      const projectSettings = await getProjectSettings(projectId)
+      const [projectSettings, currentUserResult] = await Promise.all([
+        getProjectSettings(projectId),
+        supabase
+          .from("users")
+          .select("basecamp_access_token, role")
+          .eq("id", req.auth?.userId)
+          .single(),
+      ])
+
+      const currentUser = currentUserResult.data
+      let activeBasecampToken = currentUser?.basecamp_access_token
+
+      if (!activeBasecampToken) {
+        if (
+          req.auth?.role === "super_admin" ||
+          currentUser?.role === "super_admin"
+        ) {
+          activeBasecampToken = projectSettings?.basecamp_token
+        } else {
+          return res.status(403).json({
+            error:
+              "Please connect your personal Basecamp account to push tasks.",
+          })
+        }
+      }
 
       if (
         !projectSettings ||
-        !projectSettings.basecamp_token ||
+        !activeBasecampToken ||
         !projectSettings.basecamp_account_id
       ) {
         return res
@@ -1163,7 +1300,7 @@ router.post(
               : null
             if (bpId) {
               const person = await getBasecampPerson(
-                projectSettings.basecamp_token!,
+                activeBasecampToken,
                 projectSettings.basecamp_account_id!,
                 Number(bpId),
               )
@@ -1223,7 +1360,7 @@ router.post(
 
         try {
           await createBasecampComment({
-            token: projectSettings!.basecamp_token,
+            token: activeBasecampToken,
             accountId: projectSettings!.basecamp_account_id,
             projectId: projectSettings!.basecamp_project_id || projectId,
             recordingId: groupTargetId,
@@ -1246,7 +1383,7 @@ router.post(
           for (const c of sortedComments) {
             if (!projectSettings) continue
             await createBasecampComment({
-              token: projectSettings!.basecamp_token,
+              token: activeBasecampToken,
               accountId: projectSettings!.basecamp_account_id,
               projectId: projectSettings!.basecamp_project_id || projectId,
               recordingId: groupTargetId,
@@ -1322,10 +1459,35 @@ router.post(
       }
 
       // 2. Load project settings
-      const projectSettings = await getProjectSettings(projectId)
+      const [projectSettings, currentUserResult] = await Promise.all([
+        getProjectSettings(projectId),
+        supabase
+          .from("users")
+          .select("basecamp_access_token, role")
+          .eq("id", req.auth?.userId)
+          .single(),
+      ])
+
+      const currentUser = currentUserResult.data
+      let activeBasecampToken = currentUser?.basecamp_access_token
+
+      if (!activeBasecampToken) {
+        if (
+          req.auth?.role === "super_admin" ||
+          currentUser?.role === "super_admin"
+        ) {
+          activeBasecampToken = projectSettings?.basecamp_token
+        } else {
+          return res.status(403).json({
+            error:
+              "Please connect your personal Basecamp account to push tasks.",
+          })
+        }
+      }
+
       if (
         !projectSettings ||
-        !projectSettings.basecamp_token ||
+        !activeBasecampToken ||
         !projectSettings.basecamp_account_id ||
         !projectSettings.basecamp_project_id
       ) {
@@ -1350,7 +1512,7 @@ router.post(
         const mentionsList = await Promise.all(
           bpIds.map(async (id: any) => {
             const person = await getBasecampPerson(
-              projectSettings.basecamp_token!,
+              activeBasecampToken,
               projectSettings.basecamp_account_id!,
               Number(id),
             )
@@ -1425,7 +1587,7 @@ router.post(
 
       // 6. Post to Basecamp
       await createBasecampComment({
-        token: projectSettings.basecamp_token,
+        token: activeBasecampToken,
         accountId: projectSettings.basecamp_account_id,
         projectId: projectSettings.basecamp_project_id,
         recordingId: todolistId,
@@ -1550,8 +1712,33 @@ router.post(
       if (taskError || !task)
         return res.status(404).json({ error: "Task not found" })
 
-      const projectSettings = await getProjectSettings(task.project_id)
-      if (!projectSettings?.basecamp_token) {
+      const [projectSettings, currentUserResult] = await Promise.all([
+        getProjectSettings(task.project_id),
+        supabase
+          .from("users")
+          .select("basecamp_access_token, role")
+          .eq("id", req.auth?.userId)
+          .single(),
+      ])
+
+      const currentUser = currentUserResult.data
+      let activeBasecampToken = currentUser?.basecamp_access_token
+
+      if (!activeBasecampToken) {
+        if (
+          req.auth?.role === "super_admin" ||
+          currentUser?.role === "super_admin"
+        ) {
+          activeBasecampToken = projectSettings?.basecamp_token
+        } else {
+          return res.status(403).json({
+            error:
+              "Please connect your personal Basecamp account to push tasks.",
+          })
+        }
+      }
+
+      if (!activeBasecampToken) {
         return res.status(400).json({ error: "Basecamp not configured" })
       }
 
@@ -1607,7 +1794,7 @@ router.post(
          `.trim()
 
         await createBasecampComment({
-          token: projectSettings.basecamp_token,
+          token: activeBasecampToken,
           accountId: projectSettings.basecamp_account_id!,
           projectId: projectSettings.basecamp_project_id!,
           recordingId: todolistId,
@@ -1646,8 +1833,33 @@ router.post(
       if (taskError || !task)
         return res.status(404).json({ error: "Task not found" })
 
-      const projectSettings = await getProjectSettings(task.project_id)
-      if (!projectSettings?.basecamp_token) {
+      const [projectSettings, currentUserResult] = await Promise.all([
+        getProjectSettings(task.project_id),
+        supabase
+          .from("users")
+          .select("basecamp_access_token, role")
+          .eq("id", req.auth?.userId)
+          .single(),
+      ])
+
+      const currentUser = currentUserResult.data
+      let activeBasecampToken = currentUser?.basecamp_access_token
+
+      if (!activeBasecampToken) {
+        if (
+          req.auth?.role === "super_admin" ||
+          currentUser?.role === "super_admin"
+        ) {
+          activeBasecampToken = projectSettings?.basecamp_token
+        } else {
+          return res.status(403).json({
+            error:
+              "Please connect your personal Basecamp account to push tasks.",
+          })
+        }
+      }
+
+      if (!activeBasecampToken) {
         return res.status(400).json({ error: "Basecamp not configured" })
       }
 
@@ -1703,7 +1915,7 @@ router.post(
             if (u.basecamp_person_id) {
               try {
                 const person = await getBasecampPerson(
-                  projectSettings!.basecamp_token!,
+                  activeBasecampToken,
                   projectSettings!.basecamp_account_id!,
                   Number(u.basecamp_person_id),
                 )
@@ -1740,7 +1952,7 @@ router.post(
          `.trim()
 
         await createBasecampComment({
-          token: projectSettings.basecamp_token,
+          token: activeBasecampToken,
           accountId: projectSettings.basecamp_account_id!,
           projectId: projectSettings.basecamp_project_id!,
           recordingId: todolistId,
