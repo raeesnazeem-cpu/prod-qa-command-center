@@ -42,15 +42,21 @@ export const SettingsPage = () => {
 
     if (urlParams.get("google") === "connected") {
       const googleAccount = user?.externalAccounts?.find(
-        (acc) => acc.provider === "oauth_google",
-      )
-      if (googleAccount?.externalId) {
+        (acc: any) =>
+          acc.provider === "oauth_google" || acc.provider === "google",
+      ) as any
+
+      const googleId =
+        googleAccount?.externalId || googleAccount?.providerUserId
+
+      if (googleId) {
         axios
           .patch("/api/users/notification-prefs", {
-            google_chat_user_id: googleAccount.externalId,
+            google_chat_user_id: googleId,
           })
           .then(() => {
-            setGoogleChatUserId(googleAccount.externalId)
+            setGoogleChatUserId(googleId)
+
             toast.success("Successfully connected to Google Chat!")
           })
           .catch(() => {

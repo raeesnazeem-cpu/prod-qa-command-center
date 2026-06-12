@@ -19,6 +19,7 @@ import {
   User,
   MessageSquare,
   X,
+  Shield,
 } from "lucide-react"
 import { useRole } from "../hooks/useRole"
 import { useEffect, useState } from "react"
