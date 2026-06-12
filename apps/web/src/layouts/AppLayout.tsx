@@ -18,6 +18,7 @@ import {
   Monitor,
   User,
   MessageSquare,
+  X,
 } from "lucide-react"
 import { useRole } from "../hooks/useRole"
 import { useEffect, useState } from "react"
@@ -26,14 +27,19 @@ import { AdminRedisWidget } from "../components/AdminRedisWidget"
 import { useRealtimeTasks } from "../hooks/useRealtimeTasks"
 import { NotificationBell } from "../components/NotificationBell"
 import { useRealtimeNotifications } from "../hooks/useRealtimeNotifications"
-import { todo } from "node:test"
+import { useWorkspaceUsers } from "../hooks/useProjects"
+import { useAppStore } from "../store/appStore"
 
 export const AppLayout = () => {
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const [isImpersonateOpen, setIsImpersonateOpen] = useState(false)
+  const [impersonateSearch, setImpersonateSearch] = useState("")
   const { user } = useUser()
   const { role, profile, isLoading, isAdmin } = useRole()
   const navigate = useNavigate()
   const location = useLocation()
+  const { data: users } = useWorkspaceUsers()
+  const { user: appUser, setUser } = useAppStore()
 
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const isDark =
@@ -200,7 +206,7 @@ export const AppLayout = () => {
       </aside>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col overflow-hidden relative">
+      {/* <div className="flex-1 flex flex-col overflow-hidden relative">
         <header className="h-16 bg-slate-50 dark:bg-[#0B151B] border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-8 shadow-sm z-49">
           <div className="flex items-center space-x-2">
             {!isLoading && role && (
@@ -208,6 +214,136 @@ export const AppLayout = () => {
                 <span className="text-[8px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-widest">
                   {role.replace("_", "-")}
                 </span>
+              </div>
+            )}
+
+            {profile?.role === "super_admin" && users && (
+              <div className="flex items-center space-x-2 ml-4">
+                {appUser?.id && profile?.id && appUser.id !== profile.id && (
+                  <button
+                    onClick={() => setUser(profile)}
+                    className="flex items-center justify-center bg-red-50 text-red-600 dark:bg-red-900/30 dark:text-red-400 border border-red-200 dark:border-red-800 rounded-md p-1 hover:bg-red-100 dark:hover:bg-red-900/50 transition-colors"
+                    title="Stop Impersonating"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                <select
+                  className="text-[10px] bg-slate-100 dark:bg-[#1d2a31] border border-slate-200 dark:border-slate-700 rounded-md px-2 py-1 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-accent"
+                  onChange={(e) => {
+                    const selectedUser = users.find(
+                      (u) => u.id === e.target.value,
+                    )
+                    if (selectedUser) setUser(selectedUser as any)
+                  }}
+                  value={
+                    appUser?.id && profile?.id && appUser.id !== profile.id
+                      ? appUser.id
+                      : ""
+                  }
+                >
+                  <option value="" disabled>
+                    Impersonate...
+                  </option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.full_name || u.email}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div> */}
+      <div className="flex-1 flex flex-col overflow-hidden relative">
+        <header className="h-16 bg-slate-50 dark:bg-[#0B151B] border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-8 shadow-sm z-49">
+          <div className="flex items-center space-x-2">
+            {!isLoading && role && (
+              <div className="relative">
+                <div
+                  onClick={() =>
+                    profile?.role === "super_admin" &&
+                    setIsImpersonateOpen(!isImpersonateOpen)
+                  }
+                  className={`flex items-center space-x-2 px-3 py-1.5 rounded-md bg-slate-100 dark:bg-[#1d2a31] border border-slate-200 dark:border-slate-700 ${profile?.role === "super_admin" ? "cursor-pointer hover:bg-slate-200 dark:hover:bg-[#253640] transition-colors" : ""}`}
+                  title={
+                    profile?.role === "super_admin"
+                      ? "Click to impersonate a user"
+                      : ""
+                  }
+                >
+                  <span className="text-[8px] font-bold text-slate-700 dark:text-slate-200 uppercase tracking-widest">
+                    {role.replace("_", "-")}
+                  </span>
+                </div>
+
+                {profile?.role === "super_admin" &&
+                  isImpersonateOpen &&
+                  users && (
+                    <div className="absolute top-full left-0 mt-2 w-56 bg-white dark:bg-[#0B151B] border border-slate-200 dark:border-slate-800 rounded-md shadow-lg z-50 overflow-hidden flex flex-col">
+                      <div className="p-3 border-b border-slate-100 dark:border-slate-800/50">
+                        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+                          View As
+                        </div>
+                        <input
+                          type="text"
+                          placeholder="Search user..."
+                          value={impersonateSearch}
+                          onChange={(e) => setImpersonateSearch(e.target.value)}
+                          className="w-full text-xs bg-slate-50 dark:bg-[#131D22] border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-accent"
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </div>
+
+                      <div className="overflow-y-auto max-h-[130px]">
+                        {users
+                          .filter((u) =>
+                            (u.full_name || u.email)
+                              .toLowerCase()
+                              .includes(impersonateSearch.toLowerCase()),
+                          )
+                          .map((u) => (
+                            <div
+                              key={u.id}
+                              onClick={() => {
+                                setUser(u as any)
+                                setIsImpersonateOpen(false)
+                                setImpersonateSearch("")
+                              }}
+                              className={`px-3 py-2 text-xs cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors ${appUser?.id === u.id ? "bg-slate-50 dark:bg-slate-800 text-accent font-medium" : "text-slate-600 dark:text-slate-400"}`}
+                            >
+                              {u.full_name || u.email}
+                            </div>
+                          ))}
+                        {users.filter((u) =>
+                          (u.full_name || u.email)
+                            .toLowerCase()
+                            .includes(impersonateSearch.toLowerCase()),
+                        ).length === 0 && (
+                          <div className="px-3 py-2 text-xs text-slate-400 italic">
+                            No users found
+                          </div>
+                        )}
+                      </div>
+
+                      {appUser?.id &&
+                        profile?.id &&
+                        appUser.id !== profile.id && (
+                          <div className="p-2 border-t border-slate-100 dark:border-slate-800/50 bg-slate-50 dark:bg-[#0B151B]">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setUser(profile)
+                                setIsImpersonateOpen(false)
+                              }}
+                              className="w-full flex items-center justify-center space-x-2 text-xs bg-red-50 text-red-600 dark:bg-red-900/30 dark:text-red-400 border border-red-200 dark:border-red-800 rounded px-2 py-1.5 hover:bg-red-100 dark:hover:bg-red-900/50 transition-colors"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                              <span>Stop Impersonating</span>
+                            </button>
+                          </div>
+                        )}
+                    </div>
+                  )}
               </div>
             )}
           </div>
@@ -224,7 +360,9 @@ export const AppLayout = () => {
                 <Moon className="w-5 h-5 text-slate-600" />
               )}
             </button>
+
             <NotificationBell />
+
             <div className="flex items-center space-x-4">
               {user?.firstName && (
                 <span className="text-sm text-slate-700 dark:text-slate-300 font-bold tracking-tight">
