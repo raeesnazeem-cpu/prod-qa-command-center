@@ -290,10 +290,19 @@ export const SettingsPage = () => {
                       <button
                         onClick={async () => {
                           try {
-                            await user?.createExternalAccount({
+                            const account = await user?.createExternalAccount({
                               strategy: "oauth_google",
                               redirectUrl: `${window.location.origin}/settings?google=connected`,
                             })
+
+                            // Clerk generates the Google Auth URL here, we must redirect to it!
+                            if (
+                              account?.verification
+                                ?.externalVerificationRedirectURL
+                            ) {
+                              window.location.href =
+                                account.verification.externalVerificationRedirectURL.href
+                            }
                           } catch (err: any) {
                             toast.error(
                               err.errors?.[0]?.message ||
