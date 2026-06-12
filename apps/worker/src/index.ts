@@ -125,9 +125,22 @@ worker.on("completed", (job) => {
 
 logger.info(`Worker started, consuming queue: ${queueName}`)
 
+import http from "http"
+
+// Dummy HTTP server for Dokploy/PaaS health checks
+const port = process.env.PORT || (process.env.NODE_ENV === "production" ? 8080 : 0)
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" })
+  res.end("Worker is healthy\n")
+})
+server.listen(port, () => {
+  logger.info(`Health check server listening on port ${port}`)
+})
+
 // Graceful shutdown
 const shutdown = async () => {
   logger.info("Shutting down worker...")
+  server.close()
   await worker.close()
   await connection.quit()
   process.exit(0)
