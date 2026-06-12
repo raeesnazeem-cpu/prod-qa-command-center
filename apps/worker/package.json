@@ -13,6 +13,7 @@
     "@qacc/ai": "workspace:*",
     "@qacc/shared": "workspace:*",
     "@supabase/supabase-js": "^2.39.3",
+    "@types/ws": "^8.18.1",
     "@upstash/ratelimit": "^1.0.1",
     "@upstash/redis": "^1.28.4",
     "axios": "^1.14.0",
@@ -29,7 +30,8 @@
     "pino-pretty": "^11.3.0",
     "playwright": "^1.42.1",
     "puppeteer": "^24.43.0",
-    "sharp": "^0.34.5"
+    "sharp": "^0.34.5",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
