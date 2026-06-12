@@ -1,5 +1,5 @@
 # Use official Playwright image which includes Node 20+ and system libraries
-FROM mcr.microsoft.com/playwright:v1.44.0-jammy AS base
+FROM mcr.microsoft.com/playwright:v1.59.1-jammy AS base
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
 WORKDIR /app
