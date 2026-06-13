@@ -45,11 +45,16 @@ async function getSupabaseUserId(clerkIdOrUuid: string): Promise<string> {
 router.post(
   '/',
   clerkAuth,
-  requireRole('qa_engineer'),
+  requireRole('developer'),
   zodValidate(CreateTaskSchema),
   async (req: Request, res: Response) => {
     const { finding_id, project_id, title, description, severity, assigned_to, gallery_images } = req.body;
-    const { userId: clerkUserId } = req.auth!;
+    const { userId: clerkUserId, role } = req.auth!;
+
+    if (role === 'developer' && !title.startsWith('[Feedback]')) {
+      return res.status(403).json({ error: 'Developers can only create feedback tasks.' });
+    }
+
 
     try {
       const supabaseUserId = await getSupabaseUserId(clerkUserId);

@@ -94,6 +94,9 @@ export const AppLayout = () => {
   if (isLoaded && user) {
     const email = user.primaryEmailAddress?.emailAddress || ""
     if (!email.endsWith("@growth99.com") && !email.endsWith("@growth99.net")) {
+      const isAllowedDevEmail = import.meta.env.DEV && email === "iraeesnaseem@gmail.com"
+      
+      if (!isAllowedDevEmail) {
       return (
         <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-[#131d22]">
           <div className="bg-white dark:bg-[#1D2A31] p-8 rounded-xl shadow-lg border border-red-500/30 text-center max-w-md">
@@ -105,15 +108,16 @@ export const AppLayout = () => {
               Only employees with a <b>@growth99.com</b> or <b>@growth99.net</b>{" "}
               email address are permitted to access this portal.
             </p>
-            <button
-              onClick={() => signOut()}
-              className="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-6 rounded transition-colors"
-            >
-              Sign Out
-            </button>
+              <button
+                onClick={() => signOut()}
+                className="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-6 rounded transition-colors"
+              >
+                Sign Out
+              </button>
+            </div>
           </div>
-        </div>
-      )
+        )
+      }
     }
   }
   // -------------------------------------------------------

@@ -206,7 +206,19 @@ const KanbanColumn = ({
         />
         {title}
       </h3>
-      <span className="bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 text-[10px] font-bold px-2 py-0.5 rounded-full">
+      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full text-white shadow-md ${
+        tasks.length === 0
+          ? "bg-slate-300 dark:bg-slate-600"
+          : title === "To Do"
+            ? "bg-blue-500 dark:bg-blue-400"
+            : title === "In Progress"
+              ? "bg-amber-500 dark:bg-amber-400"
+              : title === "Resolved"
+                ? "bg-emerald-500 dark:bg-emerald-400"
+                : title === "Closed"
+                  ? "bg-purple-500 dark:bg-purple-400"
+                  : "bg-slate-500 dark:bg-slate-400"
+      }`}>
         {tasks.length}
       </span>
     </div>
@@ -350,7 +362,7 @@ export const AllTasksPage = () => {
     )
   }
 
-  const myTasks = tasksData?.data || []
+  const myTasks = (tasksData?.data || []).filter((task: any) => !task.title?.includes("[Feedback]"))
 
   return (
     <div className="max-w-7xl mx-auto space-y-12 animate-in fade-in duration-500 pb-20">

@@ -37,12 +37,14 @@ interface TaskDetailPanelProps {
   task: Task | null
   isOpen: boolean
   onClose: () => void
+  isFeedbackMode?: boolean
 }
 
 export const TaskDetailPanel = ({
   task: initialTask,
   isOpen,
   onClose,
+  isFeedbackMode,
 }: TaskDetailPanelProps) => {
   const [rebuttalText, setRebuttalText] = useState("")
   const [rebuttalUrl, setRebuttalUrl] = useState("")
@@ -95,6 +97,8 @@ export const TaskDetailPanel = ({
   const { data: project } = useProject(task?.project_id || "")
 
   if (!task) return null
+
+  const isFeedbackTask = isFeedbackMode || task.title?.startsWith('[Feedback]')
 
   const handlePush = () => {
     const isHeroMedia =
@@ -233,88 +237,90 @@ export const TaskDetailPanel = ({
                   </select>
                 </div>
 
-                <CanDo role="qa_engineer">
-                  <div className="flex flex-col space-y-2">
-                    <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">
-                      Assignees
-                    </span>
-                    <div className="flex flex-wrap gap-2 items-center">
-                      {task.assignees?.map((a) => (
-                        <div
-                          key={a.taskId}
-                          className={`flex items-center border rounded px-2.5 py-1 space-x-2 transition-all ${
-                            a.taskId === task.id
-                              ? "bg-accent/10 border-accent/20 text-accent"
-                              : "bg-slate-50 dark:bg-[#1D2A31] border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
-                          }`}
-                        >
-                          <span className="text-[11px] font-bold uppercase tracking-wider">
-                            {a.name}
-                          </span>
-                          <button
-                            onClick={() => {
-                              if (
-                                task.assignees &&
-                                task.assignees.length <= 1
-                              ) {
-                                toast.error("Cannot remove the last assignee")
-                                return
-                              }
-                              deleteTask(a.taskId, {
-                                onSuccess: () => {
-                                  if (a.taskId === task.id) onClose()
-                                },
-                              })
-                            }}
-                            className="p-0.5 hover:bg-slate-200/50 dark:hover:bg-[#1d2a31]/50 rounded-full transition-colors"
+                {!isFeedbackTask && (
+                  <CanDo role="qa_engineer">
+                    <div className="flex flex-col space-y-2">
+                      <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest">
+                        Assignees
+                      </span>
+                      <div className="flex flex-wrap gap-2 items-center">
+                        {task.assignees?.map((a) => (
+                          <div
+                            key={a.taskId}
+                            className={`flex items-center border rounded px-2.5 py-1 space-x-2 transition-all ${
+                              a.taskId === task.id
+                                ? "bg-accent/10 border-accent/20 text-accent"
+                                : "bg-slate-50 dark:bg-[#1D2A31] border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
+                            }`}
                           >
-                            <X size={10} strokeWidth={3} />
-                          </button>
-                        </div>
-                      ))}
+                            <span className="text-[11px] font-bold uppercase tracking-wider">
+                              {a.name}
+                            </span>
+                            <button
+                              onClick={() => {
+                                if (
+                                  task.assignees &&
+                                  task.assignees.length <= 1
+                                ) {
+                                  toast.error("Cannot remove the last assignee")
+                                  return
+                                }
+                                deleteTask(a.taskId, {
+                                  onSuccess: () => {
+                                    if (a.taskId === task.id) onClose()
+                                  },
+                                })
+                              }}
+                              className="p-0.5 hover:bg-slate-200/50 dark:hover:bg-[#1d2a31]/50 rounded-full transition-colors"
+                            >
+                              <X size={10} strokeWidth={3} />
+                            </button>
+                          </div>
+                        ))}
 
-                      <div className="relative">
-                        <select
-                          value=""
-                          onChange={(e) => {
-                            const userId = e.target.value
-                            if (!userId) return
-                            createTask({
-                              project_id: task.project_id,
-                              finding_id: task.finding_id,
-                              title: task.title,
-                              description: task.description,
-                              severity: task.severity,
-                              assigned_to: userId,
-                              status: task.status,
-                              gallery_images: task.gallery_images,
-                            } as any)
-                          }}
-                          className="appearance-none bg-slate-50 dark:bg-[#1D2A31] border-2 border-dashed border-slate-200 dark:border-slate-700 hover:border-accent hover:text-accent text-slate-400 dark:text-slate-500 text-[10px] font-bold uppercase tracking-widest rounded-lg px-3 py-1 pr-8 cursor-pointer transition-all focus:outline-none"
-                        >
-                          <option value="">+ Add Dev</option>
-                          {project?.project_members
-                            .filter(
-                              (m) =>
-                                !task.assignees?.some(
-                                  (a) => a.userId === m.user_id,
-                                ),
-                            )
-                            .map((m) => (
-                              <option key={m.user_id} value={m.user_id}>
-                                {m.users.full_name}
-                              </option>
-                            ))}
-                        </select>
-                        <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-slate-300">
-                          <ChevronDown size={12} />
+                        <div className="relative">
+                          <select
+                            value=""
+                            onChange={(e) => {
+                              const userId = e.target.value
+                              if (!userId) return
+                              createTask({
+                                project_id: task.project_id,
+                                finding_id: task.finding_id,
+                                title: task.title,
+                                description: task.description,
+                                severity: task.severity,
+                                assigned_to: userId,
+                                status: task.status,
+                                gallery_images: task.gallery_images,
+                              } as any)
+                            }}
+                            className="appearance-none bg-slate-50 dark:bg-[#1D2A31] border-2 border-dashed border-slate-200 dark:border-slate-700 hover:border-accent hover:text-accent text-slate-400 dark:text-slate-500 text-[10px] font-bold uppercase tracking-widest rounded-lg px-3 py-1 pr-8 cursor-pointer transition-all focus:outline-none"
+                          >
+                            <option value="">+ Add Dev</option>
+                            {project?.project_members
+                              .filter(
+                                (m) =>
+                                  !task.assignees?.some(
+                                    (a) => a.userId === m.user_id,
+                                  ),
+                              )
+                              .map((m) => (
+                                <option key={m.user_id} value={m.user_id}>
+                                  {m.users.full_name}
+                                </option>
+                              ))}
+                          </select>
+                          <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-slate-300">
+                            <ChevronDown size={12} />
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
-                </CanDo>
+                  </CanDo>
+                )}
 
-                {project?.basecamp_account_id &&
+                {!isFeedbackTask && project?.basecamp_account_id &&
                   project?.basecamp_project_id &&
                   (project?.basecamp_todo_list_id ||
                     project?.basecamp_post_todo_list_id) && (
