@@ -18,11 +18,34 @@ export const SettingsPage = () => {
 
   useEffect(() => {
     const fetchProfile = async () => {
+      if (!user) return
+
       try {
         const { data } = await axios.get("/api/users/notification-prefs")
-        if (data && data.google_chat_user_id !== undefined) {
-          setGoogleChatUserId(data.google_chat_user_id || "")
+        
+        let fetchedGoogleId = data?.google_chat_user_id || ""
+
+        if (!fetchedGoogleId) {
+          const googleAccount = user.externalAccounts?.find(
+            (acc: any) =>
+              acc.provider === "oauth_google" || acc.provider === "google",
+          ) as any
+
+          const googleId =
+            googleAccount?.externalId || googleAccount?.providerUserId
+
+          if (googleId) {
+            fetchedGoogleId = googleId
+            axios
+              .patch("/api/users/notification-prefs", {
+                google_chat_user_id: googleId,
+              })
+              .catch(console.error)
+          }
         }
+
+        setGoogleChatUserId(fetchedGoogleId)
+
         if (data && data.basecamp_person_id !== undefined) {
           setBasecampId(data.basecamp_person_id || "")
         }
@@ -30,8 +53,11 @@ export const SettingsPage = () => {
         console.error("Failed to fetch profile settings:", error)
       }
     }
-    fetchProfile()
-  }, [axios])
+
+    if (user) {
+      fetchProfile()
+    }
+  }, [axios, user])
 
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search)
