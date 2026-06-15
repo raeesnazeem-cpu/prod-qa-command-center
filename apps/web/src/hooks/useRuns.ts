@@ -238,6 +238,7 @@ export const useDeleteRuns = (projectId: string) => {
     mutationFn: (runIds: string[]) => deleteRuns(axios, runIds),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["runs", projectId] })
+      queryClient.invalidateQueries({ queryKey: ["pinned-runs", projectId] })
       toast.success("Runs deleted successfully")
     },
     onError: (error: any) => {

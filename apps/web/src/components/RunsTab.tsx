@@ -117,8 +117,11 @@ export const RunsTab = ({ project }: RunsTabProps) => {
       setIsDeletingLimit(true)
       setShowLimitModal(true)
 
-      // Get all runs except the 3 most recent
-      const runsToDelete = runsData.data.slice(3).map((run) => run.id)
+      // Get all runs except the 3 most recent, filtering out pinned runs
+      const runsToDelete = runsData.data
+        .slice(3)
+        .filter((run) => !run.is_pinned)
+        .map((run) => run.id)
 
       if (runsToDelete.length > 0) {
         deleteRuns.mutate(runsToDelete, {

@@ -75,9 +75,56 @@ async function run() {
 
     if (fetchError) throw fetchError
 
+    // 1.5 Dynamically extract all internal links from the root page
+    const { data: runData } = await supabase
+      .from("qa_runs")
+      .select("site_url")
+      .eq("id", runId)
+      .single()
+    const baseUrl = runData?.site_url || pages?.[0]?.url
+    let extractedUrls: string[] = []
+
+    if (baseUrl) {
+      console.log(`Extracting internal links from ${baseUrl}...`)
+      try {
+        await page.goto(baseUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 30000,
+        })
+        const hrefs = await page.evaluate(() => {
+          return Array.from(document.querySelectorAll("a[href]")).map(
+            (a) => (a as HTMLAnchorElement).href,
+          )
+        })
+        const baseDomain = new URL(baseUrl).hostname
+
+        extractedUrls = hrefs
+          .map((href) => {
+            try {
+              const urlObj = new URL(href)
+              // Keep internal links only, ignore external/mailto/tel
+              if (
+                urlObj.hostname === baseDomain &&
+                urlObj.protocol.startsWith("http")
+              ) {
+                urlObj.hash = "" // Strip hash to prevent duplicate page visits
+                return urlObj.href
+              }
+            } catch {}
+            return null
+          })
+          .filter(Boolean) as string[]
+      } catch (err) {
+        console.error("Failed to extract links:", err)
+      }
+    }
+
     // Filter out duplicate URLs and non-webpages (like .kml, .xml, .pdf) so we don't record them
     const uniqueUrls = [
-      ...new Set(pages?.map((p) => p.url).filter(Boolean)),
+      ...new Set([
+        ...(pages?.map((p) => p.url).filter(Boolean) || []),
+        ...extractedUrls,
+      ]),
     ].filter((url: any) => {
       try {
         const pathname = new URL(url).pathname.toLowerCase()

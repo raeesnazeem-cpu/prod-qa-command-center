@@ -26,7 +26,7 @@ router.post("/start", async (req, res) => {
 
       .eq("id", runId)
 
-    const viewports = ["desktop", "laptop", "tablet", "mobile"]
+    const viewports = ["desktop", "tablet", "mobile"]
     const jobName = process.env.GCP_RECORDING_JOB_NAME || "recording-worker"
     const projectId = process.env.GCP_PROJECT_ID
     const location = process.env.GCP_LOCATION || "us-central1"
