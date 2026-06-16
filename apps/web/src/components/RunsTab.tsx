@@ -89,7 +89,7 @@ const StatusBadge = ({ status }: { status: string }) => {
 export const RunsTab = ({ project }: RunsTabProps) => {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [page, setPage] = useState(1)
-  const { data: runsData, isLoading } = useRuns(project.id, page)
+  const { data: runsData, isLoading, isFetching } = useRuns(project.id, page)
   const { data: pinnedRunsData } = usePinnedRuns(project.id)
   const togglePinRun = useTogglePinRun(project.id)
 
@@ -104,41 +104,43 @@ export const RunsTab = ({ project }: RunsTabProps) => {
   const [unpinRunModalId, setUnpinRunModalId] = useState<string | null>(null)
   const [pinCustomName, setPinCustomName] = useState("")
   const [isDeletingLimit, setIsDeletingLimit] = useState(false)
+  const [runsToDelete, setRunsToDelete] = useState<string[]>([])
   const [runToReplaceId, setRunToReplaceId] = useState<string | null>(null)
   const [pendingPinRunId, setPendingPinRunId] = useState<string | null>(null)
 
-  useEffect(() => {
-  useEffect(() => {
-    if (!runsData || !runsData.data || isDeletingLimit) return
+  const unpinnedRuns = runsData?.data?.filter((run) => !run.is_pinned) || []
 
-    const unpinnedRuns = runsData.data.filter((run) => !run.is_pinned)
+  useEffect(() => {
+    if (!runsData || !runsData.data || isDeletingLimit || showLimitModal || isFetching) return
 
     if (unpinnedRuns.length > 3) {
-      const runsToDelete = unpinnedRuns.slice(3).map((run) => run.id)
+      const toDelete = unpinnedRuns.slice(3).map((run) => run.id)
 
-      if (runsToDelete.length > 0) {
-        setIsDeletingLimit(true)
+      if (toDelete.length > 0) {
+        setRunsToDelete(toDelete)
         setShowLimitModal(true)
-
-        deleteRuns.mutate(runsToDelete, {
-          onSettled: () => {
-            // Keep modal visible slightly longer so the user can read it
-            setTimeout(() => {
-              setShowLimitModal(false)
-              setIsDeletingLimit(false)
-            }, 4000)
-          },
-        })
       }
     }
-  }, [runsData, isDeletingLimit, deleteRuns])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runsData, isDeletingLimit, showLimitModal, isFetching])
+
+  const handleConfirmLimitDelete = () => {
+    if (runsToDelete.length === 0) return
+    setIsDeletingLimit(true)
+    deleteRuns.mutate(runsToDelete, {
+      onSettled: () => {
+        setShowLimitModal(false)
+        setIsDeletingLimit(false)
+        setRunsToDelete([])
+      },
+    })
+  }
 
   const handleToggleSelectAll = () => {
-    if (!runsData?.data) return
-    if (selectedRunIds.length === runsData.data.length) {
+    if (selectedRunIds.length === unpinnedRuns.length) {
       setSelectedRunIds([])
     } else {
-      setSelectedRunIds(runsData.data.map((run) => run.id))
+      setSelectedRunIds(unpinnedRuns.map((run) => run.id))
     }
   }
 
@@ -279,15 +281,15 @@ export const RunsTab = ({ project }: RunsTabProps) => {
               onClick={handleToggleSelectAll}
               className="flex items-center space-x-2 px-4 py-2 bg-slate-50 dark:bg-[#1D2A31] text-slate-900 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-md text-sm font-bold hover:bg-slate-50 dark:hover:bg-[#131d22] transition-all shadow-sm active:scale-95"
             >
-              {selectedRunIds.length === (runsData?.data?.length || 0) &&
-              (runsData?.data?.length || 0) > 0 ? (
+              {selectedRunIds.length === unpinnedRuns.length &&
+              unpinnedRuns.length > 0 ? (
                 <Square className="w-4 h-4" />
               ) : (
                 <CheckSquare className="w-4 h-4" />
               )}
               <span>
-                {selectedRunIds.length === (runsData?.data?.length || 0) &&
-                (runsData?.data?.length || 0) > 0
+                {selectedRunIds.length === unpinnedRuns.length &&
+                unpinnedRuns.length > 0
                   ? "Deselect All"
                   : "Select All"}
               </span>
@@ -457,7 +459,7 @@ export const RunsTab = ({ project }: RunsTabProps) => {
                     </td>
                   </tr>
                 ))
-              ) : !runsData?.data || runsData.data.length === 0 ? (
+              ) : unpinnedRuns.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-6 py-12 text-center">
                     <div className="flex flex-col items-center">
@@ -474,7 +476,7 @@ export const RunsTab = ({ project }: RunsTabProps) => {
                   </td>
                 </tr>
               ) : (
-                runsData.data.map((run, index) => (
+                unpinnedRuns.map((run, index) => (
                   <tr
                     key={run.id}
                     className={`hover:bg-slate-50 dark:hover:bg-[#1d2a31] cursor-pointer group transition-colors ${selectedRunIds.includes(run.id) ? "bg-slate-50 dark:bg-[#1d2a31]" : ""}`}
@@ -674,17 +676,25 @@ export const RunsTab = ({ project }: RunsTabProps) => {
               Limit Exceeded
             </h3>
             <p className="text-sm text-slate-600 dark:text-slate-300 text-center mb-6">
-              More than 3 QA runs exist for this project. We are automatically
-              deleting older runs to keep only the latest 3 records.
+              You have exceeded the limit of 3 unpinned QA runs. You must delete older runs to continue, keeping only the latest 3 unpinned records.
             </p>
             <div className="flex justify-center">
-              <span className="inline-flex items-center px-4 py-2 bg-slate-100 dark:bg-[#1d2a31] text-slate-700 dark:text-slate-300 rounded-md text-sm font-bold">
-                <span className="relative flex h-2 w-2 mr-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-slate-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-500"></span>
+              {isDeletingLimit ? (
+                <span className="inline-flex items-center px-4 py-2 bg-slate-100 dark:bg-[#1d2a31] text-slate-700 dark:text-slate-300 rounded-md text-sm font-bold">
+                  <span className="relative flex h-2 w-2 mr-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-slate-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-500"></span>
+                  </span>
+                  Deleting...
                 </span>
-                Cleaning up...
-              </span>
+              ) : (
+                <button
+                  onClick={handleConfirmLimitDelete}
+                  className="px-4 py-2 text-sm font-bold text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors"
+                >
+                  Delete Older Runs
+                </button>
+              )}
             </div>
           </div>
         </div>
