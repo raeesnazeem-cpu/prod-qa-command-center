@@ -423,11 +423,11 @@ export const SettingsPage = () => {
                         }
                         className="bg-[#F5D88D] text-black hover:bg-[#E5C87D] border border-[#D4A643] font-bold text-xs py-1.5 px-4 rounded shadow-sm transition-all"
                       >
-                        Connect Personal Basecamp
+                        Fetch your ID
                       </button>
                     )}
                     {item.type === "basecamp_token_ui" && (
-                      <div className="flex flex-col items-end gap-2">
+                      <div className="flex items-end gap-2">
                         {item.value ? (
                           <div
                             className={`flex items-center gap-2 px-3 py-1.5 rounded-md border text-xs font-bold shadow-sm ${countdown === "Token Expired" ? "bg-red-50 text-red-600 border-red-200" : "bg-emerald-50 text-emerald-700 border-emerald-200"}`}

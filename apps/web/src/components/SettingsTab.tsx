@@ -44,7 +44,6 @@ export const SettingsTab = ({ project }: SettingsTabProps) => {
     projectId: project.basecamp_project_id || "",
     todoListId: project.basecamp_todo_list_id || "",
     postTodoListId: project.basecamp_post_todo_list_id || "",
-    apiToken: project.basecamp_api_token || "",
   })
   const [preReleaseLink, setPreReleaseLink] = useState("")
   const [postReleaseLink, setPostReleaseLink] = useState("")
@@ -94,7 +93,6 @@ export const SettingsTab = ({ project }: SettingsTabProps) => {
       basecamp_project_id: basecamp.projectId,
       basecamp_todo_list_id: basecamp.todoListId,
       basecamp_post_todo_list_id: basecamp.postTodoListId,
-      basecamp_api_token: basecamp.apiToken,
     })
   }
 
@@ -367,33 +365,6 @@ export const SettingsTab = ({ project }: SettingsTabProps) => {
                     placeholder="Enter Post-release To-Do List ID"
                     className="w-full bg-slate-50 dark:bg-[#1d2a31] text-slate-900 dark:text-slate-200 border border-slate-400/50 dark:border-slate-700 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-accent transition-all"
                   />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest mb-1.5">
-                    API Token
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showBasecamp ? "text" : "password"}
-                      value={basecamp.apiToken}
-                      onChange={(e) =>
-                        setBasecamp({ ...basecamp, apiToken: e.target.value })
-                      }
-                      placeholder="Enter API Token"
-                      className="w-full bg-slate-50 dark:bg-[#1d2a31] text-slate-900 dark:text-slate-200 border border-slate-400/50 dark:border-slate-700 rounded-md pr-12 py-2 text-sm focus:outline-none focus:border-accent transition-all"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowBasecamp(!showBasecamp)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
-                    >
-                      {showBasecamp ? (
-                        <EyeOff className="w-4 h-4" />
-                      ) : (
-                        <Eye className="w-4 h-4" />
-                      )}
-                    </button>
-                  </div>
                 </div>
               </div>
               <CanDo role="admin">
