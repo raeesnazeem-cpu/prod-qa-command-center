@@ -21,6 +21,7 @@ import { FindingSeverityEditor } from "./FindingSeverityEditor"
 import { QAFinding } from "../api/runs.api"
 import { useGalleryStore } from "../store/galleryStore"
 import { useAuthAxios } from "../lib/useAuthAxios"
+import { useAiResultsStore } from "../store/aiResultsStore"
 
 interface FindingCardProps {
   finding: QAFinding
@@ -80,6 +81,8 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
 }) => {
   const { id: projectId } = useParams<{ id: string }>()
   const { canDo } = useRole()
+  const setAiResult = useAiResultsStore((state) => state.setAiResult)
+
   const canAction = canDo("qa_engineer")
   const axios = useAuthAxios()
   const { galleryImages: allGalleryImages } = useGalleryStore()
@@ -114,6 +117,7 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
 
       // 5. Save the smart AI results in our state
       setAiResultData(data)
+      setAiResult(finding.id, getAiResultsText(data))
     } catch (error) {
       console.error("AI check failed:", error)
     } finally {
@@ -158,6 +162,27 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
         ? "opacity-60 border-slate-200 dark:border-slate-800"
         : "border-slate-200 dark:border-slate-800 hover:border-accent/40"
 
+  const getAiResultsText = (data: any) => {
+    if (!data || data.status === "error") return ""
+    let text = "\n\n🤖 AI Smart Comparison Results:\n"
+    if (data.missingInDev && data.missingInDev.length > 0) {
+      text += "\nTruly Missing in Dev:\n"
+      data.missingInDev.forEach((item: any) => {
+        text += `- ${item.url} (${item.title}) — ${item.reason}\n`
+      })
+    }
+    if (data.missingInLive && data.missingInLive.length > 0) {
+      text += "\nTruly Missing in Live:\n"
+      data.missingInLive.forEach((item: any) => {
+        text += `- ${item.url} (${item.title}) — ${item.reason}\n`
+      })
+    }
+    if (!data.missingInDev?.length && !data.missingInLive?.length) {
+      text += "\nAll pages match contextually ✓\n"
+    }
+    return text
+  }
+
   return (
     <div
       className={`group p-6 bg-slate-200/10 dark:bg-[#1D2A31] rounded-md border transition-all duration-300 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.05)] hover:shadow-md relative overflow-hidden flex flex-col gap-6 ${cardBorder}`}
@@ -186,7 +211,18 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
               className={`p-1 rounded transition-all ${isSelected ? "text-black scale-110" : "text-slate-300 hover:text-slate-400"}`}
             >
               {isSelected ? (
-                <CheckSquare size={20} strokeWidth={2.5} />
+                <div className="flex items-center h-5 mr-3">
+                  <input
+                    type="checkbox"
+                    name="enabled_checks"
+                    className="w-4 h-4 text-accent border-slate-300 rounded focus:ring-accent accent-accent"
+                    value="accessibility"
+                    autoComplete="new-password"
+                    data-form-type="other"
+                    checked
+                    readOnly
+                  />
+                </div>
               ) : (
                 <Square size={20} strokeWidth={2} />
               )}
@@ -204,7 +240,6 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
             URL & Tab Compare
           </div>
         </div>
-
       </div>
 
       {/* Title Input */}
@@ -300,6 +335,8 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
                       onCreateTask?.({
                         ...finding,
                         title: localTitle,
+                        description: finding.description,
+
                         gallery_images: galleryImages,
                       })
                     }

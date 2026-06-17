@@ -13,6 +13,7 @@ import {
   Sparkles,
   Check,
   Sparkle,
+  Eye,
 } from "lucide-react"
 import { useRole } from "../hooks/useRole"
 import { useParams, Link } from "react-router-dom"
@@ -21,6 +22,7 @@ import { QAFinding } from "../api/runs.api"
 import { useGalleryStore } from "../store/galleryStore"
 import { FindingCardWithScreenshot } from "./FindingCardWithScreenshot"
 import { useAuthAxios } from "../lib/useAuthAxios"
+import { useAiResultsStore } from "../store/aiResultsStore"
 
 interface FindingCardProps {
   finding: QAFinding
@@ -48,6 +50,8 @@ export const PluginUpdatesFindingCard: React.FC<FindingCardProps> = ({
   const api = useAuthAxios()
   const { id: projectId } = useParams<{ id: string }>()
   const { canDo } = useRole()
+  const setAiResult = useAiResultsStore((state) => state.setAiResult)
+
   const canAction = canDo("qa_engineer")
   const { galleryImages: allGalleryImages, addImage } = useGalleryStore()
   const galleryImages = allGalleryImages[finding.id] || []
@@ -78,6 +82,7 @@ export const PluginUpdatesFindingCard: React.FC<FindingCardProps> = ({
       })
 
       setAiResultData(response.data)
+      setAiResult(finding.id, getAiResultsText(response.data))
     } catch (error) {
       console.error("AI check failed:", error)
       setAiResultData({
@@ -101,6 +106,20 @@ export const PluginUpdatesFindingCard: React.FC<FindingCardProps> = ({
       : isFalsePositive
         ? "opacity-60 border-slate-200 dark:border-slate-800"
         : "border-slate-200 dark:border-slate-800 hover:border-accent/40"
+
+  const getAiResultsText = (data: any) => {
+    if (!data || data.status === "error") return ""
+    let text = `\n\n🤖 AI Plugin Verification Results:\n${data.message || ""}\n`
+    if (data.outdatedPlugins && data.outdatedPlugins.length > 0) {
+      text += "\nOutdated Plugins:\n"
+      data.outdatedPlugins.forEach((p: any) => {
+        text += `- ${p.name}: v${p.current} -> v${p.available}\n`
+      })
+    } else {
+      text += "\nAll required plugins are up to date ✓\n"
+    }
+    return text
+  }
 
   return (
     <div
@@ -130,7 +149,18 @@ export const PluginUpdatesFindingCard: React.FC<FindingCardProps> = ({
               className={`p-1 rounded transition-all ${isSelected ? "text-black scale-110" : "text-slate-300 hover:text-slate-400"}`}
             >
               {isSelected ? (
-                <CheckSquare size={20} strokeWidth={2.5} />
+                <div className="flex items-center h-5 mr-3">
+                  <input
+                    type="checkbox"
+                    name="enabled_checks"
+                    className="w-4 h-4 text-accent border-slate-300 rounded focus:ring-accent accent-accent"
+                    value="accessibility"
+                    autoComplete="new-password"
+                    data-form-type="other"
+                    checked
+                    readOnly
+                  />
+                </div>
               ) : (
                 <Square size={20} strokeWidth={2} />
               )}
@@ -169,36 +199,34 @@ export const PluginUpdatesFindingCard: React.FC<FindingCardProps> = ({
         </p>
       </div>
 
-      {/* Checkbox for verification & AI trigger */}
-      <div className="flex items-center gap-4 py-2">
-        <label className="flex items-center gap-2 cursor-pointer group/verify">
-          <div
-            className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${isManuallyVerified ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-300 dark:border-slate-600 bg-white dark:bg-[#131d22] group-hover/verify:border-accent"}`}
-          >
-            {isManuallyVerified && <Check size={12} strokeWidth={3} />}
-          </div>
-          <input
-            type="checkbox"
-            className="hidden"
-            checked={isManuallyVerified}
-            onChange={(e) => setIsManuallyVerified(e.target.checked)}
-          />
-          <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300 uppercase tracking-widest">
-            Verify Updates
-          </span>
-        </label>
-      </div>
-
-      {/* Thumbnail / Screenshot Lightbox */}
-      {finding.screenshot_url && (
-        <div className="pt-2">
-          <FindingCardWithScreenshot
-            finding={finding}
-            pageScreenshots={{}}
-            hideTabs={true}
-          />
+      {/* Thumbnail / Screenshot Lightbox & Checkbox */}
+      <div className="flex items-start justify-between w-full pt-2">
+        <div className="w-[50%] flex">
+          {finding.screenshot_url && (
+            <div className="w-full">
+              <FindingCardWithScreenshot
+                finding={finding}
+                pageScreenshots={{}}
+                hideTabs={true}
+              />
+            </div>
+          )}
         </div>
-      )}
+
+        <div className="w-[25%] flex flex-col gap-2 pl-4 border-l border-slate-100 dark:border-slate-700/50 ml-5">
+          <label className="flex items-center gap-2 group/cb">
+            <input
+              type="checkbox"
+              checked={isManuallyVerified}
+              onChange={(e) => setIsManuallyVerified(e.target.checked)}
+              className="w-3 h-3 text-accent border-slate-300 dark:border-slate-600 dark:bg-[#131d22] rounded focus:ring-accent accent-accent cursor-pointer transition-all"
+            />
+            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest group-hover/cb:text-slate-900 dark:group-hover/cb:text-slate-200 transition-colors cursor-pointer truncate">
+              {isManuallyVerified ? "Updates Verified" : "Verify Updates"}
+            </span>
+          </label>
+        </div>
+      </div>
 
       {/* Action Footer */}
       {canAction && (
@@ -226,6 +254,8 @@ export const PluginUpdatesFindingCard: React.FC<FindingCardProps> = ({
                     onCreateTask?.({
                       ...finding,
                       title: localTitle,
+                      description: finding.description,
+
                       gallery_images: galleryImages,
                     })
                   }
@@ -234,13 +264,50 @@ export const PluginUpdatesFindingCard: React.FC<FindingCardProps> = ({
                 >
                   {hasTask || isAssigned ? "Task Linked" : "Add to Tasks"}
                 </button>
+
+                {(hasTask || isAssigned) &&
+                  assignedTaskIds &&
+                  assignedTaskIds.length > 0 &&
+                  assignedTaskIds[0] !== finding.id && (
+                    <Link
+                      to={`/projects/${projectId}?tab=tasks&taskId=${assignedTaskIds[0]}`}
+                      target="_blank"
+                      className="p-2 text-slate-400 hover:text-accent transition-colors"
+                      title="View Task"
+                    >
+                      <Eye size={16} />
+                    </Link>
+                  )}
               </>
             )}
           </div>
-          
+
           <div className="flex items-center gap-3">
             {!aiResultData && (
-              <button onClick={handleRunAiCheck} title="Run AI Check on Plugins Screenshot" className="p-1.5 rounded-md bg-transparent text-white hover:text-blue-500 transition-all flex items-center justify-center shadow-sm"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-sparkles"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"></path><path d="M5 3v4"></path><path d="M19 17v4"></path><path d="M3 5h4"></path><path d="M17 19h4"></path></svg></button>
+              <button
+                onClick={handleRunAiCheck}
+                title="Run AI Check on Plugins Screenshot"
+                className="p-1.5 rounded-md bg-transparent text-white hover:text-blue-500 transition-all flex items-center justify-center shadow-sm"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="22"
+                  height="22"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="lucide lucide-sparkles"
+                >
+                  <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"></path>
+                  <path d="M5 3v4"></path>
+                  <path d="M19 17v4"></path>
+                  <path d="M3 5h4"></path>
+                  <path d="M17 19h4"></path>
+                </svg>
+              </button>
             )}
 
             {aiResultData && (

@@ -220,3 +220,11 @@ apps/worker/test_*.cjs
 apps/worker/src/check_*.ts
 apps/web/check*.cjs
 apps/web/check*.js
+
+# Graphify
+.graphify/
+**/.graphify/
+.graphify_*.json
+**/.graphify_*.json
+graphify-out/
+**/graphify-out/

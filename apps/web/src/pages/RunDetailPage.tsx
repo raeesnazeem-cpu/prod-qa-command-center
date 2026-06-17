@@ -56,6 +56,7 @@ import {
 import { useEffect, useState, useMemo, useRef } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import toast from "react-hot-toast"
+import { useAiResultsStore } from "../store/aiResultsStore"
 
 export const RunDetailPage = () => {
   const { id: projectId, runId } = useParams<{ id: string; runId: string }>()
@@ -63,6 +64,7 @@ export const RunDetailPage = () => {
   const axios = useAuthAxios()
   const updateStatus = useUpdateRunStatus()
   const { canDo } = useRole()
+  const aiResultsMap = useAiResultsStore((state) => state.aiResultsMap)
   const { clearAllGalleries, galleryImages: allGalleryImages } =
     useGalleryStore()
 
@@ -976,7 +978,9 @@ export const RunDetailPage = () => {
             ? finding.id.split(",")[0]
             : finding.id,
           title: finding.title,
-          description: finding.description || "",
+          description:
+            (finding.description || "") + (aiResultsMap[finding.id] || ""),
+
           severity: finding.severity,
           assigned_to: userId,
           gallery_images:
@@ -1002,7 +1006,8 @@ export const RunDetailPage = () => {
           ? finding.id.split(",")[0]
           : finding.id,
         title: finding.title,
-        description: finding.description || "",
+        description:
+          (finding.description || "") + (aiResultsMap[finding.id] || ""),
         severity: finding.severity,
         gallery_images:
           galleryImages.length > 0 ? galleryImages : finding.gallery_images,
@@ -1022,8 +1027,10 @@ export const RunDetailPage = () => {
       const mergedFindings = findingsToStage.map((f) => {
         return {
           ...f,
+          description: (f.description || "") + (aiResultsMap[f.id] || ""),
           issue_number: nextIssueNum++,
           title: f.title.replace(/^Issue #\d+:?\s*/, ""),
+
           gallery_images: Array.from(
             new Set([
               ...(f.gallery_images || []),

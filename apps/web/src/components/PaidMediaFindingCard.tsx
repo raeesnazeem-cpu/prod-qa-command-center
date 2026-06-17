@@ -231,7 +231,7 @@ export const PaidMediaFindingCard: React.FC<FindingCardProps> = ({
             }`}
           >
             {isSelected ? (
-              <CheckSquare size={20} strokeWidth={2.5} />
+              <div className="flex items-center h-5 mr-3"><input type="checkbox" name="enabled_checks" className="w-4 h-4 text-accent border-slate-300 rounded focus:ring-accent accent-accent" value="accessibility" autoComplete="new-password" data-form-type="other" checked readOnly /></div>
             ) : (
               <Square size={20} strokeWidth={2} />
             )}

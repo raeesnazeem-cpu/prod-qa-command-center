@@ -1105,4 +1105,142 @@ Return your findings as JSON in this exact structure:
   }
 })
 
+/**
+ * POST /api/runs/verify-social-share-ai
+ * Uses AI to analyze the social share screenshots and detect social share status.
+ */
+router.post("/verify-social-share-ai", async (req, res) => {
+  try {
+    const { screenshotUrls } = req.body
+    if (!screenshotUrls || !Array.isArray(screenshotUrls)) {
+      return res.status(400).json({ error: "screenshotUrls array is required" })
+    }
+
+    const axios = require("axios")
+    const { GoogleGenAI } = require("@google/genai")
+
+    // 1. Download images as base64 (Bypass expired JWTs using Supabase Admin Client)
+    const imagesParts = []
+    
+    for (const url of screenshotUrls) {
+      let imageBuffer: Buffer
+      let mimeType = "image/png"
+
+      try {
+        if (url.includes("/storage/v1/object/")) {
+          const urlObj = new URL(url)
+          const parts = urlObj.pathname.split("/")
+          const bucketIndex =
+            parts.findIndex((p) => p === "sign" || p === "public") + 1
+          const bucket = parts[bucketIndex]
+          const filePath = decodeURIComponent(
+            parts.slice(bucketIndex + 1).join("/"),
+          )
+
+          const { data, error } = await supabase.storage
+            .from(bucket)
+            .download(filePath)
+          if (error) throw error
+          imageBuffer = Buffer.from(await data.arrayBuffer())
+          mimeType = data.type || "image/png"
+        } else {
+          const imageResponse = await axios.get(url, {
+            responseType: "arraybuffer",
+          })
+          imageBuffer = Buffer.from(imageResponse.data)
+          mimeType = imageResponse.headers["content-type"] || "image/png"
+        }
+        
+        imagesParts.push({
+          inlineData: { data: imageBuffer.toString("base64"), mimeType }
+        })
+      } catch (downloadError) {
+        console.error("Failed to download screenshot for social share verify:", downloadError)
+      }
+    }
+
+    if (imagesParts.length === 0) {
+      return res.status(400).json({ error: "Failed to fetch screenshots for AI analysis" })
+    }
+
+    // 2. Initialize Gemini 1.5 Pro
+    const genAI = new GoogleGenAI({
+      apiKey: process.env.GOOGLE_AI_API_KEY || "",
+    })
+
+    const systemPrompt = `You are an expert SEO analyst and QA tester.
+I am providing you with multiple screenshots related to social share tags and previews (Facebook, Google, Twitter/X, LinkedIn).
+Look at the screenshots to determine if the social share headings and images are properly set up and verified.
+
+Return your findings as JSON in this exact structure:
+{
+  "status": "success",
+  "message": "AI has reviewed the social share screenshots.",
+  "socialShareHeadings": {
+    "facebook": "verified" | "not verified",
+    "google": "verified" | "not verified",
+    "twitter": "verified" | "not verified",
+    "linkedin": "verified" | "not verified"
+  },
+  "socialShareImages": {
+    "facebook": "verified" | "not verified",
+    "google": "verified" | "not verified",
+    "twitter": "verified" | "not verified",
+    "linkedin": "verified" | "not verified"
+  },
+  "socialMediaTags": {
+    "facebook": "verified" | "not verified",
+    "google": "verified" | "not verified",
+    "twitter": "verified" | "not verified",
+    "linkedin": "verified" | "not verified"
+  }
+}
+If there is evidence of correct configuration for a platform, mark it as "verified", else "not verified".`
+
+    let response;
+    try {
+      response = await genAI.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: systemPrompt },
+              ...imagesParts
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: "application/json",
+        },
+      })
+    } catch (fallbackError) {
+      console.warn("gemini-2.5-flash failed, falling back to gemini-2.0-flash");
+      response = await genAI.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: systemPrompt },
+              ...imagesParts
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: "application/json",
+        },
+      })
+    }
+
+    const resultText = response.text || "{}"
+    const resultJson = JSON.parse(resultText)
+
+    return res.status(200).json(resultJson)
+  } catch (error: any) {
+    console.error("AI Verify Social Share Error:", error)
+    return res.status(500).json({ error: error.message })
+  }
+})
+
 export { router as runsRouter }

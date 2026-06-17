@@ -6,6 +6,8 @@ import {
   Check,
   ClipboardList,
   Eye,
+  Sparkles,
+  Sparkle,
 } from "lucide-react"
 import { useParams, Link } from "react-router-dom"
 import { useRole } from "../hooks/useRole"
@@ -14,6 +16,7 @@ import { QAFinding } from "../api/runs.api"
 import { useGalleryStore } from "../store/galleryStore"
 import { FindingCardWithScreenshot } from "./FindingCardWithScreenshot"
 import { useAuthAxios } from "../lib/useAuthAxios"
+import { useAiResultsStore } from "../store/aiResultsStore"
 
 interface FindingCardProps {
   finding: QAFinding
@@ -40,6 +43,8 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
 }) => {
   const { id: projectId } = useParams<{ id: string }>()
   const { canDo } = useRole()
+  const setAiResult = useAiResultsStore((state) => state.setAiResult)
+
   const canAction = canDo("qa_engineer")
   const { galleryImages: allGalleryImages } = useGalleryStore()
   const galleryImages = allGalleryImages[finding.id] || []
@@ -47,13 +52,52 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
   const [localTitle, setLocalTitle] = React.useState(finding.title)
   const [isManuallyVerified, setIsManuallyVerified] = React.useState(false)
 
+  // AI states
+  const [isAiModalOpen, setIsAiModalOpen] = React.useState(false)
+  const [isAiLoading, setIsAiLoading] = React.useState(false)
+  const [aiResultData, setAiResultData] = React.useState<any>(null)
+
   const api = useAuthAxios()
   const [isPushing, setIsPushing] = React.useState(false)
   const [isPushed, setIsPushed] = React.useState(finding.status === "confirmed")
+
+  const getAiResultsText = (data: any) => {
+    if (!data || data.status === "error") return ""
+    const formatStatus = (s?: string) =>
+      s === "verified" ? "Verified ✓" : "Not verified ✗"
+
+    let text = "\n\n🤖 AI Verification Results:\n"
+    if (data.socialShareHeadings) {
+      text += "\nSocial Share Headings:\n"
+      text += `- Facebook: ${formatStatus(data.socialShareHeadings.facebook)}\n`
+      text += `- Google: ${formatStatus(data.socialShareHeadings.google)}\n`
+      text += `- X(Twitter): ${formatStatus(data.socialShareHeadings.twitter)}\n`
+      text += `- LinkedIn: ${formatStatus(data.socialShareHeadings.linkedin)}\n`
+    }
+    if (data.socialShareImages) {
+      text += "\nSocial Share Images:\n"
+      text += `- Facebook: ${formatStatus(data.socialShareImages.facebook)}\n`
+      text += `- Google: ${formatStatus(data.socialShareImages.google)}\n`
+      text += `- X(Twitter): ${formatStatus(data.socialShareImages.twitter)}\n`
+      text += `- LinkedIn: ${formatStatus(data.socialShareImages.linkedin)}\n`
+    }
+    if (data.socialMediaTags) {
+      text += "\nSocial Media Tags:\n"
+      text += `- Facebook: ${formatStatus(data.socialMediaTags.facebook)}\n`
+      text += `- Google: ${formatStatus(data.socialMediaTags.google)}\n`
+      text += `- X(Twitter): ${formatStatus(data.socialMediaTags.twitter)}\n`
+      text += `- LinkedIn: ${formatStatus(data.socialMediaTags.linkedin)}\n`
+    }
+    return text
+  }
+
   const handlePushToBasecamp = async () => {
     setIsPushing(true)
     try {
-      await api.post(`/api/findings/${finding.id}/push-basecamp`, {})
+      await api.post(`/api/findings/${finding.id}/push-basecamp`, {
+        aiResultsText: getAiResultsText(aiResultData),
+      })
+
       setIsPushed(true)
       if (onConfirm) onConfirm(finding.id)
     } catch (err: any) {
@@ -84,6 +128,28 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
         .filter(Boolean)
     : []
 
+  const handleRunAiCheck = async () => {
+    setIsAiModalOpen(true)
+    if (aiResultData) return
+    setIsAiLoading(true)
+
+    try {
+      const response = await api.post("/api/runs/verify-social-share-ai", {
+        screenshotUrls: screenshotUrls,
+      })
+      setAiResultData(response.data)
+      setAiResult(finding.id, getAiResultsText(response.data))
+    } catch (error) {
+      console.error("AI check failed:", error)
+      setAiResultData({
+        status: "error",
+        message: "Failed to connect to AI server. Please try again.",
+      })
+    } finally {
+      setIsAiLoading(false)
+    }
+  }
+
   return (
     <div
       className={`group p-6 bg-slate-200/10 dark:bg-[#1D2A31] rounded-md border transition-all duration-300 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.05)] hover:shadow-md relative overflow-hidden flex flex-col gap-6 ${cardBorder}`}
@@ -111,7 +177,18 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
               className={`p-1 rounded transition-all ${isSelected ? "text-black scale-110" : "text-slate-300 hover:text-slate-400"}`}
             >
               {isSelected ? (
-                <CheckSquare size={20} strokeWidth={2.5} />
+                <div className="flex items-center h-5 mr-3">
+                  <input
+                    type="checkbox"
+                    name="enabled_checks"
+                    className="w-4 h-4 text-accent border-slate-300 rounded focus:ring-accent accent-accent"
+                    value="accessibility"
+                    autoComplete="new-password"
+                    data-form-type="other"
+                    checked
+                    readOnly
+                  />
+                </div>
               ) : (
                 <Square size={20} strokeWidth={2} />
               )}
@@ -150,9 +227,6 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
 
       {screenshotUrls.length > 0 && (
         <div className="space-y-2 pt-2">
-          <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-            Screenshots
-          </p>
           <div className="flex items-start justify-between w-full">
             <div className="w-[50%] flex">
               {screenshotUrls.slice(0, 4).map((url, idx) => (
@@ -263,6 +337,7 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
                         onCreateTask?.({
                           ...finding,
                           title: localTitle,
+                          description: finding.description,
                           gallery_images: Array.from(
                             new Set([...galleryImages, ...screenshotUrls]),
                           ),
@@ -291,6 +366,291 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
                 )}
               </>
             )}
+          </div>
+
+          <div className="flex items-center gap-3">
+            {!aiResultData && (
+              <button
+                onClick={handleRunAiCheck}
+                title="Run AI Check on Social Share Screenshots"
+                className="p-1.5 rounded-md bg-transparent text-white hover:text-blue-500 transition-all flex items-center justify-center shadow-sm"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="22"
+                  height="22"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="lucide lucide-sparkles"
+                >
+                  <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"></path>
+                  <path d="M5 3v4"></path>
+                  <path d="M19 17v4"></path>
+                  <path d="M3 5h4"></path>
+                  <path d="M17 19h4"></path>
+                </svg>
+              </button>
+            )}
+
+            {aiResultData && (
+              <button
+                onClick={() => setIsAiModalOpen(true)}
+                className="text-xs font-semibold text-sky-400 hover:text-sky-500 tracking-wide"
+              >
+                <span className="flex items-center gap-1">
+                  <Sparkle size={14} />
+                  <span>AI RESULTS</span>
+                </span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* AI Smart Results Modal */}
+      {isAiModalOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsAiModalOpen(false)
+          }}
+        >
+          <div className="bg-slate-50 dark:bg-[#1D2A31] w-full max-w-xl rounded-md shadow-2xl overflow-hidden flex flex-col">
+            <div className="p-4 border-b dark:border-slate-700 flex items-center justify-between">
+              <h3 className="font-bold text-slate-900 dark:text-slate-200 text-sm uppercase tracking-widest flex items-center gap-2">
+                <Sparkles size={16} className="text-purple-500" /> AI Social
+                Share Verification
+              </h3>
+              <button
+                onClick={() => setIsAiModalOpen(false)}
+                className="text-[10px] font-bold px-3 py-1.5 text-slate-500 uppercase bg-white border rounded"
+              >
+                Close
+              </button>
+            </div>
+            <div className="p-6">
+              {isAiLoading ? (
+                <div className="flex flex-col items-center py-12 space-y-4">
+                  <Sparkles
+                    size={32}
+                    className="text-purple-500 animate-pulse"
+                  />
+                  <p className="text-sm text-slate-500">
+                    AI is reviewing the screenshots...
+                  </p>
+                </div>
+              ) : (
+                aiResultData && (
+                  <div className="space-y-6">
+                    {aiResultData.status === "error" ? (
+                      <div className="bg-red-50 p-4 rounded border border-red-100">
+                        <p className="text-sm font-bold text-red-600">
+                          {aiResultData.message}
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded border border-slate-200 dark:border-slate-700">
+                          <p className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-2">
+                            Social share headings
+                          </p>
+                          <div className="grid grid-cols-2 gap-2 text-sm">
+                            <p className="text-slate-600 dark:text-slate-400">
+                              Facebook:{" "}
+                              <span
+                                className={
+                                  aiResultData.socialShareHeadings?.facebook ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialShareHeadings?.facebook ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                            <p className="text-slate-600 dark:text-slate-400">
+                              google:{" "}
+                              <span
+                                className={
+                                  aiResultData.socialShareHeadings?.google ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialShareHeadings?.google ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                            <p className="text-slate-600 dark:text-slate-400">
+                              X(Twitter):{" "}
+                              <span
+                                className={
+                                  aiResultData.socialShareHeadings?.twitter ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialShareHeadings?.twitter ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                            <p className="text-slate-600 dark:text-slate-400">
+                              Linkedin:{" "}
+                              <span
+                                className={
+                                  aiResultData.socialShareHeadings?.linkedin ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialShareHeadings?.linkedin ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded border border-slate-200 dark:border-slate-700">
+                          <p className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-2">
+                            Social share Images
+                          </p>
+                          <div className="grid grid-cols-2 gap-2 text-sm">
+                            <p className="text-slate-600 dark:text-slate-400">
+                              Facebook:{" "}
+                              <span
+                                className={
+                                  aiResultData.socialShareImages?.facebook ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialShareImages?.facebook ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                            <p className="text-slate-600 dark:text-slate-400">
+                              google:{" "}
+                              <span
+                                className={
+                                  aiResultData.socialShareImages?.google ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialShareImages?.google ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                            <p className="text-slate-600 dark:text-slate-400">
+                              X(Twitter):{" "}
+                              <span
+                                className={
+                                  aiResultData.socialShareImages?.twitter ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialShareImages?.twitter ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                            <p className="text-slate-600 dark:text-slate-400">
+                              Linkedin:{" "}
+                              <span
+                                className={
+                                  aiResultData.socialShareImages?.linkedin ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialShareImages?.linkedin ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded border border-slate-200 dark:border-slate-700">
+                          <p className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase mb-2">
+                            Social media tags in page source
+                          </p>
+                          <div className="grid grid-cols-2 gap-2 text-sm">
+                            <p className="text-slate-600 dark:text-slate-400">
+                              Facebook:{" "}
+                              <span
+                                className={
+                                  aiResultData.socialMediaTags?.facebook ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialMediaTags?.facebook ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                            <p className="text-slate-600 dark:text-slate-400">
+                              google:{" "}
+                              <span
+                                className={
+                                  aiResultData.socialMediaTags?.google ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialMediaTags?.google ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                            <p className="text-slate-600 dark:text-slate-400">
+                              X(Twitter):{" "}
+                              <span
+                                className={
+                                  aiResultData.socialMediaTags?.twitter ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialMediaTags?.twitter ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                            <p className="text-slate-600 dark:text-slate-400">
+                              Linkedin:{" "}
+                              <span
+                                className={
+                                  aiResultData.socialMediaTags?.linkedin ===
+                                  "verified"
+                                    ? "text-emerald-600 font-semibold"
+                                    : "text-red-600 font-semibold"
+                                }
+                              >
+                                {aiResultData.socialMediaTags?.linkedin ||
+                                  "not verified"}
+                              </span>
+                            </p>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )
+              )}
+            </div>
           </div>
         </div>
       )}

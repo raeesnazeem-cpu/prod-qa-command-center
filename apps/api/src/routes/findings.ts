@@ -567,12 +567,15 @@ router.post(
           )
           .join("<br/><br/>")
 
+        const { aiResultsText } = req.body || {}
+
         commentHtml = `
         <div style="font-family: sans-serif; line-height: 1.5;">
           <strong>Social Share Heading Verification</strong><br/><br/>
           All social share properties and previews have been verified.<br/><br/>
           <strong>Screenshots:</strong><br/>
           ${screenshotsHtml}
+          ${aiResultsText ? `<br/><br/><div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px; padding: 16px;"><strong>${aiResultsText.replace(/\n/g, "<br/>")}</strong></div>` : ""}
           <br/><br/>
           <em>Sent automatically via QA Command Center</em>
         </div>
