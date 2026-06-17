@@ -5,6 +5,7 @@ import {
   CheckSquare,
   Check,
   ClipboardList,
+  Eye,
 } from "lucide-react"
 import { useParams, Link } from "react-router-dom"
 import { useRole } from "../hooks/useRole"
@@ -283,7 +284,7 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
                           className="p-2 text-slate-400 hover:text-accent transition-colors"
                           title="View Task"
                         >
-                          <ClipboardList size={16} />
+                          <Eye size={16} />
                         </Link>
                       )}
                   </div>

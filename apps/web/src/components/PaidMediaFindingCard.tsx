@@ -10,6 +10,7 @@ import {
   CheckSquare,
   ClipboardList,
   Megaphone,
+  Eye,
 } from "lucide-react"
 import { useRole } from "../hooks/useRole"
 import { useParams, Link } from "react-router-dom"
@@ -381,7 +382,7 @@ export const PaidMediaFindingCard: React.FC<FindingCardProps> = ({
                       className="p-2 text-slate-400 hover:text-accent transition-colors"
                       title="View Task"
                     >
-                      <ClipboardList size={16} />
+                      <Eye size={16} />
                     </Link>
                   )}
               </div>

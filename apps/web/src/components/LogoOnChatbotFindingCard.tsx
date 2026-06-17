@@ -5,6 +5,7 @@ import {
   MonitorSmartphone,
   Plus,
   ClipboardList,
+  Eye,
 } from "lucide-react"
 import { useRole } from "../hooks/useRole"
 import { useProject } from "../hooks/useProjects"
@@ -254,7 +255,7 @@ export const LogoOnChatbotFindingCard: React.FC<FindingCardProps> = ({
               target="_blank"
               className="p-2 text-slate-400 hover:text-accent"
             >
-              <ClipboardList size={16} />
+              <Eye size={16} />
             </Link>
           )}
         </div>

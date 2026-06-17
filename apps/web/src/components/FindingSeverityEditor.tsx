@@ -20,26 +20,26 @@ const SEVERITY_OPTIONS: {
   {
     value: "critical",
     label: "Critical",
-    icon: <ShieldAlert size={12} />,
-    color: "text-red-600 bg-red-50",
+    icon: <ShieldAlert size={16} />,
+    color: "text-red-500 bg-transparent border border-red-500",
   },
   {
     value: "high",
     label: "High",
-    icon: <AlertTriangle size={12} />,
-    color: "text-orange-600 bg-orange-50",
+    icon: <AlertTriangle size={16} />,
+    color: "text-orange-500 bg-transparent border border-orange-500",
   },
   {
     value: "medium",
     label: "Medium",
-    icon: <AlertCircle size={12} />,
-    color: "text-yellow-600 bg-yellow-50",
+    icon: <AlertCircle size={16} />,
+    color: "text-yellow-500 bg-transparent border border-yellow-500",
   },
   {
     value: "low",
     label: "Low",
-    icon: <Info size={12} />,
-    color: "text-blue-600 bg-blue-50",
+    icon: <Info size={16} />,
+    color: "text-blue-500 bg-transparent border border-blue-500",
   },
 ]
 
@@ -51,10 +51,16 @@ export const FindingSeverityEditor: React.FC<FindingSeverityEditorProps> = ({
   symbolOnly,
 }) => {
   const updateFinding = useUpdateFinding(pageId)
+  const [localSeverity, setLocalSeverity] = React.useState<FindingSeverity>(currentSeverity)
+
+  React.useEffect(() => {
+    setLocalSeverity(currentSeverity)
+  }, [currentSeverity])
 
   const handleChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newSeverity = e.target.value as FindingSeverity
-    if (newSeverity !== currentSeverity) {
+    if (newSeverity !== localSeverity) {
+      setLocalSeverity(newSeverity)
       updateFinding.mutate({
         findingId,
         data: { severity: newSeverity },
@@ -63,32 +69,32 @@ export const FindingSeverityEditor: React.FC<FindingSeverityEditorProps> = ({
   }
 
   if (!canEdit) {
-    const option = SEVERITY_OPTIONS.find((opt) => opt.value === currentSeverity)
+    const option = SEVERITY_OPTIONS.find((opt) => opt.value === localSeverity)
     return (
       <div
-        title={currentSeverity}
-        className={`flex items-center justify-center p-1.5 rounded-lg border transition-all ${option?.color || ""}`}
+        title={localSeverity}
+        className={`absolute top-4 right-4 z-10 flex items-center justify-center p-1.5 rounded-lg transition-all ${option?.color || ""}`}
       >
         {option?.icon}
-        {!symbolOnly && <span className="ml-1.5">{currentSeverity}</span>}
+        {!symbolOnly && <span className="ml-1.5">{localSeverity}</span>}
       </div>
     )
   }
 
   const currentOption = SEVERITY_OPTIONS.find(
-    (opt) => opt.value === currentSeverity,
+    (opt) => opt.value === localSeverity,
   )
 
   return (
-    <div className="relative inline-block group/sev">
+    <div className="absolute top-4 right-4 z-10 inline-block group/sev">
       <select
-        value={currentSeverity}
+        value={localSeverity}
         onChange={handleChange}
         disabled={updateFinding.isPending}
-        title={currentSeverity}
-        className={`appearance-none rounded-md border font-bold uppercase tracking-wider cursor-pointer focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all ${
+        title={localSeverity}
+        className={`appearance-none rounded-md font-bold uppercase tracking-wider cursor-pointer focus:outline-none transition-all ${
           symbolOnly
-            ? "w-5 h-5 flex items-center justify-center p-0 text-center text-[0px]"
+            ? "w-6 h-6 flex items-center justify-center p-0 text-center text-[0px]"
             : "pl-2 pr-6 py-0.5 text-[9px]"
         } ${currentOption?.color || ""}`}
       >

@@ -486,13 +486,13 @@ export const PrivacyPolicyFindingCard: React.FC<FindingCardProps> = ({
             assignedTaskIds &&
             assignedTaskIds.length > 0 &&
             assignedTaskIds[0] !== finding.id && (
-              <Link
+                  <Link
                 to={`/projects/${projectId}?tab=tasks&taskId=${assignedTaskIds[0]}`}
                 target="_blank"
                 className="p-2 text-slate-400 hover:text-accent transition-colors"
                 title="View Task"
               >
-                <ClipboardList size={16} />
+                <Eye size={16} />
               </Link>
             )}
         </div>

@@ -9,6 +9,7 @@ import {
   CheckSquare,
   Square,
   ClipboardList,
+  Eye,
 } from "lucide-react"
 import { useRole } from "../hooks/useRole"
 import { FindingSeverityEditor } from "./FindingSeverityEditor"
@@ -223,7 +224,7 @@ export const ContactFormFindingCard: React.FC<ContactFormFindingCardProps> = ({
                       className="p-2 text-slate-400 hover:text-accent transition-colors"
                       title="View Task"
                     >
-                      <ClipboardList size={16} />
+                      <Eye size={16} />
                     </Link>
                   )}
               </div>
