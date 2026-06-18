@@ -37,17 +37,28 @@ interface TasksTabProps {
 
 const getTaskStatusColor = (status: string) => {
   switch (status) {
-    case "open": return "text-blue-500 dark:text-blue-400"
-    case "in_progress": return "text-amber-500 dark:text-amber-400"
-    case "resolved": return "text-emerald-500 dark:text-emerald-400"
-    case "closed": return "text-purple-500 dark:text-purple-400"
-    default: return "text-slate-500 dark:text-slate-400"
+    case "open":
+      return "text-blue-500 dark:text-blue-400"
+    case "in_progress":
+      return "text-amber-500 dark:text-amber-400"
+    case "resolved":
+      return "text-emerald-500 dark:text-emerald-400"
+    case "closed":
+      return "text-purple-500 dark:text-purple-400"
+    default:
+      return "text-slate-500 dark:text-slate-400"
   }
 }
 
 export const TasksTab = ({ project }: TasksTabProps) => {
-  const { data: tasksData, isLoading } = useTasks({ projectId: project?.id })
-  const tasks = (tasksData?.data || []).filter((task: any) => !task.title?.includes("[Feedback]"))
+  const { data: tasksData, isLoading } = useTasks({
+    projectId: project?.id,
+    limit: 1000,
+  })
+
+  const tasks = (tasksData?.data || []).filter(
+    (task: any) => !task.title?.includes("[Feedback]"),
+  )
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false)
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
@@ -263,7 +274,8 @@ export const TasksTab = ({ project }: TasksTabProps) => {
                 <h3 className="font-bold text-slate-900 dark:text-slate-100 uppercase tracking-widest text-[11px] flex items-center gap-2">
                   <div
                     className={`w-1.5 h-1.5 rounded-full ${
-                      groupedTasks.filter((t) => t.status === column.id).length === 0
+                      groupedTasks.filter((t) => t.status === column.id)
+                        .length === 0
                         ? "bg-slate-300 dark:bg-slate-600"
                         : column.title === "To Do"
                           ? "bg-blue-500 dark:bg-blue-400 shadow-[0_0_8px_rgba(59,130,246,0.4)]"
@@ -278,19 +290,22 @@ export const TasksTab = ({ project }: TasksTabProps) => {
                   />
                   {column.title}
                 </h3>
-                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full text-white shadow-md ${
-                  groupedTasks.filter((t) => t.status === column.id).length === 0
-                    ? "bg-slate-300 dark:bg-slate-600"
-                    : column.title === "To Do"
-                      ? "bg-blue-500 dark:bg-blue-400"
-                      : column.title === "In Progress"
-                        ? "bg-amber-500 dark:bg-amber-400"
-                        : column.title === "Resolved"
-                          ? "bg-emerald-500 dark:bg-emerald-400"
-                          : column.title === "Closed"
-                            ? "bg-purple-500 dark:bg-purple-400"
-                            : "bg-slate-500 dark:bg-slate-400"
-                }`}>
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded-full text-white shadow-md ${
+                    groupedTasks.filter((t) => t.status === column.id)
+                      .length === 0
+                      ? "bg-slate-300 dark:bg-slate-600"
+                      : column.title === "To Do"
+                        ? "bg-blue-500 dark:bg-blue-400"
+                        : column.title === "In Progress"
+                          ? "bg-amber-500 dark:bg-amber-400"
+                          : column.title === "Resolved"
+                            ? "bg-emerald-500 dark:bg-emerald-400"
+                            : column.title === "Closed"
+                              ? "bg-purple-500 dark:bg-purple-400"
+                              : "bg-slate-500 dark:bg-slate-400"
+                  }`}
+                >
                   {groupedTasks.filter((t) => t.status === column.id).length}
                 </span>
               </div>
@@ -435,7 +450,8 @@ export const TasksTab = ({ project }: TasksTabProps) => {
                           <div className="flex items-center space-x-1 text-sky-500 dark:text-sky-400">
                             <MessageSquare className="w-3 h-3" />
                             <span className="text-[10px] font-bold">
-                              {((task as any).comments?.length || 0) + ((task as any).rebuttals?.length || 0)}
+                              {((task as any).comments?.length || 0) +
+                                ((task as any).rebuttals?.length || 0)}
                             </span>
                           </div>
                           {task.basecamp_url && (

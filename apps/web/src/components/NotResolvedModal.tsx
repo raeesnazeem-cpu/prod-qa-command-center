@@ -65,15 +65,15 @@ export const NotResolvedModal = ({
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-slate-50 w-full max-w-lg rounded-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
+      <div className="bg-slate-50 dark:bg-[#131D22] w-full max-w-lg rounded-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+        <div className="p-6 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between bg-slate-50/50 dark:bg-[#131D22]/50">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-md bg-red-50 flex items-center justify-center">
               <Info className="w-5 h-5 text-red-500" />
             </div>
             <div>
-              <h3 className="font-bold text-slate-900 text-sm uppercase tracking-widest">
+              <h3 className="font-bold text-slate-900 dark:text-slate-100 text-sm uppercase tracking-widest">
                 {issueNumber ? `Issue #${issueNumber}` : "Task"} - Not Resolved
               </h3>
               <p className="text-[10px] text-slate-500 font-bold uppercase tracking-tight">
@@ -83,7 +83,7 @@ export const NotResolvedModal = ({
           </div>
           <button
             onClick={onClose}
-            className="p-2 hover:bg-slate-200 rounded-xl transition-all active:scale-90"
+            className="p-2 hover:bg-slate-200 dark:hover:bg-[#1D2A31] rounded-xl transition-all active:scale-90"
           >
             <X size={20} className="text-slate-400" />
           </button>
@@ -137,7 +137,7 @@ export const NotResolvedModal = ({
                   <select
                     value=""
                     onChange={(e) => toggleAssignee(e.target.value)}
-                    className="appearance-none bg-slate-50 border-2 border-dashed border-slate-200 hover:border-accent hover:text-accent text-slate-400 text-[10px] font-bold uppercase tracking-widest rounded-xl px-4 py-1.5 pr-10 cursor-pointer transition-all focus:outline-none"
+                    className="appearance-none bg-slate-50 dark:bg-[#1D2A31] border-2 border-dashed border-slate-200 dark:border-slate-700/50 hover:border-accent dark:hover:border-accent hover:text-accent focus:border-accent dark:focus:border-accent text-slate-400 text-[10px] font-bold uppercase tracking-widest rounded-xl px-4 py-1.5 pr-10 cursor-pointer transition-all focus:outline-none"
                   >
                     <option value="">+ Tag Someone</option>
                     {project?.project_members
@@ -165,16 +165,16 @@ export const NotResolvedModal = ({
               value={comment}
               onChange={(e) => setComment(e.target.value)}
               placeholder="Explain why this task is not resolved..."
-              className="w-full bg-slate-50 border border-slate-200 rounded-md px-4 py-4 text-sm focus:outline-none focus:ring-2 focus:ring-accent/20 resize-none min-h-[120px] transition-all"
+              className="w-full bg-slate-50 dark:bg-[#1D2A31] dark:text-slate-100 border border-slate-200 dark:border-slate-700/50 rounded-md px-4 py-4 text-sm focus:outline-none hover:border-accent dark:hover:border-accent focus:border-accent dark:focus:border-accent focus:ring-2 focus:ring-accent/20 resize-none min-h-[120px] transition-all"
             />
           </div>
         </div>
 
         {/* Footer */}
-        <div className="p-6 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
+        <div className="p-6 bg-slate-50 dark:bg-[#131D22] border-t border-slate-100 dark:border-slate-800 flex justify-end gap-3">
           <button
             onClick={onClose}
-            className="px-6 py-2.5 text-[11px] font-bold text-slate-500 uppercase tracking-widest hover:text-slate-900 transition-colors"
+            className="px-6 py-2.5 text-[11px] font-bold text-slate-500 uppercase tracking-widest hover:text-slate-900 dark:hover:text-slate-100 transition-colors"
           >
             Cancel
           </button>

@@ -183,12 +183,11 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
   const isFalsePositive = finding.status === "false_positive"
   const isLocked = hasTask || isAssigned || isPushed
 
-  const cardBorder =
-    isConfirmed || isAssigned
-      ? "border-emerald-500 ring-1 ring-emerald-500/20"
-      : isFalsePositive
-        ? "opacity-60 border-slate-200 dark:border-slate-800"
-        : "border-slate-200 dark:border-slate-800 hover:border-accent/40"
+  const cardBorder = isLocked
+    ? "border-emerald-500 ring-1 ring-emerald-500/20"
+    : isFalsePositive
+      ? "opacity-60 border-slate-200 dark:border-slate-800"
+      : "border-slate-200 dark:border-slate-800 hover:border-accent/40"
 
   const screenshotUrls = finding.screenshot_url
     ? finding.screenshot_url
@@ -557,32 +556,43 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
                     </button>
 
                     {(hasTask || isAssigned) &&
-                      assignedTaskIds &&
-                      assignedTaskIds.length > 0 &&
-                      assignedTaskIds[0] !== finding.id && (
-                        <div className="ml-1 flex items-center gap-1">
-                          <Link
-                            to={`/projects/${projectId}?tab=tasks&taskId=${assignedTaskIds[0]}`}
-                            target="_blank"
-                            className="text-slate-400 hover:text-accent transition-colors"
-                            title="View Task"
-                          >
-                            <Eye size={14} />
-                          </Link>
-                          <button
-                            onClick={(e) => {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              bulkDeleteTasks(assignedTaskIds)
-                            }}
-                            disabled={isDeleting}
-                            className="ml-1 text-slate-400 hover:text-red-500 transition-colors"
-                            title="Unlink Task"
-                          >
-                            <Unlink2 size={16} />
-                          </button>
-                        </div>
-                      )}
+                      (() => {
+                        const activeTaskIds =
+                          assignedTaskIds && assignedTaskIds.length > 0
+                            ? assignedTaskIds
+                            : finding.tasks?.map((t: any) => t.id) || []
+
+                        if (
+                          activeTaskIds.length === 0 ||
+                          activeTaskIds[0] === finding.id
+                        )
+                          return null
+
+                        return (
+                          <div className="ml-1 flex items-center gap-1">
+                            <Link
+                              to={`/projects/${projectId}?tab=tasks&taskId=${activeTaskIds[0]}`}
+                              target="_blank"
+                              className="text-slate-400 hover:text-accent transition-colors"
+                              title="View Task"
+                            >
+                              <Eye size={14} />
+                            </Link>
+                            <button
+                              onClick={(e) => {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                bulkDeleteTasks(activeTaskIds)
+                              }}
+                              disabled={isDeleting}
+                              className="ml-1 text-slate-400 hover:text-red-500 transition-colors"
+                              title="Unlink Task"
+                            >
+                              <Unlink2 size={16} />
+                            </button>
+                          </div>
+                        )
+                      })()}
                   </div>
                 )}
               </>
@@ -999,8 +1009,15 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
                     <button
                       disabled={isDeleting}
                       onClick={() => {
-                        bulkDeleteTasks(assignedTaskIds)
+                        const taskIds =
+                          assignedTaskIds && assignedTaskIds.length > 0
+                            ? assignedTaskIds
+                            : finding.tasks?.map((t: any) => t.id) || []
+                        if (taskIds.length > 0) {
+                          bulkDeleteTasks(taskIds)
+                        }
                         const action = deleteModalAction
+
                         setDeleteModalAction(null)
 
                         if (action === "unlink_uncheck" && isPushed) {

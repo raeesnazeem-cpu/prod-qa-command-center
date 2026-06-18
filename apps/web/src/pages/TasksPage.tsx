@@ -277,19 +277,21 @@ const KanbanColumn = ({
         />
         {title}
       </h3>
-      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full text-white shadow-md ${
-        tasks.length === 0
-          ? "bg-slate-300 dark:bg-slate-600"
-          : title === "To Do"
-            ? "bg-blue-500 dark:bg-blue-400"
-            : title === "In Progress"
-              ? "bg-amber-500 dark:bg-amber-400"
-              : title === "Resolved"
-                ? "bg-emerald-500 dark:bg-emerald-400"
-                : title === "Closed"
-                  ? "bg-purple-500 dark:bg-purple-400"
-                  : "bg-slate-500 dark:bg-slate-400"
-      }`}>
+      <span
+        className={`text-[10px] font-bold px-2 py-0.5 rounded-full text-white shadow-md ${
+          tasks.length === 0
+            ? "bg-slate-300 dark:bg-slate-600"
+            : title === "To Do"
+              ? "bg-blue-500 dark:bg-blue-400"
+              : title === "In Progress"
+                ? "bg-amber-500 dark:bg-amber-400"
+                : title === "Resolved"
+                  ? "bg-emerald-500 dark:bg-emerald-400"
+                  : title === "Closed"
+                    ? "bg-purple-500 dark:bg-purple-400"
+                    : "bg-slate-500 dark:bg-slate-400"
+        }`}
+      >
         {tasks.length}
       </span>
     </div>
@@ -416,6 +418,7 @@ export const TasksPage = () => {
   const { data: directTasks, isLoading: isTasksLoading } = useTasks({
     assignedTo: isDev ? profile?.id : undefined,
     createdBy: isQA ? profile?.id : undefined,
+    limit: 1000,
   })
 
   const handleDeleteTask = (taskId: string) => {
@@ -741,7 +744,9 @@ export const TasksPage = () => {
         {isQA && (
           <div className="space-y-20">
             {(() => {
-              const myTasks = (directTasks?.data || []).filter((task: any) => !task.title?.includes("[Feedback]"))
+              const myTasks = (directTasks?.data || []).filter(
+                (task: any) => !task.title?.includes("[Feedback]"),
+              )
 
               if (myTasks.length === 0) {
                 return (
@@ -786,7 +791,9 @@ export const TasksPage = () => {
         {isDev && (
           <div className="space-y-20">
             {(() => {
-              const myTasks = (directTasks?.data || []).filter((task: any) => !task.title?.includes("[Feedback]"))
+              const myTasks = (directTasks?.data || []).filter(
+                (task: any) => !task.title?.includes("[Feedback]"),
+              )
 
               if (myTasks.length === 0) {
                 return (
