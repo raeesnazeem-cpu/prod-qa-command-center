@@ -253,6 +253,8 @@ router.get(
         tasks (
           id,
           status,
+          assigned_to,
+          users:assigned_to (id, full_name, email),
           rebuttals (
             id,
             ai_verdict,
@@ -293,6 +295,8 @@ router.get("/:id/findings", clerkAuth, async (req: Request, res: Response) => {
         tasks (
           id,
           status,
+          assigned_to,
+          users:assigned_to (id, full_name, email),
           rebuttals (
             id,
             ai_verdict,
@@ -1121,7 +1125,7 @@ router.post("/verify-social-share-ai", async (req, res) => {
 
     // 1. Download images as base64 (Bypass expired JWTs using Supabase Admin Client)
     const imagesParts = []
-    
+
     for (const url of screenshotUrls) {
       let imageBuffer: Buffer
       let mimeType = "image/png"
@@ -1150,17 +1154,22 @@ router.post("/verify-social-share-ai", async (req, res) => {
           imageBuffer = Buffer.from(imageResponse.data)
           mimeType = imageResponse.headers["content-type"] || "image/png"
         }
-        
+
         imagesParts.push({
-          inlineData: { data: imageBuffer.toString("base64"), mimeType }
+          inlineData: { data: imageBuffer.toString("base64"), mimeType },
         })
       } catch (downloadError) {
-        console.error("Failed to download screenshot for social share verify:", downloadError)
+        console.error(
+          "Failed to download screenshot for social share verify:",
+          downloadError,
+        )
       }
     }
 
     if (imagesParts.length === 0) {
-      return res.status(400).json({ error: "Failed to fetch screenshots for AI analysis" })
+      return res
+        .status(400)
+        .json({ error: "Failed to fetch screenshots for AI analysis" })
     }
 
     // 2. Initialize Gemini 1.5 Pro
@@ -1197,17 +1206,14 @@ Return your findings as JSON in this exact structure:
 }
 If there is evidence of correct configuration for a platform, mark it as "verified", else "not verified".`
 
-    let response;
+    let response
     try {
       response = await genAI.models.generateContent({
         model: "gemini-2.5-flash",
         contents: [
           {
             role: "user",
-            parts: [
-              { text: systemPrompt },
-              ...imagesParts
-            ],
+            parts: [{ text: systemPrompt }, ...imagesParts],
           },
         ],
         config: {
@@ -1215,16 +1221,13 @@ If there is evidence of correct configuration for a platform, mark it as "verifi
         },
       })
     } catch (fallbackError) {
-      console.warn("gemini-2.5-flash failed, falling back to gemini-2.0-flash");
+      console.warn("gemini-2.5-flash failed, falling back to gemini-2.0-flash")
       response = await genAI.models.generateContent({
         model: "gemini-2.0-flash",
         contents: [
           {
             role: "user",
-            parts: [
-              { text: systemPrompt },
-              ...imagesParts
-            ],
+            parts: [{ text: systemPrompt }, ...imagesParts],
           },
         ],
         config: {
@@ -1239,6 +1242,127 @@ If there is evidence of correct configuration for a platform, mark it as "verifi
     return res.status(200).json(resultJson)
   } catch (error: any) {
     console.error("AI Verify Social Share Error:", error)
+    return res.status(500).json({ error: error.message })
+  }
+})
+
+/**
+ * POST /api/runs/verify-favicon-ai
+ * Uses AI to analyze the favicon screenshots and page source code.
+ */
+router.post("/verify-favicon-ai", async (req, res) => {
+  try {
+    const { screenshotUrls } = req.body
+    if (!screenshotUrls || !Array.isArray(screenshotUrls)) {
+      return res.status(400).json({ error: "screenshotUrls array is required" })
+    }
+
+    const axios = require("axios")
+    const { GoogleGenAI } = require("@google/genai")
+
+    const imagesParts = []
+    for (const url of screenshotUrls) {
+      let imageBuffer: Buffer
+      let mimeType = "image/png"
+
+      try {
+        if (url.includes("/storage/v1/object/")) {
+          const urlObj = new URL(url)
+          const parts = urlObj.pathname.split("/")
+          const bucketIndex =
+            parts.findIndex((p) => p === "sign" || p === "public") + 1
+          const bucket = parts[bucketIndex]
+          const filePath = decodeURIComponent(
+            parts.slice(bucketIndex + 1).join("/"),
+          )
+
+          const { data, error } = await supabase.storage
+            .from(bucket)
+            .download(filePath)
+          if (error) throw error
+          imageBuffer = Buffer.from(await data.arrayBuffer())
+          mimeType = data.type || "image/png"
+        } else {
+          const imageResponse = await axios.get(url, {
+            responseType: "arraybuffer",
+          })
+          imageBuffer = Buffer.from(imageResponse.data)
+          mimeType = imageResponse.headers["content-type"] || "image/png"
+        }
+
+        imagesParts.push({
+          inlineData: { data: imageBuffer.toString("base64"), mimeType },
+        })
+      } catch (downloadError) {
+        console.error(
+          "Failed to download screenshot for favicon verify:",
+          downloadError,
+        )
+      }
+    }
+
+    if (imagesParts.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Failed to fetch screenshots for AI analysis" })
+    }
+
+    const genAI = new GoogleGenAI({
+      apiKey: process.env.GOOGLE_AI_API_KEY || "",
+    })
+
+    const systemPrompt = `You are an expert QA tester.
+I am providing you with multiple screenshots related to a website's favicon (Desktop, Tablet, Mobile, and Page Source Code).
+Look at the screenshots to determine if the favicon is properly installed and visible in the browser tabs, and if the favicon code snippet exists in the page source code.
+
+Return your findings as JSON in this exact structure:
+{
+  "status": "success",
+  "message": "AI has reviewed the favicon screenshots.",
+  "faviconPresence": {
+    "desktop": "verified" | "not verified",
+    "tablet": "verified" | "not verified",
+    "mobile": "verified" | "not verified",
+    "sourceCode": "verified" | "not verified"
+  }
+}
+If there is evidence of correct configuration, mark it as "verified", else "not verified".`
+
+    let response
+    try {
+      response = await genAI.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: systemPrompt }, ...imagesParts],
+          },
+        ],
+        config: {
+          responseMimeType: "application/json",
+        },
+      })
+    } catch (fallbackError) {
+      response = await genAI.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: systemPrompt }, ...imagesParts],
+          },
+        ],
+        config: {
+          responseMimeType: "application/json",
+        },
+      })
+    }
+
+    const resultText = response.text || "{}"
+    const resultJson = JSON.parse(resultText)
+
+    return res.status(200).json(resultJson)
+  } catch (error: any) {
+    console.error("AI Verify Favicon Error:", error)
     return res.status(500).json({ error: error.message })
   }
 })

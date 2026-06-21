@@ -12,6 +12,7 @@ import {
   RefreshCw,
 } from "lucide-react"
 import { useParams, Link } from "react-router-dom"
+import { useQueryClient } from "@tanstack/react-query"
 import { useRole } from "../hooks/useRole"
 import { FindingSeverityEditor } from "./FindingSeverityEditor"
 import { QAFinding } from "../api/runs.api"
@@ -49,6 +50,7 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
   const setAiResult = useAiResultsStore((state) => state.setAiResult)
 
   const canAction = canDo("qa_engineer")
+  const queryClient = useQueryClient()
   const { mutate: bulkDeleteTasks, isPending: isDeleting } =
     useBulkDeleteTasks()
 
@@ -182,6 +184,12 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
   const isConfirmed = finding.status === "confirmed"
   const isFalsePositive = finding.status === "false_positive"
   const isLocked = hasTask || isAssigned || isPushed
+
+  const currentAssignees =
+    finding.tasks?.flatMap((t: any) => t.users ? [t.users] : []) || []
+  const allAssigneesList = [...currentAssignees, ...assignedUsers].filter(
+    (v, i, a) => a.findIndex((t) => (t.userId || t.id) === (v.userId || v.id)) === i,
+  )
 
   const cardBorder = isLocked
     ? "border-emerald-500 ring-1 ring-emerald-500/20"
@@ -352,7 +360,9 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
                   type="checkbox"
                   checked={isManuallyVerified}
                   onChange={(e) => {
+                    if (isLocked) return
                     const checked = e.target.checked
+
                     if (hasTask || isAssigned) {
                       setDeleteModalAction(
                         checked ? "unlink_check" : "unlink_uncheck",
@@ -426,7 +436,23 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
                   </button>
                 )} */}
 
-                {isManuallyVerified && (
+                <a
+                  href={
+                    finding.pages?.url
+                      ? `https://socialsharepreview.com/?url=${encodeURIComponent(finding.pages.url)}`
+                      : "https://socialsharepreview.com/"
+                  }
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn-unified flex items-center gap-2 bg-[#0b1016] hover:bg-slate-800 text-white"
+                  title="See in monitor"
+                >
+                  <span>
+                    <MonitorSmartphone size={14} />
+                  </span>
+                </a>
+
+                {isManuallyVerified && !(hasTask || isAssigned) && (
                   <div className="flex items-center gap-1">
                     <button
                       onClick={(e) => {
@@ -515,23 +541,6 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
                     )}
                   </div>
                 )}
-
-                <a
-                  href={
-                    finding.pages?.url
-                      ? `https://socialsharepreview.com/?url=${encodeURIComponent(finding.pages.url)}`
-                      : "https://socialsharepreview.com/"
-                  }
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="btn-unified flex items-center gap-2 bg-[#0b1016] hover:bg-slate-800 text-white"
-                  title="See in monitor"
-                >
-                  <span className="text-[11px]">See in </span>
-                  <span>
-                    <MonitorSmartphone size={14} />
-                  </span>
-                </a>
                 {!isManuallyVerified && (
                   <div className="flex items-center gap-2">
                     <button
@@ -582,7 +591,11 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
                               onClick={(e) => {
                                 e.preventDefault()
                                 e.stopPropagation()
-                                bulkDeleteTasks(activeTaskIds)
+                                bulkDeleteTasks(activeTaskIds, {
+                                  onSuccess: () => {
+                                    queryClient.invalidateQueries()
+                                  },
+                                })
                               }}
                               disabled={isDeleting}
                               className="ml-1 text-slate-400 hover:text-red-500 transition-colors"
@@ -600,28 +613,28 @@ export const SocialShareHeadingFindingCard: React.FC<FindingCardProps> = ({
           </div>
 
           <div className="flex items-center gap-3">
-            {assignedUsers && assignedUsers.length > 0 && (
+            {allAssigneesList && allAssigneesList.length > 0 && (
               <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-[#131d22] border border-slate-100 dark:border-slate-700 p-1.5 rounded-full pl-3 pr-2">
                 <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest leading-none">
                   Assigned
                 </span>
                 <div className="flex -space-x-1.5 overflow-hidden">
-                  {assignedUsers.map((u, idx) => (
+                  {Array.from(new Map(allAssigneesList.map(u => [u.id || u.user_id, u])).values()).map((u, idx) => (
                     <div
-                      key={u.id || idx}
+                      key={u.id || u.user_id || idx}
                       className="w-6 h-6 rounded-full bg-slate-200 dark:bg-[#1d2a31] border-2 border-white dark:border-[#1D2A31] flex items-center justify-center text-[8px] font-bold text-slate-500 dark:text-slate-300 relative group/avatar"
                     >
                       {u.avatar_url ? (
                         <img
                           src={u.avatar_url}
-                          alt={u.full_name || ""}
+                          alt={u.full_name || u.name || ""}
                           className="w-full h-full rounded-full object-cover"
                         />
                       ) : (
-                        u.full_name?.[0] || ""
+                        (u.full_name || u.name)?.[0]?.toUpperCase() || "U"
                       )}
                       <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-slate-900 text-white text-[10px] rounded opacity-0 group-hover/avatar:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-10">
-                        {u.full_name}
+                        {u.full_name || u.name || "Assigned User"}
                       </div>
                     </div>
                   ))}

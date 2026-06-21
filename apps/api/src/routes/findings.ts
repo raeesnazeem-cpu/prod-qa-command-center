@@ -348,40 +348,19 @@ router.post(
       }
 
       let targetTodo
-      if (finding.check_factor === "paid_media") {
-        targetTodo = allTodos.find((todo: any) =>
-          todo.content.toLowerCase().includes("qa- paid media"),
-        )
-        if (!targetTodo) {
-          throw new Error(
-            `To-do checklist item "QA- Paid Media" not found in Basecamp checklist "${targetList.name}".`,
-          )
-        }
-      } else if (finding.check_factor === "privacy_policy") {
+      const checkFactor = finding.check_factor
+
+      if (checkFactor === "project_plan") {
         targetTodo = allTodos.find((todo: any) =>
           todo.content
             .toLowerCase()
-            .includes("privacy policy page added on the website"),
+            .includes("15-quality assurance - prerelease 2026"),
         )
-
-        if (!targetTodo) {
+        if (!targetTodo)
           throw new Error(
-            `To-do checklist item "QA- Check if Privacy policy page added on the website." not found in Basecamp checklist "${targetList.name}".`,
+            `To-do checklist item "15-Quality Assurance - Prerelease 2026" not found in Basecamp checklist "${targetList.name}".`,
           )
-        }
-      } else if (finding.check_factor === "project_plan") {
-        targetTodo = allTodos.find((todo: any) =>
-          todo.content
-            .toLowerCase()
-            .includes("qa-check if reviews are added for accelerator plan"),
-        )
-
-        if (!targetTodo) {
-          throw new Error(
-            `To-do checklist item "QA-Check if reviews are added for Accelerator plan" not found in Basecamp checklist "${targetList.name}".`,
-          )
-        }
-      } else if (finding.check_factor === "hero_media") {
+      } else if (checkFactor === "hero_media") {
         targetTodo = allTodos.find((todo: any) =>
           todo.content
             .toLowerCase()
@@ -389,13 +368,136 @@ router.post(
               "qa-verify that the hero section video and fallback image load immediately on page load.",
             ),
         )
-
-        if (!targetTodo) {
+        if (!targetTodo)
           throw new Error(
-            `To-do checklist item for Hero Media not found in Basecamp checklist "${targetList.name}".`,
+            `To-do checklist item "QA-Verify that the hero section video and fallback image load immediately on page load." not found in Basecamp checklist "${targetList.name}".`,
           )
-        }
-      } else if (finding.check_factor === "social_share_heading") {
+      } else if (checkFactor === "dead_links") {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content.toLowerCase().includes("qa - verify deadlink"),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA - Verify Deadlink." not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "learn_more_buttons") {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content
+            .toLowerCase()
+            .includes("qa- check learn more, read more button on website"),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA- Check Learn more, read more button on website" not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "paid_media") {
+        targetTodo = allTodos.find(
+          (todo: any) =>
+            todo.content.toLowerCase().includes("qa paid media") ||
+            todo.content.toLowerCase().includes("qa- paid media"),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA Paid Media" not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "privacy_policy") {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content
+            .toLowerCase()
+            .includes("qa- check if privacy policy page added on the website"),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA- Check if Privacy policy page added on the website." not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "footer_logo") {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content
+            .toLowerCase()
+            .includes(
+              "qa - check the footer logo , it should be the new logo with no tagline",
+            ),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA - Check the footer logo , It should be the new logo with no tagline" not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "single_script") {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content
+            .toLowerCase()
+            .includes("qa - check if single script features are added"),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA - Check if single script features are added." not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "url_tab_compare") {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content
+            .toLowerCase()
+            .includes("qa - check url is matching and check for the tab name"),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA - Check URL is Matching and check for the tab name" not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "top_bar_sticky") {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content
+            .toLowerCase()
+            .includes(
+              "qa - verify contact number, e-mail id, and social media icons are added on top bar, and the header should be sticky",
+            ),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA - Verify Contact Number, E-mail ID, and Social Media icons are added on Top Bar, and the header should be sticky." not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "favicon_check" || checkFactor === "favicon") {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content.toLowerCase().includes("qa - add favicon"),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA - Add Favicon." not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "contact_form") {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content
+            .toLowerCase()
+            .includes(
+              "qa - verify growth99 contact form on all the pages for all views",
+            ),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA - Verify Growth99 contact form on all the pages for all views." not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "logo_chatbot") {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content
+            .toLowerCase()
+            .includes("qa - check if website logo is added to the chat bot"),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA - Check if website logo is added to the chat bot." not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (
+        checkFactor === "callnow_links" ||
+        checkFactor === "verify_plugin_updates"
+      ) {
+        targetTodo = allTodos.find((todo: any) =>
+          todo.content
+            .toLowerCase()
+            .includes("qa - before release - verify all plug-ins are updated"),
+        )
+        if (!targetTodo)
+          throw new Error(
+            `To-do checklist item "QA - Before Release - Verify ALL plug-ins are updated | Must verify then only start all pre-release tasks." not found in Basecamp checklist "${targetList.name}".`,
+          )
+      } else if (checkFactor === "social_share_heading") {
         targetTodo = allTodos.find((todo: any) =>
           todo.content
             .toLowerCase()
@@ -403,46 +505,10 @@ router.post(
               "qa- while sharing the website on text , business name should be matched",
             ),
         )
-
-        if (!targetTodo) {
+        if (!targetTodo)
           throw new Error(
             `To-do checklist item "QA- While sharing the website on text , business name should be matched" not found in Basecamp checklist "${targetList.name}".`,
           )
-        }
-      } else if (finding.check_factor === "logo_chatbot") {
-        targetTodo = allTodos.find((todo: any) =>
-          todo.content
-            .toLowerCase()
-            .includes("qa - check if website logo is added to the chat bot"),
-        )
-
-        if (!targetTodo) {
-          throw new Error(
-            `To-do checklist item "QA - Check if website logo is added to the chat bot." not found in Basecamp checklist "${targetList.name}".`,
-          )
-        }
-      } else if (finding.check_factor === "url_tab_compare") {
-        targetTodo = allTodos.find((todo: any) =>
-          todo.content
-            .toLowerCase()
-            .includes("qa - check url is matching and check for the tab name"),
-        )
-        if (!targetTodo) {
-          throw new Error(
-            `To-do checklist item "QA - Check URL is Matching and check for the tab name" not found in Basecamp checklist "${targetList.name}".`,
-          )
-        }
-      } else if (finding.check_factor === "verify_plugin_updates") {
-        targetTodo = allTodos.find((todo: any) =>
-          todo.content
-            .toLowerCase()
-            .includes("qa - before release - verify all plug-ins are updated"),
-        )
-        if (!targetTodo) {
-          throw new Error(
-            `To-do checklist item "QA - Before Release - Verify ALL plug-ins are updated | Must verify then only start all pre-release tasks." not found in Basecamp checklist "${targetList.name}".`,
-          )
-        }
       }
 
       // 4. Extract screenshots: split comma-separated list and reuse the worker's pre-captured reviews proof
@@ -644,6 +710,74 @@ router.post(
           <a href="${screenshot1Url}" target="_blank"><img src="${screenshot1Url}" width="500" style="border: 1px solid #e3e4e6; border-radius: 6px; margin-bottom: 16px;" /></a>
           ${aiResultsText ? `<br/><br/><div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px; padding: 16px;"><strong>${aiResultsText.replace(/\n/g, "<br/>")}</strong></div>` : ""}
           <br/><br/>
+          <em>Sent automatically via QA Command Center</em>
+        </div>
+        `.trim()
+      } else if (
+        finding.check_factor === "favicon_check" ||
+        finding.check_factor === "favicon"
+      ) {
+        const { aiResultsText, isVerified, assigneeNames } = req.body || {}
+        let mentionsHtml = ""
+        if (
+          assigneeNames &&
+          Array.isArray(assigneeNames) &&
+          assigneeNames.length > 0
+        ) {
+          mentionsHtml = `<strong>Assigned to:</strong> ${assigneeNames.join(", ")}<br/><br/>`
+        }
+
+        commentHtml = `
+        <div style="font-family: sans-serif; line-height: 1.5;">
+          <strong>Favicon Verification</strong><br/><br/>
+          ${mentionsHtml}
+          Status: <strong>${isVerified ? "Verified" : "Pending Review"}</strong><br/><br/>
+          <strong>Screenshots:</strong><br/>
+          ${screenshot1Url ? `<a href="${screenshot1Url}" target="_blank"><img src="${screenshot1Url}" width="500" style="border: 1px solid #e3e4e6; border-radius: 6px; margin-bottom: 16px;" /></a>` : ""}
+          ${aiResultsText ? `<br/><br/><div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px; padding: 16px;"><strong>${aiResultsText.replace(/\n/g, "<br/>")}</strong></div>` : ""}
+          <br/><br/>
+          <em>Sent automatically via QA Command Center</em>
+        </div>
+        `.trim()
+      } else if (finding.check_factor === "single_script") {
+        const { aiResultsText, assigneeNames } = req.body || {}
+        let mentionsHtml = ""
+        if (assigneeNames) {
+          mentionsHtml = `<strong>Assigned to:</strong> ${assigneeNames}<br/><br/>`
+        }
+
+        const screens = (finding.screenshot_url || "")
+          .split(",")
+          .filter(Boolean)
+        const screenshotsHtml = screens
+          .map(
+            (url: string) =>
+              `<a href="${url.trim()}" target="_blank"><img src="${url.trim()}" width="500" style="border: 1px solid #e3e4e6; border-radius: 6px; margin-bottom: 16px;" /></a>`,
+          )
+          .join("<br/><br/>")
+
+        commentHtml = `
+        <div style="font-family: sans-serif; line-height: 1.5;">
+          <strong>${finding.title || "Verify Single Script Features"}</strong><br/><br/>
+          ${mentionsHtml}
+          ${finding.description ? finding.description.replace(/\n/g, "<br/>") : "Please verify the single script features across Desktop, Tablet, Mobile and verify the script code addition."}<br/><br/>
+          <strong>Screenshots:</strong><br/>
+          ${screenshotsHtml}
+          ${aiResultsText ? `<br/><br/><div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px; padding: 16px;"><strong>${aiResultsText.replace(/\n/g, "<br/>")}</strong></div>` : ""}
+          <br/><br/>
+          <em>Sent automatically via QA Command Center</em>
+        </div>
+        `.trim()
+      } else {
+        // Fallback for any other check that doesn't have a custom HTML layout
+        const genericMessage = finding.description
+          ? finding.description.replace(/\n/g, "<br/>")
+          : "Verification completed."
+        commentHtml = `
+        <div style="font-family: sans-serif; line-height: 1.5;">
+          <strong>${finding.title || "Quality Assurance Check"}</strong><br/><br/>
+          ${genericMessage}<br/><br/>
+          ${screenshot1Url ? `<a href="${screenshot1Url}" target="_blank"><img src="${screenshot1Url}" width="500" style="border: 1px solid #e3e4e6; border-radius: 6px; margin-bottom: 16px;" /></a><br/><br/>` : ""}
           <em>Sent automatically via QA Command Center</em>
         </div>
         `.trim()

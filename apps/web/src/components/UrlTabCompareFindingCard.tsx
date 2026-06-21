@@ -15,8 +15,10 @@ import {
   Sparkle,
   Eye,
   Unlink2,
+  RefreshCw,
 } from "lucide-react"
 
+import { useQueryClient } from "@tanstack/react-query"
 import { useBulkDeleteTasks } from "../hooks/useTasks"
 import { useRole } from "../hooks/useRole"
 import { useParams, Link } from "react-router-dom"
@@ -87,6 +89,7 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
   const setAiResult = useAiResultsStore((state) => state.setAiResult)
 
   const canAction = canDo("qa_engineer")
+  const queryClient = useQueryClient()
   const { mutate: bulkDeleteTasks, isPending: isDeleting } =
     useBulkDeleteTasks()
 
@@ -100,20 +103,29 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
 
   const [isAiModalOpen, setIsAiModalOpen] = React.useState(false)
   const [isAiLoading, setIsAiLoading] = React.useState(false)
-  const [aiResultData, setAiResultData] = React.useState<any>(null)
+  const [aiResultData, setAiResultData] = React.useState<any>(() => {
+    try {
+      const cached = sessionStorage.getItem(`aiResult_${finding.id}`)
+      if (cached) return JSON.parse(cached)
+      if (finding.context_text) {
+        const parsed = JSON.parse(finding.context_text)
+        return parsed.aiResultData || null
+      }
+    } catch (e) {}
+    return null
+  })
 
-  const handleRunAiCheck = async () => {
-    // 1. Open the modal immediately
+  const compareData = parseContextData(finding.context_text)
+  const { devPages, livePages } = compareData
+
+  const handleRunAiCheck = async (forceRetry: boolean | React.MouseEvent = false) => {
+    const isForce = forceRetry === true
     setIsAiModalOpen(true)
+    if (aiResultData && !isForce) return
 
-    // 2. If we already have the results, do nothing else. Just show it!
-    if (aiResultData) return
-
-    // 3. Otherwise, start the loading spinner
     setIsAiLoading(true)
 
     try {
-      // 4. Send the dev and live pages to our new AI API endpoint
       const response = await axios.post("/api/runs/compare-urls-ai", {
         devPages: compareData?.devPages || [],
         livePages: compareData?.livePages || [],
@@ -121,9 +133,20 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
 
       const data = response.data
 
-      // 5. Save the smart AI results in our state
       setAiResultData(data)
       setAiResult(finding.id, getAiResultsText(data))
+      sessionStorage.setItem(`aiResult_${finding.id}`, JSON.stringify(data))
+
+      try {
+        await axios.patch(`/api/findings/${finding.id}`, {
+          context_text: JSON.stringify({
+            ...compareData,
+            aiResultData: data
+          })
+        })
+      } catch (err) {
+        console.error("Failed to save AI results to DB", err)
+      }
     } catch (error) {
       console.error("AI check failed:", error)
       setAiResultData({
@@ -133,7 +156,6 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
         missingInLive: [],
       })
     } finally {
-      // 6. Stop the loading spinner
       setIsAiLoading(false)
     }
   }
@@ -145,9 +167,12 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
   const hasTask = finding.tasks && finding.tasks.length > 0
   const isConfirmed = finding.status === "confirmed"
   const isFalsePositive = finding.status === "false_positive"
-
-  const compareData = parseContextData(finding.context_text)
-  const { devPages, livePages } = compareData
+  
+  const currentAssignees =
+    finding.tasks?.flatMap((t: any) => t.users ? [t.users] : []) || []
+  const allAssigneesList = [...currentAssignees, ...assignedUsers].filter(
+    (v, i, a) => a.findIndex((t) => (t.userId || t.id) === (v.userId || v.id)) === i,
+  )
 
   const [isPushing, setIsPushing] = React.useState(false)
   const [isPushed, setIsPushed] = React.useState(
@@ -159,6 +184,7 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
     (finding as any).basecamp_comment_url || null,
   )
   const [isDeletingPush, setIsDeletingPush] = React.useState(false)
+  const isLocked = hasTask || isAssigned || isPushed
 
   const handlePushToBasecamp = async () => {
     setIsPushing(true)
@@ -191,9 +217,18 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
   const handleDeletePush = async () => {
     setIsDeletingPush(true)
     try {
-      await axios.delete(`/api/findings/${finding.id}/push-basecamp`)
+      await axios.delete(`/api/findings/${finding.id}/delete-basecamp-push`)
       setIsPushed(false)
       setCommentUrl(null)
+
+      try {
+        await axios.patch(`/api/findings/${finding.id}`, {
+          basecamp_comment_id: null,
+          basecamp_comment_url: null,
+        })
+      } catch (e) {
+        console.error("Failed to clear state from DB", e)
+      }
     } catch (err: any) {
       alert(err.response?.data?.error || "Failed to delete Basecamp push.")
     } finally {
@@ -295,7 +330,7 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
             findingId={finding.id}
             pageId={finding.page_id}
             currentSeverity={finding.severity}
-            canEdit={canAction && !isFalsePositive}
+            canEdit={canAction && !isFalsePositive && !isLocked}
             symbolOnly={true}
           />
           <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-[0.1em]">
@@ -310,7 +345,9 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
         <div className="relative group/input">
           <input
             value={localTitle}
-            onChange={(e) => setLocalTitle(e.target.value)}
+            onChange={(e) => {
+              if (!isLocked) setLocalTitle(e.target.value)
+            }}
             className="w-full px-4 py-3.5 bg-slate-50 dark:bg-[#131d22]/50 border border-slate-200 dark:border-slate-600 rounded-md font-bold text-slate-900 dark:text-slate-200 focus:ring-2 focus:ring-accent/30 focus:border-accent/50 outline-none transition-all placeholder:text-slate-300 dark:placeholder:text-slate-500"
             placeholder="URL & Tab Name Comparison"
           />
@@ -386,8 +423,9 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
               <>
                 <div className="flex items-center gap-2">
                   <div className="flex items-center gap-1">
-                    <button
-                      onClick={(e) => {
+                    {!(hasTask || isAssigned) && (
+                      <button
+                        onClick={(e) => {
                         e.stopPropagation()
                         if (isPushed && commentUrl) {
                           window.open(
@@ -435,6 +473,7 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
                         </>
                       )}
                     </button>
+                    )}
 
                     {isPushed && (
                       <button
@@ -472,93 +511,101 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
                     )}
                   </div>
 
-                  <button
-                    onClick={() => {
-                      const tableRows = devPages
-                        .map((dev: any, i: number) => {
-                          const live = livePages[i]
-                          return `<tr><td style="padding: 8px; border: 1px solid #e2e8f0;">${dev?.url || ""}</td><td style="padding: 8px; border: 1px solid #e2e8f0;">${dev?.title || ""}</td><td style="padding: 8px; border: 1px solid #e2e8f0;">${live?.url || ""}</td><td style="padding: 8px; border: 1px solid #e2e8f0;">${live?.title || ""}</td></tr>`
-                        })
-                        .join("")
-                      const tableHtml = `<br/><table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; margin-top: 10px;"><thead><tr style="background-color: #f8fafc;"><th style="padding: 8px; border: 1px solid #e2e8f0;">Dev URL</th><th style="padding: 8px; border: 1px solid #e2e8f0;">Dev Tab Name</th><th style="padding: 8px; border: 1px solid #e2e8f0;">Live URL</th><th style="padding: 8px; border: 1px solid #e2e8f0;">Live Tab Name</th></tr></thead><tbody>${tableRows}</tbody></table><br/>`
-                      const aiHtml = aiResultData
-                        ? `<br/><div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px; padding: 16px;"><strong>${getAiResultsText(aiResultData).replace(/\n/g, "<br/>")}</strong></div>`
-                        : ""
+                  {!isPushed && (
+                    <>
+                      <button
+                        onClick={() => {
+                          const tableRows = devPages
+                            .map((dev: any, i: number) => {
+                              const live = livePages[i]
+                              return `<tr><td style="padding: 8px; border: 1px solid #e2e8f0;">${dev?.url || ""}</td><td style="padding: 8px; border: 1px solid #e2e8f0;">${dev?.title || ""}</td><td style="padding: 8px; border: 1px solid #e2e8f0;">${live?.url || ""}</td><td style="padding: 8px; border: 1px solid #e2e8f0;">${live?.title || ""}</td></tr>`
+                            })
+                            .join("")
+                          const tableHtml = `<br/><table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; margin-top: 10px;"><thead><tr style="background-color: #f8fafc;"><th style="padding: 8px; border: 1px solid #e2e8f0;">Dev URL</th><th style="padding: 8px; border: 1px solid #e2e8f0;">Dev Tab Name</th><th style="padding: 8px; border: 1px solid #e2e8f0;">Live URL</th><th style="padding: 8px; border: 1px solid #e2e8f0;">Live Tab Name</th></tr></thead><tbody>${tableRows}</tbody></table><br/>`
+                          const aiHtml = aiResultData
+                            ? `<br/><div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px; padding: 16px;"><strong>${getAiResultsText(aiResultData).replace(/\n/g, "<br/>")}</strong></div>`
+                            : ""
 
-                      onCreateTask?.({
-                        ...finding,
-                        title: localTitle,
-                        description:
-                          (finding.description || "") + tableHtml + aiHtml,
-                        gallery_images: finding.screenshot_url
-                          ? Array.from(
-                              new Set([
-                                ...galleryImages,
-                                ...finding.screenshot_url
-                                  .split(",")
-                                  .map((s: string) => s.trim())
-                                  .filter(Boolean),
-                              ]),
-                            )
-                          : galleryImages,
-                      })
-                    }}
-                    disabled={hasTask || isAssigned}
-                    className={`btn-unified ${hasTask || isAssigned ? "bg-accent text-white cursor-not-allowed" : ""}`}
-                  >
-                    {hasTask || isAssigned ? "Task Linked" : "Add to Tasks"}
-                  </button>
-                  {(hasTask || isAssigned) &&
-                    (() => {
-                      const activeTaskIds =
-                        assignedTaskIds && assignedTaskIds.length > 0
-                          ? assignedTaskIds
-                          : finding.tasks?.map((t: any) => t.id) || []
+                          onCreateTask?.({
+                            ...finding,
+                            title: localTitle,
+                            description:
+                              (finding.description || "") + tableHtml + aiHtml,
+                            gallery_images: finding.screenshot_url
+                              ? Array.from(
+                                  new Set([
+                                    ...galleryImages,
+                                    ...finding.screenshot_url
+                                      .split(",")
+                                      .map((s: string) => s.trim())
+                                      .filter(Boolean),
+                                  ]),
+                                )
+                              : galleryImages,
+                          })
+                        }}
+                        disabled={hasTask || isAssigned}
+                        className={`btn-unified ${hasTask || isAssigned ? "bg-accent text-white cursor-not-allowed" : ""}`}
+                      >
+                        {hasTask || isAssigned ? "Task Linked" : "Add to Tasks"}
+                      </button>
+                      {(hasTask || isAssigned) &&
+                        (() => {
+                          const activeTaskIds =
+                            assignedTaskIds && assignedTaskIds.length > 0
+                              ? assignedTaskIds
+                              : finding.tasks?.map((t: any) => t.id) || []
 
-                      if (
-                        activeTaskIds.length === 0 ||
-                        activeTaskIds[0] === finding.id
-                      )
-                        return null
+                          if (
+                            activeTaskIds.length === 0 ||
+                            activeTaskIds[0] === finding.id
+                          )
+                            return null
 
-                      return (
-                        <div className="ml-1 flex items-center gap-1">
-                          <Link
-                            to={`/projects/${projectId}?tab=tasks&taskId=${activeTaskIds[0]}`}
-                            target="_blank"
-                            className="text-slate-400 hover:text-accent transition-colors"
-                            title="View Task"
-                          >
-                            <Eye size={14} />
-                          </Link>
-                          <button
-                            onClick={(e) => {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              bulkDeleteTasks(activeTaskIds)
-                            }}
-                            disabled={isDeleting}
-                            className="ml-1 text-slate-400 hover:text-red-500 transition-colors"
-                            title="Unlink Task"
-                          >
-                            <Unlink2 size={16} />
-                          </button>
-                        </div>
-                      )
-                    })()}
+                          return (
+                            <div className="ml-1 flex items-center gap-1">
+                              <Link
+                                to={`/projects/${projectId}?tab=tasks&taskId=${activeTaskIds[0]}`}
+                                target="_blank"
+                                className="text-slate-400 hover:text-accent transition-colors"
+                                title="View Task"
+                              >
+                                <Eye size={14} />
+                              </Link>
+                              <button
+                                onClick={(e) => {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                  bulkDeleteTasks(activeTaskIds, {
+                                    onSuccess: () => {
+                                      queryClient.invalidateQueries()
+                                    },
+                                  })
+                                }}
+                                disabled={isDeleting}
+                                className="ml-1 text-slate-400 hover:text-red-500 transition-colors"
+                                title="Unlink Task"
+                              >
+                                <Unlink2 size={16} />
+                              </button>
+                            </div>
+                          )
+                        })()}
+                    </>
+                  )}
                 </div>
               </>
             )}
           </div>
 
           <div className="flex items-center gap-3">
-            {assignedUsers.length > 0 && (
+            {allAssigneesList.length > 0 && (
               <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-[#131d22] border border-slate-100 dark:border-slate-700 p-1.5 rounded-full pl-3 pr-2">
                 <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest leading-none">
                   Assigned
                 </span>
                 <div className="flex -space-x-1.5 overflow-hidden">
-                  {assignedUsers.map((u, idx) => (
+                  {allAssigneesList.map((u, idx) => (
                     <div
                       key={u.id || idx}
                       className="w-6 h-6 rounded-full bg-slate-200 dark:bg-[#1d2a31] border-2 border-white dark:border-[#1D2A31] flex items-center justify-center text-[8px] font-bold text-slate-500 dark:text-slate-300 relative group/avatar"
@@ -566,14 +613,14 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
                       {u.avatar_url ? (
                         <img
                           src={u.avatar_url}
-                          alt={u.full_name || ""}
+                          alt={u.full_name || u.name || ""}
                           className="w-full h-full rounded-full object-cover"
                         />
                       ) : (
-                        u.full_name?.[0] || ""
+                        (u.full_name || u.name)?.[0]?.toUpperCase() || "U"
                       )}
                       <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-slate-900 text-white text-[10px] rounded opacity-0 group-hover/avatar:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-10">
-                        {u.full_name}
+                        {u.full_name || u.name || "Assigned User"}
                       </div>
                     </div>
                   ))}
@@ -609,15 +656,41 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
             )}
 
             {aiResultData && (
-              <button
-                onClick={() => setIsAiModalOpen(true)}
-                className="text-xs font-semibold text-sky-400 hover:text-sky-500 tracking-wide"
-              >
-                <span className="flex items-center gap-1">
-                  <Sparkle size={14} />
-                  <span>AI RESULTS</span>
-                </span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setIsAiModalOpen(true)}
+                  className="text-xs font-semibold text-sky-400 hover:text-sky-500 tracking-wide"
+                >
+                  <span className="flex items-center gap-1">
+                    <Sparkle size={14} />
+                    <span>AI RESULTS</span>
+                  </span>
+                </button>
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation()
+                    if (isPushed) {
+                      const proceed = window.confirm(
+                        "This finding is already pushed to Basecamp. Retrying the AI check will remove the current Basecamp comment. Do you want to continue?",
+                      )
+                      if (proceed) {
+                        const success = await handleDeletePush()
+                        if (success) handleRunAiCheck(true)
+                      }
+                    } else {
+                      handleRunAiCheck(true)
+                    }
+                  }}
+                  disabled={isAiLoading}
+                  className="p-1 text-slate-400 hover:text-sky-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Retry AI Check"
+                >
+                  <RefreshCw
+                    size={12}
+                    className={isAiLoading ? "animate-spin" : ""}
+                  />
+                </button>
+              </div>
             )}
           </div>
         </div>

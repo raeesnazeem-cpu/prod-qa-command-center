@@ -217,7 +217,6 @@ export const DefaultFindingCard: React.FC<FindingCardProps> = ({
                   onClick={() => setIsBrowserOpen(true)}
                   className="btn-unified w-fit flex justify-start items-center gap-2 mt-3"
                 >
-                  <span className="text-white">See in </span>
                   <MonitorSmartphone
                     size={14}
                     className="text-white-400 group-hover/btn:text-black transition-colors"
@@ -405,7 +404,6 @@ export const DefaultFindingCard: React.FC<FindingCardProps> = ({
               onClick={() => setIsBrowserOpen(true)}
               className="btn-unified w-fit ml-auto flex justify-end items-center gap-2 mt-3"
             >
-              <span className="text-white">See in </span>
               <MonitorSmartphone
                 size={14}
                 className="text-white-400 group-hover/btn:text-black transition-colors"

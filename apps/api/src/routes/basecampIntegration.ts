@@ -283,38 +283,49 @@ router.post(
           .json({ error: "Basecamp to-do list not configured" })
       }
 
-      // Special routing for Hero Media findings
-      const isHeroMedia = task.findings?.check_factor === "hero_media"
-      const isDeadLink =
-        task.findings?.check_factor === "dead_links" ||
-        (task as any).check_factor === "dead_links"
-      const isPrivacyPolicy =
-        task.findings?.check_factor === "privacy_policy" ||
-        (task as any).check_factor === "privacy_policy"
+      const checkFactor =
+        task.findings?.check_factor || (task as any).check_factor
 
-      const isSocialShare =
-        task.findings?.check_factor === "social_share_heading" ||
-        (task as any).check_factor === "social_share_heading"
+      const isProjectPlan = checkFactor === "project_plan"
+      const isHeroMedia = checkFactor === "hero_media"
+      const isDeadLink = checkFactor === "dead_links"
+      const isLearnMore = checkFactor === "learn_more_buttons"
+      const isPaidMedia = checkFactor === "paid_media"
+      const isPrivacyPolicy = checkFactor === "privacy_policy"
+      const isFooterLogo = checkFactor === "footer_logo"
+      const isSingleScript = checkFactor === "single_script"
+      const isUrlTabCompare = checkFactor === "url_tab_compare"
+      const isTopBarSticky = checkFactor === "top_bar_sticky"
+      const isFavicon =
+        checkFactor === "favicon_check" || checkFactor === "favicon"
+      const isContactForm = checkFactor === "contact_form"
+      const isLogoChatbot = checkFactor === "logo_chatbot"
+      const isCallnowLinks =
+        checkFactor === "callnow_links" ||
+        checkFactor === "verify_plugin_updates"
+      const isSocialShare = checkFactor === "social_share_heading"
 
-      const isLogoChatbot =
-        task.findings?.check_factor === "logo_chatbot" ||
-        (task as any).check_factor === "logo_chatbot"
-
-      const isUrlTabCompare =
-        task.findings?.check_factor === "url_tab_compare" ||
-        (task as any).check_factor === "url_tab_compare"
-
-      let appUrl = ""
-      if (
+      const isSpecificCheck =
+        isProjectPlan ||
         isHeroMedia ||
         isDeadLink ||
+        isLearnMore ||
+        isPaidMedia ||
         isPrivacyPolicy ||
-        isSocialShare ||
+        isFooterLogo ||
+        isSingleScript ||
+        isUrlTabCompare ||
+        isTopBarSticky ||
+        isFavicon ||
+        isContactForm ||
         isLogoChatbot ||
-        isUrlTabCompare
-      ) {
+        isCallnowLinks ||
+        isSocialShare
+
+      let appUrl = ""
+      if (isSpecificCheck) {
         console.log(
-          `[BasecampPush] Task is a ${isHeroMedia ? "Hero Media" : isDeadLink ? "Dead Link" : isPrivacyPolicy ? "Privacy Policy" : isSocialShare ? "Social Share" : isLogoChatbot ? "Logo on Chatbot" : isUrlTabCompare ? "Url Tab Compare" : "Other"} finding. Locating specific checklist item...`,
+          `[BasecampPush] Task is a specific checklist finding (${checkFactor}). Locating specific checklist item...`,
         )
 
         const headers = {
@@ -376,63 +387,91 @@ router.post(
         }
 
         let targetTodo
-        if (isHeroMedia) {
-          const targetTodoName =
-            "qa-verify that the hero section video and fallback image load immediately on page load."
-          targetTodo = allTodos.find((todo: any) =>
-            todo.content.toLowerCase().includes(targetTodoName),
-          )
 
-          if (!targetTodo) {
-            targetTodo = allTodos.find(
-              (todo: any) =>
-                todo.content.toLowerCase().includes("hero section video") ||
-                todo.content.toLowerCase().includes("fallback image") ||
-                todo.content.toLowerCase().includes("hero section"),
-            )
-          }
-
-          if (!targetTodo) {
-            throw new Error(
-              `To-do checklist item "QA-Verify that the hero section video and fallback image load immediately on page load." not found in Basecamp checklist "${targetList.name}".`,
-            )
-          }
-        } else if (isPrivacyPolicy) {
+        if (isProjectPlan) {
           targetTodo = allTodos.find((todo: any) =>
             todo.content
               .toLowerCase()
-              .includes("privacy policy page added on the website"),
+              .includes("15-quality assurance - prerelease 2026"),
           )
-
-          if (!targetTodo) {
+          if (!targetTodo)
             throw new Error(
-              `To-do checklist item "QA- Check if Privacy policy page added on the website." not found in Basecamp checklist "${targetList.name}".`,
+              `To-do checklist item "15-Quality Assurance - Prerelease 2026" not found in Basecamp checklist "${targetList.name}".`,
             )
-          }
-        } else if (isSocialShare) {
+        } else if (isHeroMedia) {
           targetTodo = allTodos.find((todo: any) =>
             todo.content
               .toLowerCase()
               .includes(
-                "qa- while sharing the website on text , business name should be matched",
+                "qa-verify that the hero section video and fallback image load immediately on page load.",
               ),
           )
-          if (!targetTodo) {
+          if (!targetTodo)
             throw new Error(
-              `To-do checklist item "QA- While sharing the website on text , business name should be matched" not found in Basecamp checklist "${targetList.name}".`,
+              `To-do checklist item "QA-Verify that the hero section video and fallback image load immediately on page load." not found in Basecamp checklist "${targetList.name}".`,
             )
-          }
-        } else if (isLogoChatbot) {
+        } else if (isDeadLink) {
+          targetTodo = allTodos.find((todo: any) =>
+            todo.content.toLowerCase().includes("qa - verify deadlink"),
+          )
+          if (!targetTodo)
+            throw new Error(
+              `To-do checklist item "QA - Verify Deadlink." not found in Basecamp checklist "${targetList.name}".`,
+            )
+        } else if (isLearnMore) {
           targetTodo = allTodos.find((todo: any) =>
             todo.content
               .toLowerCase()
-              .includes("qa - check if website logo is added to the chat bot"),
+              .includes("qa- check learn more, read more button on website"),
           )
-          if (!targetTodo) {
+          if (!targetTodo)
             throw new Error(
-              `To-do checklist item "QA - Check if website logo is added to the chat bot." not found in Basecamp checklist "${targetList.name}".`,
+              `To-do checklist item "QA- Check Learn more, read more button on website" not found in Basecamp checklist "${targetList.name}".`,
             )
-          }
+        } else if (isPaidMedia) {
+          targetTodo = allTodos.find(
+            (todo: any) =>
+              todo.content.toLowerCase().includes("qa paid media") ||
+              todo.content.toLowerCase().includes("qa- paid media"),
+          )
+          if (!targetTodo)
+            throw new Error(
+              `To-do checklist item "QA Paid Media" not found in Basecamp checklist "${targetList.name}".`,
+            )
+        } else if (isPrivacyPolicy) {
+          targetTodo = allTodos.find((todo: any) =>
+            todo.content
+              .toLowerCase()
+              .includes(
+                "qa- check if privacy policy page added on the website",
+              ),
+          )
+          if (!targetTodo)
+            throw new Error(
+              `To-do checklist item "QA- Check if Privacy policy page added on the website." not found in Basecamp checklist "${targetList.name}".`,
+            )
+        } else if (isFooterLogo) {
+          targetTodo = allTodos.find((todo: any) =>
+            todo.content
+              .toLowerCase()
+              .includes(
+                "qa - check the footer logo , it should be the new logo with no tagline",
+              ),
+          )
+          if (!targetTodo)
+            throw new Error(
+              `To-do checklist item "QA - Check the footer logo , It should be the new logo with no tagline" not found in Basecamp checklist "${targetList.name}".`,
+            )
+        } else if (isSingleScript) {
+          targetTodo = allTodos.find((todo: any) =>
+            todo.content
+              .toLowerCase()
+              .includes("qa - check if single script features are added"),
+          )
+          if (!targetTodo)
+            throw new Error(
+              `To-do checklist item "QA - Check if single script features are added." not found in Basecamp checklist "${targetList.name}".`,
+            )
         } else if (isUrlTabCompare) {
           targetTodo = allTodos.find((todo: any) =>
             todo.content
@@ -441,31 +480,76 @@ router.post(
                 "qa - check url is matching and check for the tab name",
               ),
           )
-          if (!targetTodo) {
+          if (!targetTodo)
             throw new Error(
               `To-do checklist item "QA - Check URL is Matching and check for the tab name" not found in Basecamp checklist "${targetList.name}".`,
             )
-          }
-        } else {
-          // isDeadLink
-
-          const targetTodoName = "qa - verify deadlink"
-
+        } else if (isTopBarSticky) {
           targetTodo = allTodos.find((todo: any) =>
-            todo.content.toLowerCase().includes(targetTodoName),
+            todo.content
+              .toLowerCase()
+              .includes(
+                "qa - verify contact number, e-mail id, and social media icons are added on top bar, and the header should be sticky",
+              ),
           )
-
-          if (!targetTodo) {
-            targetTodo = allTodos.find((todo: any) =>
-              todo.content.toLowerCase().includes("deadlink"),
-            )
-          }
-
-          if (!targetTodo) {
+          if (!targetTodo)
             throw new Error(
-              `To-do checklist item "QA - Verify Deadlink" not found in Basecamp checklist "${targetList.name}".`,
+              `To-do checklist item "QA - Verify Contact Number, E-mail ID, and Social Media icons are added on Top Bar, and the header should be sticky." not found in Basecamp checklist "${targetList.name}".`,
             )
-          }
+        } else if (isFavicon) {
+          targetTodo = allTodos.find((todo: any) =>
+            todo.content.toLowerCase().includes("qa - add favicon"),
+          )
+          if (!targetTodo)
+            throw new Error(
+              `To-do checklist item "QA - Add Favicon." not found in Basecamp checklist "${targetList.name}".`,
+            )
+        } else if (isContactForm) {
+          targetTodo = allTodos.find((todo: any) =>
+            todo.content
+              .toLowerCase()
+              .includes(
+                "qa - verify growth99 contact form on all the pages for all views",
+              ),
+          )
+          if (!targetTodo)
+            throw new Error(
+              `To-do checklist item "QA - Verify Growth99 contact form on all the pages for all views." not found in Basecamp checklist "${targetList.name}".`,
+            )
+        } else if (isLogoChatbot) {
+          targetTodo = allTodos.find((todo: any) =>
+            todo.content
+              .toLowerCase()
+              .includes("qa - check if website logo is added to the chat bot"),
+          )
+          if (!targetTodo)
+            throw new Error(
+              `To-do checklist item "QA - Check if website logo is added to the chat bot." not found in Basecamp checklist "${targetList.name}".`,
+            )
+        } else if (isCallnowLinks) {
+          targetTodo = allTodos.find((todo: any) =>
+            todo.content
+              .toLowerCase()
+              .includes(
+                "qa - before release - verify all plug-ins are updated",
+              ),
+          )
+          if (!targetTodo)
+            throw new Error(
+              `To-do checklist item "QA - Before Release - Verify ALL plug-ins are updated | Must verify then only start all pre-release tasks." not found in Basecamp checklist "${targetList.name}".`,
+            )
+        } else if (isSocialShare) {
+          targetTodo = allTodos.find((todo: any) =>
+            todo.content
+              .toLowerCase()
+              .includes(
+                "qa- while sharing the website on text , business name should be matched",
+              ),
+          )
+          if (!targetTodo)
+            throw new Error(
+              `To-do checklist item "QA- While sharing the website on text , business name should be matched" not found in Basecamp checklist "${targetList.name}".`,
+            )
         }
 
         todolistId = targetTodo.id
@@ -634,7 +718,8 @@ router.post(
         ).replace(/\n/g, "<br/>")
         description = `${issueHeader}
 <div>[PENDING]</div>
-${mentions ? `<div>${mentions}</div>` : ""}
+${mentions ? `<div style="margin-bottom: 12px; font-size: 13px; font-weight: 500;">${mentions}</div>` : ""}
+
 <br/>
 <strong>${task.title}</strong><br/>
 <div style="white-space: pre-wrap;">${formattedDescription}</div><br/>
@@ -737,15 +822,10 @@ Created via QA Command Center`.trim()
         })
       }
 
-      const basecampUrl =
-        isHeroMedia ||
-        isDeadLink ||
-        isPrivacyPolicy ||
-        isSocialShare ||
-        isLogoChatbot
-          ? appUrl ||
-            `https://3.basecamp.com/${projectSettings.basecamp_account_id}/buckets/${projectSettings.basecamp_project_id}/todos/${todolistId}`
-          : `https://3.basecamp.com/${projectSettings.basecamp_account_id}/buckets/${projectSettings.basecamp_project_id}/todolists/${todolistId}`
+      const basecampUrl = isSpecificCheck
+        ? appUrl ||
+          `https://3.basecamp.com/${projectSettings.basecamp_account_id}/buckets/${projectSettings.basecamp_project_id}/todos/${todolistId}`
+        : `https://3.basecamp.com/${projectSettings.basecamp_account_id}/buckets/${projectSettings.basecamp_project_id}/todolists/${todolistId}`
 
       // 6. Update all siblings in Supabase
       console.log(
@@ -1028,7 +1108,45 @@ router.post(
         `[BasecampBulkPush] 5/6 Pushing ${taskGroups.size} groups as comments to target: ${todolistId}`,
       )
 
+      // Fetch all todos from the list to map specific checks
+      const basecampHeaders = {
+        Authorization: `Bearer ${activeBasecampToken}`,
+        "User-Agent": "QACC (raees.nazeem@growth99.com)",
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      }
+      let allTodos: any[] = []
+      let page = 1
+      let hasMore = true
+      while (hasMore) {
+        const todosUrl = `https://3.basecampapi.com/${projectSettings.basecamp_account_id}/buckets/${projectSettings.basecamp_project_id}/todolists/${todolistId}/todos.json?page=${page}`
+        try {
+          const todosResponse = await axios.get(todosUrl, {
+            headers: basecampHeaders,
+          })
+          const pageTodos = todosResponse.data
+          if (pageTodos.length === 0) {
+            hasMore = false
+          } else {
+            allTodos = allTodos.concat(pageTodos)
+            const linkHeader = todosResponse.headers?.link
+            if (linkHeader && linkHeader.includes('rel="next"')) {
+              page++
+            } else {
+              hasMore = false
+            }
+          }
+        } catch (err) {
+          console.error(
+            "[BasecampBulkPush] Failed to fetch todos for mapping",
+            err,
+          )
+          hasMore = false
+        }
+      }
+
       let successCount = 0
+
       for (const [groupKey, groupTasks] of taskGroups.entries()) {
         const firstTask = groupTasks[0]
 
@@ -1094,11 +1212,135 @@ router.post(
         `.trim()
 
         try {
+          let targetRecordingId = todolistId
+          let targetAppUrl = ""
+          let targetTodo
+
+          const checkFactor =
+            firstTask.findings?.check_factor || (firstTask as any).check_factor
+
+          if (checkFactor === "project_plan") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes("15-quality assurance - prerelease 2026"),
+            )
+          } else if (checkFactor === "hero_media") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes(
+                  "qa-verify that the hero section video and fallback image load immediately on page load.",
+                ),
+            )
+          } else if (checkFactor === "dead_links") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content.toLowerCase().includes("qa - verify deadlink"),
+            )
+          } else if (checkFactor === "learn_more_buttons") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes("qa- check learn more, read more button on website"),
+            )
+          } else if (checkFactor === "paid_media") {
+            targetTodo = allTodos.find(
+              (todo: any) =>
+                todo.content.toLowerCase().includes("qa paid media") ||
+                todo.content.toLowerCase().includes("qa- paid media"),
+            )
+          } else if (checkFactor === "privacy_policy") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes(
+                  "qa- check if privacy policy page added on the website",
+                ),
+            )
+          } else if (checkFactor === "footer_logo") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes(
+                  "qa - check the footer logo , it should be the new logo with no tagline",
+                ),
+            )
+          } else if (checkFactor === "single_script") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes("qa - check if single script features are added"),
+            )
+          } else if (checkFactor === "url_tab_compare") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes(
+                  "qa - check url is matching and check for the tab name",
+                ),
+            )
+          } else if (checkFactor === "top_bar_sticky") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes(
+                  "qa - verify contact number, e-mail id, and social media icons are added on top bar, and the header should be sticky",
+                ),
+            )
+          } else if (
+            checkFactor === "favicon_check" ||
+            checkFactor === "favicon"
+          ) {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content.toLowerCase().includes("qa - add favicon"),
+            )
+          } else if (checkFactor === "contact_form") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes(
+                  "qa - verify growth99 contact form on all the pages for all views",
+                ),
+            )
+          } else if (checkFactor === "logo_chatbot") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes(
+                  "qa - check if website logo is added to the chat bot",
+                ),
+            )
+          } else if (
+            checkFactor === "callnow_links" ||
+            checkFactor === "verify_plugin_updates"
+          ) {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes(
+                  "qa - before release - verify all plug-ins are updated",
+                ),
+            )
+          } else if (checkFactor === "social_share_heading") {
+            targetTodo = allTodos.find((todo: any) =>
+              todo.content
+                .toLowerCase()
+                .includes(
+                  "qa- while sharing the website on text , business name should be matched",
+                ),
+            )
+          }
+
+          if (targetTodo) {
+            targetRecordingId = targetTodo.id
+            targetAppUrl = targetTodo.app_url || ""
+          }
+
           await createBasecampComment({
             token: activeBasecampToken,
             accountId: projectSettings!.basecamp_account_id,
             projectId: projectSettings!.basecamp_project_id || projectId,
-            recordingId: todolistId,
+            recordingId: targetRecordingId,
             content: taskCommentContent,
           })
 
@@ -1136,19 +1378,22 @@ router.post(
               token: activeBasecampToken,
               accountId: projectSettings!.basecamp_account_id,
               projectId: projectSettings!.basecamp_project_id || projectId,
-              recordingId: todolistId,
+              recordingId: targetRecordingId,
               content: item.content,
             })
           }
 
           // Update all tasks in this group in Supabase
           const groupTaskIds = groupTasks.map((t) => t.id)
-          const basecampUrl = `https://3.basecamp.com/${projectSettings.basecamp_account_id}/buckets/${projectSettings.basecamp_project_id}/todolists/${todolistId}`
+          const basecampUrl = targetTodo
+            ? targetAppUrl ||
+              `https://3.basecamp.com/${projectSettings.basecamp_account_id}/buckets/${projectSettings.basecamp_project_id}/todos/${targetRecordingId}`
+            : `https://3.basecamp.com/${projectSettings.basecamp_account_id}/buckets/${projectSettings.basecamp_project_id}/todolists/${todolistId}`
 
           await supabase
             .from("tasks")
             .update({
-              basecamp_task_id: todolistId,
+              basecamp_task_id: targetRecordingId,
               basecamp_url: basecampUrl,
               status: "in_progress",
               updated_at: new Date().toISOString(),

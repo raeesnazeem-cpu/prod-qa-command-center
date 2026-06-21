@@ -326,7 +326,6 @@ export const LogoCheckFindingCard: React.FC<FindingCardProps> = ({
             onClick={() => setIsBrowserOpen(true)}
             className="btn-unified w-fit flex items-center gap-2"
           >
-            <span className="text-white">See in </span>
             <MonitorSmartphone
               size={14}
               className="text-white-400 group-hover/btn:text-black transition-colors"

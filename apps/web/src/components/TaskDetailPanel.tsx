@@ -98,30 +98,34 @@ export const TaskDetailPanel = ({
 
   if (!task) return null
 
-  const isFeedbackTask = isFeedbackMode || task.title?.startsWith('[Feedback]')
+  const isFeedbackTask = isFeedbackMode || task.title?.startsWith("[Feedback]")
 
   const handlePush = () => {
-    const isHeroMedia =
-      task.findings?.check_factor === "hero_media" ||
-      (task as any).check_factor === "hero_media"
-    const isDeadLink =
-      task.findings?.check_factor === "dead_links" ||
-      (task as any).check_factor === "dead_links"
-    const isLogoChatbot =
-      task.findings?.check_factor === "logo_chatbot" ||
-      (task as any).check_factor === "logo_chatbot"
+    const checkFactor =
+      task.findings?.check_factor || (task as any).check_factor
 
-    if (isHeroMedia) {
-      console.log("Pushing hero media task to specific checklist item...", {
-        taskId: task.id,
-      })
-    } else if (isDeadLink) {
-      console.log("Pushing dead link task to specific checklist item...", {
-        taskId: task.id,
-      })
-    } else if (isLogoChatbot) {
+    const checkNames: Record<string, string> = {
+      project_plan: "Project Plan Check",
+      hero_media: "Hero Video Check",
+      dead_links: "Deadlink Check",
+      learn_more_buttons: "Learn more buttons check",
+      paid_media: "Paid Media Check",
+      privacy_policy: "Privacy Policy check",
+      footer_logo: "Footer Logo check",
+      single_script: "SingleScript Features",
+      url_tab_compare: "Urltab comparison",
+      top_bar_sticky: "Top bar sticky header check",
+      favicon_check: "Favicon check",
+      favicon: "Favicon check",
+      contact_form: "Contactform check",
+      logo_chatbot: "Logo on chatbot check",
+      callnow_links: "Callnow button check",
+      verify_plugin_updates: "Callnow button check (Plugin updates)",
+    }
+
+    if (checkFactor && checkNames[checkFactor]) {
       console.log(
-        "Pushing logo on chatbot task to specific checklist item...",
+        `Pushing ${checkNames[checkFactor]} task to specific checklist item...`,
         {
           taskId: task.id,
         },
@@ -320,7 +324,8 @@ export const TaskDetailPanel = ({
                   </CanDo>
                 )}
 
-                {!isFeedbackTask && project?.basecamp_account_id &&
+                {!isFeedbackTask &&
+                  project?.basecamp_account_id &&
                   project?.basecamp_project_id &&
                   (project?.basecamp_todo_list_id ||
                     project?.basecamp_post_todo_list_id) && (
