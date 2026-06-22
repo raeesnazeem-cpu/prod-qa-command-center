@@ -325,6 +325,7 @@ export const PaidMediaFindingCard: React.FC<FindingCardProps> = ({
 
       <div className="flex items-center justify-between pt-4 border-t border-slate-50 dark:border-slate-700/50 mt-auto">
         <div className="flex items-center gap-2">
+        {!(hasTask || isAssigned) && (
           <button
             onClick={handlePushToBasecamp}
             disabled={isPushing || isPushed}
@@ -366,6 +367,7 @@ export const PaidMediaFindingCard: React.FC<FindingCardProps> = ({
               </>
             )}
           </button>
+        )}
 
           <div className="w-px h-6 bg-slate-200 mx-1"></div>
 
@@ -387,6 +389,7 @@ export const PaidMediaFindingCard: React.FC<FindingCardProps> = ({
                 </button>
               )}
               <div className="flex items-center gap-2">
+              {!isPushed && (
                 <button
                   onClick={() =>
                     onCreateTask?.({
@@ -397,12 +400,13 @@ export const PaidMediaFindingCard: React.FC<FindingCardProps> = ({
                   disabled={hasTask || isAssigned}
                   className={`btn-unified ${
                     hasTask || isAssigned
-                      ? "bg-accent text-white border-accent cursor-not-allowed"
+                      ? "bg-accent text-white cursor-not-allowed"
                       : ""
                   }`}
                 >
                   {hasTask || isAssigned ? "Task Linked" : "Add to Tasks"}
                 </button>
+              )}
 
                 {(hasTask || isAssigned) &&
                   assignedTaskIds &&

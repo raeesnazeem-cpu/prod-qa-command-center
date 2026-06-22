@@ -1,27 +1,27 @@
-import axios from 'axios';
-import { logger } from './logger';
+import axios from "axios"
+import { logger } from "./logger"
 
-const pkg = require('../../package.json');
+const pkg = require("../../package.json")
 
 interface GoogleChatCard {
-  cardId: string;
+  cardId: string
   card: {
     header?: {
-      title: string;
-      subtitle?: string;
-      imageUrl?: string;
-      imageType?: 'CIRCLE' | 'SQUARE';
-    };
+      title: string
+      subtitle?: string
+      imageUrl?: string
+      imageType?: "CIRCLE" | "SQUARE"
+    }
     sections?: Array<{
-      header?: string;
-      widgets?: Array<any>;
-    }>;
-  };
+      header?: string
+      widgets?: Array<any>
+    }>
+  }
 }
 
 interface GoogleChatMessage {
-  cardsV2?: GoogleChatCard[];
-  text?: string;
+  cardsV2?: GoogleChatCard[]
+  text?: string
 }
 
 /**
@@ -29,28 +29,28 @@ interface GoogleChatMessage {
  */
 export async function sendGoogleChatMessage(
   webhookUrl: string,
-  message: GoogleChatMessage
+  message: GoogleChatMessage,
 ): Promise<void> {
   if (!webhookUrl) {
-    logger.warn('[GoogleChat] No webhook URL provided, skipping notification');
-    return;
+    logger.warn("[GoogleChat] No webhook URL provided, skipping notification")
+    return
   }
 
   try {
     const response = await axios.post(webhookUrl, message, {
       headers: {
-        'Content-Type': 'application/json',
+        "Content-Type": "application/json",
       },
-    });
+    })
 
     if (response.status !== 200) {
-      throw new Error(`Google Chat webhook failed: ${response.status}`);
+      throw new Error(`Google Chat webhook failed: ${response.status}`)
     }
 
-    logger.info('[GoogleChat] Message sent successfully');
+    logger.info("[GoogleChat] Message sent successfully")
   } catch (error: any) {
-    logger.error(`[GoogleChat] Error sending message: ${error.message}`);
-    throw error;
+    logger.error(`[GoogleChat] Error sending message: ${error.message}`)
+    throw error
   }
 }
 
@@ -58,48 +58,50 @@ export async function sendGoogleChatMessage(
  * Simple helper to strip HTML tags from a string
  */
 function stripHtml(html: string): string {
-  if (!html) return '';
-  return html.replace(/<[^>]*>?/gm, '').trim();
+  if (!html) return ""
+  return html.replace(/<[^>]*>?/gm, "").trim()
 }
 
 /**
  * Build a formatted notification card for new issue assignment based on wireframe
  */
 export function buildIssueNotificationCard(params: {
-  issueNumber: number;
-  projectName: string;
-  projectUrl?: string;
-  isPreRelease?: boolean;
-  category?: string;
-  description?: string;
-  issueHeading: string;
-  findingsUrl: string;
-  tagIds: string[];
-  thumbnails?: string[];
+  issueNumber: number
+  projectName: string
+  projectUrl?: string
+  isPreRelease?: boolean
+  category?: string
+  description?: string
+  issueHeading: string
+  findingsUrl: string
+  tagIds: string[]
+  thumbnails?: string[]
 }): GoogleChatMessage {
-  const { 
-    issueNumber, 
-    projectName, 
-    projectUrl, 
-    isPreRelease, 
-    category, 
-    description, 
-    issueHeading, 
-    findingsUrl, 
+  const {
+    issueNumber,
+    projectName,
+    projectUrl,
+    isPreRelease,
+    category,
+    description,
+    issueHeading,
+    findingsUrl,
     tagIds,
-    thumbnails 
-  } = params;
+    thumbnails,
+  } = params
 
   // Create mentions string
-  const mentions = tagIds.map(id => `<users/${id}>`).join(' ');
+  const mentions = tagIds.map((id) => `<users/${id}>`).join(" ")
 
   // Truncate stripped description to 25 chars
-  const cleanDescription = stripHtml(description || '');
-  const truncatedDesc = cleanDescription 
-    ? (cleanDescription.length > 300 ? cleanDescription.substring(0, 300) + '...' : cleanDescription)
-    : '';
+  const cleanDescription = stripHtml(description || "")
+  const truncatedDesc = cleanDescription
+    ? cleanDescription.length > 300
+      ? cleanDescription.substring(0, 300) + "..."
+      : cleanDescription
+    : ""
 
-  const cleanHeading = stripHtml(issueHeading || '');
+  const cleanHeading = stripHtml(issueHeading || "")
 
   const sections: any[] = [
     {
@@ -112,23 +114,23 @@ export function buildIssueNotificationCard(params: {
                 widgets: [
                   {
                     textParagraph: {
-                      text: `<b>New Issue Assigned</b><br><font color=\"#666666\">${projectName}${projectUrl ? ` - <a href=\"${projectUrl}\">${projectUrl}</a>` : ""}</font>`
-                    }
-                  }
-                ]
+                      text: `<b>New Issue Assigned</b><br><font color=\"#666666\">${projectName}${projectUrl ? ` - <a href=\"${projectUrl}\">${projectUrl}</a>` : ""}</font>`,
+                    },
+                  },
+                ],
               },
               {
                 horizontalAlignment: "END",
                 widgets: [
                   {
                     textParagraph: {
-                      text: `<font color=\"#888888\">${isPreRelease ? "pre-release" : "post-release"}</font>`
-                    }
-                  }
-                ]
-              }
-            ]
-          }
+                      text: `<font color=\"#888888\">${isPreRelease ? "pre-release" : "post-release"}</font>`,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
         },
         {
           columns: {
@@ -138,32 +140,33 @@ export function buildIssueNotificationCard(params: {
                 widgets: [
                   {
                     textParagraph: {
-                      text: `<b>Issue #${issueNumber}</b>`
-                    }
-                  }
-                ]
+                      text:
+                        issueNumber > 0 ? `<b>Issue #${issueNumber}</b>` : "",
+                    },
+                  },
+                ],
               },
               {
                 horizontalAlignment: "END",
                 widgets: [
                   {
                     textParagraph: {
-                      text: `<b>${category || "Finding"}</b>`
-                    }
-                  }
-                ]
-              }
-            ]
-          }
+                      text: `<b>${category || "Finding"}</b>`,
+                    },
+                  },
+                ],
+              },
+            ],
+          },
         },
         {
           textParagraph: {
-            text: `<b>${cleanHeading}</b><br><font color=\"#444444\">${truncatedDesc}</font>`
-          }
-        }
-      ]
-    }
-  ];
+            text: `<b>${cleanHeading}</b><br><font color=\"#444444\">${truncatedDesc}</font>`,
+          },
+        },
+      ],
+    },
+  ]
 
   // Add thumbnails grid if any
   if (thumbnails && thumbnails.length > 0) {
@@ -177,14 +180,14 @@ export function buildIssueNotificationCard(params: {
               image: {
                 imageUri: url,
                 cropStyle: {
-                  type: "RECTANGLE_4_3"
-                }
-              }
-            }))
-          }
-        }
-      ]
-    });
+                  type: "RECTANGLE_4_3",
+                },
+              },
+            })),
+          },
+        },
+      ],
+    })
   }
 
   // Add Action Section
@@ -194,7 +197,7 @@ export function buildIssueNotificationCard(params: {
         buttonList: {
           buttons: [
             {
-              text: 'View task',
+              text: "View task",
               onClick: {
                 openLink: {
                   url: findingsUrl,
@@ -204,8 +207,8 @@ export function buildIssueNotificationCard(params: {
           ],
         },
       },
-    ]
-  });
+    ],
+  })
 
   return {
     text: mentions ? `Attention: ${mentions}` : undefined,
@@ -213,9 +216,9 @@ export function buildIssueNotificationCard(params: {
       {
         cardId: `issue-${issueNumber}-${Date.now()}`,
         card: {
-          sections: sections
+          sections: sections,
         },
       },
     ],
-  };
+  }
 }

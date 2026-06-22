@@ -82,20 +82,23 @@ router.post(
 
       if (fetchError) throw fetchError
 
-      const uniqueIssues = new Set<string>()
+      let maxIssueNumber = 0
       let existingNumber: number | null = null
       let existingStatus: string = "open"
       let existingBasecampId: string | null = null
       let existingBasecampUrl: string | null = null
 
       allProjectTasks?.forEach((t) => {
+        const match = t.title.match(/^Issue #(\d+):?/)
+        if (match) {
+          const num = parseInt(match[1], 10)
+          if (num > maxIssueNumber) {
+            maxIssueNumber = num
+          }
+        }
+
         const taskCleanTitle = t.title.replace(/^Issue #\d+:?\s*/, "")
         const taskIsFeedback = taskCleanTitle.includes("[Feedback]")
-
-        if (!taskIsFeedback) {
-          const key = t.finding_id || taskCleanTitle
-          uniqueIssues.add(key)
-        }
 
         // Check if this new task matches an existing issue
         if (!existingNumber && !isFeedback && !taskIsFeedback) {
@@ -104,8 +107,7 @@ router.post(
             : taskCleanTitle.toLowerCase() === cleanTitle.toLowerCase()
 
           if (isMatch) {
-            const match = t.title.match(/^Issue #(\d+):/)
-            if (match) existingNumber = parseInt(match[1])
+            if (match) existingNumber = parseInt(match[1], 10)
 
             // Inherit state from existing sibling
             existingStatus = t.status
@@ -117,7 +119,7 @@ router.post(
 
       let finalTitle = cleanTitle
       if (!isFeedback) {
-        const issueNumber = existingNumber || uniqueIssues.size + 1
+        const issueNumber = existingNumber || maxIssueNumber + 1
         finalTitle = `Issue #${issueNumber}: ${cleanTitle}`
       }
 
@@ -233,19 +235,23 @@ router.get("/count/unique", clerkAuth, async (req: Request, res: Response) => {
   try {
     const { data: allProjectTasks, error: fetchError } = await supabase
       .from("tasks")
-      .select("finding_id, title")
+      .select("title")
       .eq("project_id", projectId)
 
     if (fetchError) throw fetchError
 
-    const uniqueIssues = new Set<string>()
+    let maxIssueNumber = 0
     allProjectTasks?.forEach((t) => {
-      const taskCleanTitle = t.title.replace(/^Issue #\d+:?\s*/, "")
-      const key = t.finding_id || taskCleanTitle
-      uniqueIssues.add(key)
+      const match = t.title.match(/^Issue #(\d+):?/)
+      if (match) {
+        const num = parseInt(match[1], 10)
+        if (num > maxIssueNumber) {
+          maxIssueNumber = num
+        }
+      }
     })
 
-    res.json({ count: uniqueIssues.size })
+    res.json({ count: maxIssueNumber })
   } catch (error: any) {
     res.status(500).json({ error: error.message })
   }

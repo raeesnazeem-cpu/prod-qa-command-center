@@ -243,9 +243,32 @@ router.post(
       const { getProjectSettings } = require("../lib/getDecryptedSettings")
       const settings = await getProjectSettings(projectId)
 
+      const currentUserResult = await supabase
+        .from("users")
+        .select("basecamp_access_token, role")
+        .eq("id", req.auth?.userId)
+        .single()
+      const currentUser = currentUserResult.data
+
+      let activeBasecampToken = currentUser?.basecamp_access_token
+
+      if (!activeBasecampToken) {
+        if (
+          req.auth?.role === "super_admin" ||
+          currentUser?.role === "super_admin"
+        ) {
+          activeBasecampToken = settings?.basecamp_token
+        } else {
+          return res.status(403).json({
+            error:
+              "Please connect your personal Basecamp account to push tasks.",
+          })
+        }
+      }
+
       if (
         !settings ||
-        !settings.basecamp_token ||
+        !activeBasecampToken ||
         !settings.basecamp_account_id
       ) {
         return res
@@ -254,10 +277,10 @@ router.post(
       }
 
       const {
-        basecamp_token: token,
         basecamp_account_id: accountId,
         basecamp_project_id: bcProjectId,
       } = settings
+      const token = activeBasecampToken
       const rawPlan = finding.context_text || ""
       if (finding.check_factor === "project_plan") {
         if (
@@ -891,9 +914,32 @@ router.delete(
       const { getProjectSettings } = require("../lib/getDecryptedSettings")
       const settings = await getProjectSettings(projectId)
 
+      const currentUserResult = await supabase
+        .from("users")
+        .select("basecamp_access_token, role")
+        .eq("id", req.auth?.userId)
+        .single()
+      const currentUser = currentUserResult.data
+
+      let activeBasecampToken = currentUser?.basecamp_access_token
+
+      if (!activeBasecampToken) {
+        if (
+          req.auth?.role === "super_admin" ||
+          currentUser?.role === "super_admin"
+        ) {
+          activeBasecampToken = settings?.basecamp_token
+        } else {
+          return res.status(403).json({
+            error:
+              "Please connect your personal Basecamp account to delete Basecamp pushes.",
+          })
+        }
+      }
+
       if (
         !settings ||
-        !settings.basecamp_token ||
+        !activeBasecampToken ||
         !settings.basecamp_account_id
       ) {
         return res.status(400).json({ error: "Basecamp settings missing" })
@@ -901,7 +947,7 @@ router.delete(
 
       const { deleteBasecampComment } = require("../lib/basecampClient")
       await deleteBasecampComment({
-        token: settings.basecamp_token,
+        token: activeBasecampToken,
         accountId: settings.basecamp_account_id,
         projectId: settings.basecamp_project_id,
         recordingId: "not-used",

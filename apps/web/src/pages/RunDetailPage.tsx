@@ -1248,53 +1248,55 @@ export const RunDetailPage = () => {
           </div>
         </div>
 
-        <div className="bg-slate-50 dark:bg-[#1D2A31] p-6 rounded-md border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
-          <div className="flex justify-between items-end">
-            <div className="space-y-1">
-              <h3 className="text-sm font-bold text-slate-900 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
-                {isDiscovering
-                  ? "Phase 1: Sitemap Discovery"
-                  : "Phase 2: Scanning Pages"}
-              </h3>
-              <p className="text-xs text-slate-500 font-medium">
-                {isDiscovering
-                  ? "Identifying all target URLs..."
-                  : displayStatus === "completed"
-                    ? "Scan complete. All pages verified."
-                    : `Scanning: ${(run.pages || []).filter((p) => p.status === "processing" || p.status === "screenshotted").length} active | ${pagesProcessed} / ${pagesTotal} total`}
-              </p>
+        {activeTab === "overview" && (
+          <div className="bg-slate-50 dark:bg-[#1D2A31] p-6 rounded-md border border-slate-200 dark:border-slate-700 shadow-sm space-y-4">
+            <div className="flex justify-between items-end">
+              <div className="space-y-1">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                  {isDiscovering
+                    ? "Phase 1: Sitemap Discovery"
+                    : "Phase 2: Scanning Pages"}
+                </h3>
+                <p className="text-xs text-slate-500 font-medium">
+                  {isDiscovering
+                    ? "Identifying all target URLs..."
+                    : displayStatus === "completed"
+                      ? "Scan complete. All pages verified."
+                      : `Scanning: ${(run.pages || []).filter((p) => p.status === "processing" || p.status === "screenshotted").length} active | ${pagesProcessed} / ${pagesTotal} total`}
+                </p>
+              </div>
+
+              <div className="text-right flex items-center gap-4">
+                <p className="text-xl font-bold text-slate-900 dark:text-slate-200">
+                  {isDiscovering
+                    ? "..."
+                    : displayStatus === "completed"
+                      ? "100%"
+                      : `${safeDisplayProgress}%`}
+                </p>
+              </div>
             </div>
 
-            <div className="text-right flex items-center gap-4">
-              <p className="text-xl font-bold text-slate-900 dark:text-slate-200">
-                {isDiscovering
-                  ? "..."
-                  : displayStatus === "completed"
-                    ? "100%"
-                    : `${safeDisplayProgress}%`}
-              </p>
+            <div className="w-full h-4 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden border border-slate-200 dark:border-slate-700 p-1">
+              <div
+                className={`h-full rounded-full transition-all duration-500 ease-out shadow-sm ${
+                  run.status === "failed" ? "bg-red-500" : "bg-accent"
+                }`}
+                style={{
+                  width: isDiscovering
+                    ? "40%"
+                    : displayStatus === "completed"
+                      ? "100%"
+                      : `${Math.max(2, displayProgress)}%`,
+                }}
+              >
+                {(run.status === "running" || isDiscovering) && (
+                  <div className="w-full h-full opacity-30 bg-[linear-gradient(45deg,rgba(255,255,255,.15)_25%,transparent_25%,transparent_50%,rgba(255,255,255,.15)_50%,rgba(255,255,255,.15)_75%,transparent_75%,transparent)] bg-[length:1rem_1rem] animate-[progress-bar-stripes_1s_linear_infinite]" />
+                )}
+              </div>
             </div>
           </div>
-
-          <div className="w-full h-4 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden border border-slate-200 dark:border-slate-700 p-1">
-            <div
-              className={`h-full rounded-full transition-all duration-500 ease-out shadow-sm ${
-                run.status === "failed" ? "bg-red-500" : "bg-accent"
-              }`}
-              style={{
-                width: isDiscovering
-                  ? "40%"
-                  : displayStatus === "completed"
-                    ? "100%"
-                    : `${Math.max(2, displayProgress)}%`,
-              }}
-            >
-              {(run.status === "running" || isDiscovering) && (
-                <div className="w-full h-full opacity-30 bg-[linear-gradient(45deg,rgba(255,255,255,.15)_25%,transparent_25%,transparent_50%,rgba(255,255,255,.15)_50%,rgba(255,255,255,.15)_75%,transparent_75%,transparent)] bg-[length:1rem_1rem] animate-[progress-bar-stripes_1s_linear_infinite]" />
-              )}
-            </div>
-          </div>
-        </div>
+        )}
       </div>
 
       {/* Tabs */}
@@ -1304,7 +1306,7 @@ export const RunDetailPage = () => {
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${
             activeTab === "overview"
               ? "bg-slate-50 dark:bg-[#1D2A31] text-slate-900 dark:text-slate-200 shadow-sm border border-slate-200 dark:border-slate-700"
-              : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
+              : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300 border border-transparent"
           }`}
         >
           <BarChart3 size={14} />
@@ -1315,7 +1317,7 @@ export const RunDetailPage = () => {
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${
             activeTab === "pages"
               ? "bg-slate-50 dark:bg-[#1D2A31] text-slate-900 dark:text-slate-200 shadow-sm border border-slate-200 dark:border-slate-700"
-              : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
+              : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300 border border-transparent"
           }`}
         >
           <FileSearch size={14} />
@@ -1328,7 +1330,7 @@ export const RunDetailPage = () => {
               className={`flex items-center gap-2 px-4 py-2 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${
                 activeTab === "general"
                   ? "bg-slate-50 dark:bg-[#1D2A31] text-slate-900 dark:text-slate-200 shadow-sm border border-slate-200 dark:border-slate-700"
-                  : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
+                  : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300 border border-transparent"
               }`}
             >
               <ClipboardList size={14} />
@@ -1340,7 +1342,7 @@ export const RunDetailPage = () => {
                 className={`flex items-center gap-2 px-4 py-2 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${
                   activeTab === "findings"
                     ? "bg-slate-50 text-slate-900 shadow-sm border border-slate-200"
-                    : "text-slate-500 hover:text-slate-700"
+                    : "text-slate-500 hover:text-slate-700 border border-transparent"
                 }`}
               >
                 <Search size={14} />
@@ -1367,7 +1369,7 @@ export const RunDetailPage = () => {
             className={`flex items-center gap-2 px-4 py-2 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${
               activeTab === "woocommerce"
                 ? "bg-slate-50 text-slate-900 shadow-sm border border-slate-200"
-                : "text-slate-500 hover:text-slate-700"
+                : "text-slate-500 hover:text-slate-700 border border-transparent"
             }`}
           >
             <ShoppingCart size={14} />
@@ -1379,7 +1381,7 @@ export const RunDetailPage = () => {
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${
             activeTab === "report"
               ? "bg-slate-50 dark:bg-[#1D2A31] text-slate-900 dark:text-slate-200 shadow-sm border border-slate-200 dark:border-slate-700"
-              : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
+              : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300 border border-transparent"
           }`}
         >
           <ClipboardList size={14} />
@@ -1394,7 +1396,7 @@ export const RunDetailPage = () => {
             className={`flex items-center gap-2 px-4 py-2 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${
               activeTab === "recordings"
                 ? "bg-slate-50 dark:bg-[#1D2A31] text-slate-900 dark:text-slate-200 shadow-sm border border-slate-200 dark:border-slate-700"
-                : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
+                : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300 border border-transparent"
             }`}
           >
             <Video size={14} />
