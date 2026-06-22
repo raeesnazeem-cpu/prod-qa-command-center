@@ -392,11 +392,11 @@ router.post(
           targetTodo = allTodos.find((todo: any) =>
             todo.content
               .toLowerCase()
-              .includes("15-quality assurance - prerelease 2026"),
+              .includes("qa-check if reviews are added for accelerator plan"),
           )
           if (!targetTodo)
             throw new Error(
-              `To-do checklist item "15-Quality Assurance - Prerelease 2026" not found in Basecamp checklist "${targetList.name}".`,
+              `To-do checklist item "QA-Check if reviews are added for Accelerator plan" not found in Basecamp checklist "${targetList.name}".`,
             )
         } else if (isHeroMedia) {
           targetTodo = allTodos.find((todo: any) =>
@@ -411,9 +411,10 @@ router.post(
               `To-do checklist item "QA-Verify that the hero section video and fallback image load immediately on page load." not found in Basecamp checklist "${targetList.name}".`,
             )
         } else if (isDeadLink) {
-          targetTodo = allTodos.find((todo: any) =>
-            todo.content.toLowerCase().includes("qa - verify deadlink"),
-          )
+          targetTodo = allTodos.find((todo: any) => {
+            const lower = todo.content.toLowerCase()
+            return lower.includes("qa") && lower.includes("verify deadlink")
+          })
           if (!targetTodo)
             throw new Error(
               `To-do checklist item "QA - Verify Deadlink." not found in Basecamp checklist "${targetList.name}".`,
@@ -1223,7 +1224,7 @@ router.post(
             targetTodo = allTodos.find((todo: any) =>
               todo.content
                 .toLowerCase()
-                .includes("15-quality assurance - prerelease 2026"),
+                .includes("qa-check if reviews are added for accelerator plan"),
             )
           } else if (checkFactor === "hero_media") {
             targetTodo = allTodos.find((todo: any) =>
@@ -1234,9 +1235,10 @@ router.post(
                 ),
             )
           } else if (checkFactor === "dead_links") {
-            targetTodo = allTodos.find((todo: any) =>
-              todo.content.toLowerCase().includes("qa - verify deadlink"),
-            )
+            targetTodo = allTodos.find((todo: any) => {
+              const lower = todo.content.toLowerCase()
+              return lower.includes("qa") && lower.includes("verify deadlink")
+            })
           } else if (checkFactor === "learn_more_buttons") {
             targetTodo = allTodos.find((todo: any) =>
               todo.content

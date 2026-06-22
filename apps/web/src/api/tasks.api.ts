@@ -173,9 +173,11 @@ export const updateFindingStatus = async (
 export const pushToBasecamp = async (
   axios: AxiosInstance,
   taskId: string,
+  options?: any
 ): Promise<{ basecampUrl: string }> => {
   const { data } = await axios.post<{ basecampUrl: string }>(
     `/api/tasks/${taskId}/basecamp`,
+    options
   )
   return data
 }

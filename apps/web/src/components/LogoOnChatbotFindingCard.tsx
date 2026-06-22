@@ -54,9 +54,19 @@ export const LogoOnChatbotFindingCard: React.FC<FindingCardProps> = ({
   const galleryImages = allGalleryImages[finding.id] || []
 
   const [isPushing, setIsPushing] = React.useState(false)
-  const [isPushed, setIsPushed] = React.useState(finding.status === "confirmed")
+  const initialIsPushed =
+    finding.status === "confirmed" &&
+    (!!(finding as any).basecamp_comment_url ||
+      !!(finding as any).basecamp_comment_id)
+  const [isPushed, setIsPushed] = React.useState(initialIsPushed)
+  const [isDeletingPush, setIsDeletingPush] = React.useState(false)
+  const [commentUrl, setCommentUrl] = React.useState<string | null>(
+    finding.status === "confirmed"
+      ? (finding as any).basecamp_comment_url || null
+      : null,
+  )
 
-  const [isLogoVerified, setIsLogoVerified] = React.useState(false)
+  const [isLogoVerified, setIsLogoVerified] = React.useState(initialIsPushed)
 
   const hasTask = finding.tasks && finding.tasks.length > 0
   const isConfirmed = finding.status === "confirmed"
@@ -66,16 +76,39 @@ export const LogoOnChatbotFindingCard: React.FC<FindingCardProps> = ({
   const handlePushToBasecamp = async () => {
     setIsPushing(true)
     try {
-      await api.post(`/api/findings/${finding.id}/push-basecamp`, {
+      const response = await api.post(`/api/findings/${finding.id}/push-basecamp`, {
         isLogoVerified,
         hasTask: hasTask || isAssigned,
       })
+      if (response.data?.commentUrl) setCommentUrl(response.data.commentUrl)
       setIsPushed(true)
       if (onConfirm) onConfirm(finding.id)
     } catch (err: any) {
       alert(err.response?.data?.error || "Failed to push finding to Basecamp.")
     } finally {
       setIsPushing(false)
+    }
+  }
+
+  const handleDeletePush = async () => {
+    setIsDeletingPush(true)
+    try {
+      await api.delete(`/api/findings/${finding.id}/delete-basecamp-push`)
+      setIsPushed(false)
+      try {
+        await api.patch(`/api/findings/${finding.id}`, {
+          basecamp_comment_id: null,
+          basecamp_comment_url: null,
+        })
+      } catch (e) {
+        console.error("Failed to clear state from DB", e)
+      }
+      return true
+    } catch (err: any) {
+      alert(err.response?.data?.error || "Failed to delete Basecamp push.")
+      return false
+    } finally {
+      setIsDeletingPush(false)
     }
   }
 
@@ -227,43 +260,94 @@ export const LogoOnChatbotFindingCard: React.FC<FindingCardProps> = ({
           </button>
 
           {isLogoVerified && !(hasTask || isAssigned) && (
-            <button
-              onClick={handlePushToBasecamp}
-              disabled={isPushing || isPushed}
-              className={`btn-unified px-3 flex items-center justify-center ${isPushed ? "bg-emerald-100 text-emerald-800" : "bg-[#0b1016] hover:bg-slate-800 text-white"}`}
-            >
-              {isPushing ? (
-                <span className="text-[11px] font-bold px-1">...</span>
-              ) : isPushed ? (
-                <>
-                  <span className="text-slate">Success </span>
-                  <svg
-                    width="18"
-                    height="18"
-                    viewBox="0 0 35 30"
-                    fill="currentColor"
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="pl-1"
-                  >
-                    <path d="M18.088.27c9.1 0 15.215 10.518 15.977 21.937.02.313-.053.626-.212.896-3.14 5.35-10.061 6.527-15.737 6.558-5.487.1-10.7-2.188-14.412-6.301a1.566 1.566 0 0 1-.303-1.6 36.177 36.177 0 0 1 1.912-4.147c1.052-1.928 2.644-4.681 5.154-4.763 2.343 0 3.516 2.174 5.114 3.519 1.633-1.672 2.552-3.94 3.567-6.014a1.565 1.565 0 0 1 2.837 1.326c-.885 1.829-1.814 3.651-2.954 5.336-1.172 1.732-2.073 2.636-3.33 2.636-.746 0-1.385-.292-2.03-.801-1.103-.92-1.937-2.088-3.15-2.873-1.567.785-2.99 4.079-3.824 5.98 2.925 2.88 6.898 4.55 11.008 4.573 4.622-.028 10.286-.49 13.197-4.62-.575-7.111-4.013-18.377-12.814-18.51-7.097 0-11.754 5.047-14.775 13.644A1.565 1.565 0 1 1 .36 16.008C3.771 6.299 9.333.27 18.088.27Z"></path>
-                  </svg>
-                </>
-              ) : (
-                <>
-                  <span className="text-white">Push to </span>
-                  <svg
-                    width="18"
-                    height="18"
-                    viewBox="0 0 35 30"
-                    fill="currentColor"
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="pl-1"
-                  >
-                    <path d="M18.088.27c9.1 0 15.215 10.518 15.977 21.937.02.313-.053.626-.212.896-3.14 5.35-10.061 6.527-15.737 6.558-5.487.1-10.7-2.188-14.412-6.301a1.566 1.566 0 0 1-.303-1.6 36.177 36.177 0 0 1 1.912-4.147c1.052-1.928 2.644-4.681 5.154-4.763 2.343 0 3.516 2.174 5.114 3.519 1.633-1.672 2.552-3.94 3.567-6.014a1.565 1.565 0 0 1 2.837 1.326c-.885 1.829-1.814 3.651-2.954 5.336-1.172 1.732-2.073 2.636-3.33 2.636-.746 0-1.385-.292-2.03-.801-1.103-.92-1.937-2.088-3.15-2.873-1.567.785-2.99 4.079-3.824 5.98 2.925 2.88 6.898 4.55 11.008 4.573 4.622-.028 10.286-.49 13.197-4.62-.575-7.111-4.013-18.377-12.814-18.51-7.097 0-11.754 5.047-14.775 13.644A1.565 1.565 0 1 1 .36 16.008C3.771 6.299 9.333.27 18.088.27Z"></path>
-                  </svg>
-                </>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (isPushed && commentUrl) {
+                    window.open(commentUrl, "_blank", "noopener,noreferrer")
+                  } else if (!isPushed) {
+                    handlePushToBasecamp()
+                  }
+                }}
+                disabled={isPushing || (!isPushed && !isLogoVerified)}
+                title={isPushed ? "View in Basecamp" : "Push to Basecamp"}
+                className={`btn-unified px-3 flex items-center justify-center transition-all whitespace-nowrap active:scale-95 ${
+                  isPushed
+                    ? "bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-200 cursor-pointer animate-fade-in"
+                    : !isLogoVerified
+                      ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed opacity-60 hover:border-slate-200 hover:text-slate-400"
+                      : "bg-[#0b1016] hover:bg-slate-800 text-white"
+                }`}
+              >
+                {isPushing ? (
+                  <span className="text-[11px] font-bold px-1">...</span>
+                ) : isPushed ? (
+                  <>
+                    <span className="text-slate">Success </span>
+                    <svg
+                      width="18"
+                      height="18"
+                      viewBox="0 0 35 30"
+                      fill="currentColor"
+                      xmlns="http://www.w3.org/2000/svg"
+                      className="pl-1"
+                    >
+                      <path d="M18.088.27c9.1 0 15.215 10.518 15.977 21.937.02.313-.053.626-.212.896-3.14 5.35-10.061 6.527-15.737 6.558-5.487.1-10.7-2.188-14.412-6.301a1.566 1.566 0 0 1-.303-1.6 36.177 36.177 0 0 1 1.912-4.147c1.052-1.928 2.644-4.681 5.154-4.763 2.343 0 3.516 2.174 5.114 3.519 1.633-1.672 2.552-3.94 3.567-6.014a1.565 1.565 0 0 1 2.837 1.326c-.885 1.829-1.814 3.651-2.954 5.336-1.172 1.732-2.073 2.636-3.33 2.636-.746 0-1.385-.292-2.03-.801-1.103-.92-1.937-2.088-3.15-2.873-1.567.785-2.99 4.079-3.824 5.98 2.925 2.88 6.898 4.55 11.008 4.573 4.622-.028 10.286-.49 13.197-4.62-.575-7.111-4.013-18.377-12.814-18.51-7.097 0-11.754 5.047-14.775 13.644A1.565 1.565 0 1 1 .36 16.008C3.771 6.299 9.333.27 18.088.27Z"></path>
+                    </svg>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-white">Push to </span>
+                    <svg
+                      width="18"
+                      height="18"
+                      viewBox="0 0 35 30"
+                      fill="currentColor"
+                      xmlns="http://www.w3.org/2000/svg"
+                      className="pl-1"
+                    >
+                      <path d="M18.088.27c9.1 0 15.215 10.518 15.977 21.937.02.313-.053.626-.212.896-3.14 5.35-10.061 6.527-15.737 6.558-5.487.1-10.7-2.188-14.412-6.301a1.566 1.566 0 0 1-.303-1.6 36.177 36.177 0 0 1 1.912-4.147c1.052-1.928 2.644-4.681 5.154-4.763 2.343 0 3.516 2.174 5.114 3.519 1.633-1.672 2.552-3.94 3.567-6.014a1.565 1.565 0 0 1 2.837 1.326c-.885 1.829-1.814 3.651-2.954 5.336-1.172 1.732-2.073 2.636-3.33 2.636-.746 0-1.385-.292-2.03-.801-1.103-.92-1.937-2.088-3.15-2.873-1.567.785-2.99 4.079-3.824 5.98 2.925 2.88 6.898 4.55 11.008 4.573 4.622-.028 10.286-.49 13.197-4.62-.575-7.111-4.013-18.377-12.814-18.51-7.097 0-11.754 5.047-14.775 13.644A1.565 1.565 0 1 1 .36 16.008C3.771 6.299 9.333.27 18.088.27Z"></path>
+                    </svg>
+                  </>
+                )}
+              </button>
+
+              {isPushed && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleDeletePush()
+                  }}
+                  disabled={isDeletingPush}
+                  className="p-2 text-slate-400 hover:text-red-500 transition-colors"
+                  title="Delete from Basecamp"
+                >
+                  {isDeletingPush ? (
+                    <span className="text-[10px] uppercase font-bold animate-pulse">
+                      ...
+                    </span>
+                  ) : (
+                    <div className="flex items-center justify-center gap-1 text-slate-600 dark:text-slate-200 hover:text-red-500 dark:hover:text-red-500 transition-colors">
+                      <span className="text-[8px] font-semibold">
+                        Remove from{""}
+                      </span>
+                      <span>
+                        <svg
+                          width="10"
+                          height="10"
+                          viewBox="0 0 35 30"
+                          fill="currentColor"
+                          xmlns="http://www.w3.org/2000/svg"
+                        >
+                          <path d="M18.088.27c9.1 0 15.215 10.518 15.977 21.937.02.313-.053.626-.212.896-3.14 5.35-10.061 6.527-15.737 6.558-5.487.1-10.7-2.188-14.412-6.301a1.566 1.566 0 0 1-.303-1.6 36.177 36.177 0 0 1 1.912-4.147c1.052-1.928 2.644-4.681 5.154-4.763 2.343 0 3.516 2.174 5.114 3.519 1.633-1.672 2.552-3.94 3.567-6.014a1.565 1.565 0 0 1 2.837 1.326c-.885 1.829-1.814 3.651-2.954 5.336-1.172 1.732-2.073 2.636-3.33 2.636-.746 0-1.385-.292-2.03-.801-1.103-.92-1.937-2.088-3.15-2.873-1.567.785-2.99 4.079-3.824 5.98 2.925 2.88 6.898 4.55 11.008 4.573 4.622-.028 10.286-.49 13.197-4.62-.575-7.111-4.013-18.377-12.814-18.51-7.097 0-11.754 5.047-14.775 13.644A1.565 1.565 0 1 1 .36 16.008C3.771 6.299 9.333.27 18.088.27Z"></path>
+                        </svg>
+                      </span>
+                    </div>
+                  )}
+                </button>
               )}
-            </button>
+            </div>
           )}
 
           {!isLogoVerified && !isPushed && (

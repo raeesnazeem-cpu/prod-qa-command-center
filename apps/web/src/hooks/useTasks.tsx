@@ -134,8 +134,12 @@ export const usePushToBasecamp = () => {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (taskId: string) => pushToBasecamp(axios, taskId),
-    onSuccess: (result, taskId) => {
+    mutationFn: (args: string | { taskId: string; options?: any }) => {
+      if (typeof args === "string") return pushToBasecamp(axios, args)
+      return pushToBasecamp(axios, args.taskId, args.options)
+    },
+    onSuccess: (result, args) => {
+      const taskId = typeof args === "string" ? args : args.taskId;
       queryClient.invalidateQueries({ queryKey: ['tasks'] });
       queryClient.invalidateQueries({ queryKey: ['tasks', taskId] });
       

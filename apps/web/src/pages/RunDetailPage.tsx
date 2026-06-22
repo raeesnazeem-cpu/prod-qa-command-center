@@ -890,29 +890,19 @@ export const RunDetailPage = () => {
   }
 
   const handleConfirmFinding = async (id: string) => {
-    const ids = id.split(",")
-    await Promise.all(
-      ids.map((findingId) =>
-        updateFindingMutation.mutateAsync({
-          findingId,
-          data: { status: "confirmed" },
-        }),
-      ),
-    )
+    await updateFindingMutation.mutateAsync({
+      findingId: id,
+      data: { status: "confirmed" },
+    })
     queryClient.invalidateQueries({ queryKey: ["run-findings", runId] })
     queryClient.invalidateQueries({ queryKey: ["findings"] })
   }
 
   const handleFalsePositiveFinding = async (id: string) => {
-    const ids = id.split(",")
-    await Promise.all(
-      ids.map((findingId) =>
-        updateFindingMutation.mutateAsync({
-          findingId,
-          data: { status: "false_positive" },
-        }),
-      ),
-    )
+    await updateFindingMutation.mutateAsync({
+      findingId: id,
+      data: { status: "false_positive" },
+    })
     queryClient.invalidateQueries({ queryKey: ["run-findings", runId] })
     queryClient.invalidateQueries({ queryKey: ["findings"] })
   }

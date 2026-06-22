@@ -191,10 +191,11 @@ export const useUpdateFinding = (pageId: string | null) => {
 
       // Optimistically update to the new value
       if (previousFindings) {
+        const idList = findingId.split(",")
         queryClient.setQueryData<QAFinding[]>(
           ["findings", pageId],
           previousFindings.map((f) =>
-            f.id === findingId ? { ...f, ...data } : f,
+            idList.includes(f.id) ? { ...f, ...data } : f,
           ),
         )
       }

@@ -167,10 +167,10 @@ export const SingleScriptFindingCard: React.FC<FindingCardProps> = ({
     }, 1000)
   }
 
-  const [isDesktopVerified, setIsDesktopVerified] = React.useState(false)
-  const [isTabletVerified, setIsTabletVerified] = React.useState(false)
-  const [isMobileVerified, setIsMobileVerified] = React.useState(false)
-  const [isScriptVerified, setIsScriptVerified] = React.useState(false)
+  const [isDesktopVerified, setIsDesktopVerified] = React.useState(initialIsPushed)
+  const [isTabletVerified, setIsTabletVerified] = React.useState(initialIsPushed)
+  const [isMobileVerified, setIsMobileVerified] = React.useState(initialIsPushed)
+  const [isScriptVerified, setIsScriptVerified] = React.useState(initialIsPushed)
 
   const hasTask = finding.tasks && finding.tasks.length > 0
   const isConfirmed = finding.status === "confirmed"

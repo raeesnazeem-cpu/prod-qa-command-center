@@ -134,7 +134,17 @@ export const TaskDetailPanel = ({
       console.log("Pushing task...", { taskId: task.id })
     }
 
-    pushToBasecamp(task.id)
+    if (checkFactor === "project_plan") {
+      pushToBasecamp({
+        taskId: task.id,
+        options: {
+          todoName: "QA-Check if reviews are added for Accelerator plan",
+          todoListName: "15-Quality Assurance - Prerelease 2026",
+        },
+      })
+    } else {
+      pushToBasecamp(task.id)
+    }
   }
 
   const handleStatusChange = (status: TaskStatus) => {

@@ -82,17 +82,17 @@ router.patch(
     }
 
     try {
+      const idList = id.split(",")
       const { data, error } = await supabase
         .from("findings")
         .update({ status, updated_at: new Date().toISOString() })
-        .eq("id", id)
+        .in("id", idList)
         .select()
-        .single()
 
       if (error) throw error
-      if (!data) return res.status(404).json({ error: "Finding not found" })
+      if (!data || data.length === 0) return res.status(404).json({ error: "Finding not found" })
 
-      return res.json(data)
+      return res.json(data[0])
     } catch (error: any) {
       logger.error(
         { findingId: id, error: error.message },
@@ -132,17 +132,17 @@ router.patch(
         updatePayload.basecamp_comment_id = basecamp_comment_id
       if (basecamp_comment_url !== undefined)
         updatePayload.basecamp_comment_url = basecamp_comment_url
+      const idList = id.split(",")
       const { data, error } = await supabase
         .from("findings")
         .update(updatePayload)
-        .eq("id", id)
+        .in("id", idList)
         .select()
-        .single()
 
       if (error) throw error
-      if (!data) return res.status(404).json({ error: "Finding not found" })
+      if (!data || data.length === 0) return res.status(404).json({ error: "Finding not found" })
 
-      return res.json(data)
+      return res.json(data[0])
     } catch (error: any) {
       logger.error(
         { findingId: id, error: error.message },
@@ -226,14 +226,19 @@ router.post(
 
     try {
       // 1. Fetch Finding and its QA Run details
-      const { data: finding, error: findingError } = await supabase
+      const idList = id.split(",")
+      const { data: findingsList, error: findingError } = await supabase
         .from("findings")
         .select("*, qa_runs:run_id (project_id, site_url)")
-        .eq("id", id)
-        .single()
+        .in("id", idList)
 
-      if (findingError || !finding) {
+      if (findingError || !findingsList || findingsList.length === 0) {
         return res.status(404).json({ error: "Finding not found" })
+      }
+
+      const finding = findingsList[0]
+      if (idList.length > 1) {
+        finding.description = findingsList.map((f: any) => f.description).filter(Boolean).join("\n")
       }
 
       const projectId = (finding.qa_runs as any).project_id
@@ -377,11 +382,11 @@ router.post(
         targetTodo = allTodos.find((todo: any) =>
           todo.content
             .toLowerCase()
-            .includes("15-quality assurance - prerelease 2026"),
+            .includes("qa-check if reviews are added for accelerator plan"),
         )
         if (!targetTodo)
           throw new Error(
-            `To-do checklist item "15-Quality Assurance - Prerelease 2026" not found in Basecamp checklist "${targetList.name}".`,
+            `To-do checklist item "QA-Check if reviews are added for Accelerator plan" not found in Basecamp checklist "${targetList.name}".`,
           )
       } else if (checkFactor === "hero_media") {
         targetTodo = allTodos.find((todo: any) =>
@@ -396,9 +401,10 @@ router.post(
             `To-do checklist item "QA-Verify that the hero section video and fallback image load immediately on page load." not found in Basecamp checklist "${targetList.name}".`,
           )
       } else if (checkFactor === "dead_links") {
-        targetTodo = allTodos.find((todo: any) =>
-          todo.content.toLowerCase().includes("qa - verify deadlink"),
-        )
+        targetTodo = allTodos.find((todo: any) => {
+          const lower = todo.content.toLowerCase()
+          return lower.includes("qa") && lower.includes("verify deadlink")
+        })
         if (!targetTodo)
           throw new Error(
             `To-do checklist item "QA - Verify Deadlink." not found in Basecamp checklist "${targetList.name}".`,
@@ -791,6 +797,111 @@ router.post(
           <em>Sent automatically via QA Command Center</em>
         </div>
         `.trim()
+      } else if (finding.check_factor === "dead_links") {
+        let links: any[] = []
+        for (const f of findingsList) {
+          let descLinks: any[] = []
+          try {
+            const parsed = JSON.parse(f.description)
+            descLinks = Array.isArray(parsed) ? parsed : [parsed]
+          } catch (e) {
+            const regex = /- \*\*(.*?)\*\*\s*\* Reason:\s*(.*?)\s*\* Link Text:\s*(.*?)\s*\* Found on:\s*(.*?)(?=\s+- \*\*|$)/gs
+            let match
+            while ((match = regex.exec(f.description)) !== null) {
+              descLinks.push({
+                url: match[1].trim(),
+                reason: match[2].trim(),
+                link_text: match[3].trim(),
+                found_on: match[4].trim(),
+              })
+            }
+          }
+          links = links.concat(descLinks)
+        }
+
+        let tableHtml = ""
+        if (links.length > 0) {
+          tableHtml = `
+            <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; border-color: #e2e8f0; font-family: sans-serif; font-size: 13px;">
+              <thead style="background-color: #f8fafc; color: #64748b; text-align: left;">
+                <tr>
+                  <th>URL</th>
+                  <th>Reason</th>
+                  <th>Link Text</th>
+                  <th>Found On</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${links.map((link: any) => `
+                  <tr>
+                    <td style="color: #3b82f6;"><a href="${link.url}" target="_blank">${link.url}</a></td>
+                    <td>${link.reason || "-"}</td>
+                    <td>${link["Link text"] || link.link_text || "-"}</td>
+                    <td style="color: #3b82f6;">${link.found_on ? `<a href="${link.found_on}" target="_blank">${link.found_on}</a>` : "-"}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>
+          `
+        }
+
+        commentHtml = `
+        <div style="font-family: sans-serif; line-height: 1.5;">
+          <strong>Dead Links Verification</strong><br/><br/>
+          ${tableHtml || "No dead links found."}
+          <br/><br/>
+          <em>Sent automatically via QA Command Center</em>
+        </div>
+        `.trim()
+      } else if (finding.check_factor === "contact_form") {
+        let pagesData: any[] = []
+        for (const f of findingsList) {
+          try {
+            const data = JSON.parse(f.context_text || "{}")
+            if (data.url) pagesData.push(data)
+          } catch (e) {}
+        }
+
+        let tableHtml = ""
+        if (pagesData.length > 0) {
+          tableHtml = `
+            <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%; border-color: #e2e8f0; font-family: sans-serif; font-size: 13px;">
+              <thead style="background-color: #f8fafc; color: #64748b; text-align: left;">
+                <tr>
+                  <th>#</th>
+                  <th>URL</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${pagesData
+                  .map(
+                    (data: any, idx: number) => `
+                  <tr>
+                    <td>${idx + 1}</td>
+                    <td style="color: #3b82f6;"><a href="${data.url}" target="_blank">${data.url}</a></td>
+                    <td>${
+                      data.hasForm
+                        ? '<span style="color: #059669; font-weight: bold;">Present</span>'
+                        : '<span style="color: #64748b; font-weight: bold;">Missing</span>'
+                    }</td>
+                  </tr>
+                `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          `
+        }
+
+        commentHtml = `
+        <div style="font-family: sans-serif; line-height: 1.5;">
+          <strong>Contact Form Verification</strong><br/><br/>
+          ${tableHtml || "No pages analyzed."}
+          <br/><br/>
+          <em>Sent automatically via QA Command Center</em>
+        </div>
+        `.trim()
       } else {
         // Fallback for any other check that doesn't have a custom HTML layout
         const genericMessage = finding.description
@@ -827,7 +938,7 @@ router.post(
           const { data: relatedTasks } = await supabase
             .from("tasks")
             .select("assigned_to")
-            .eq("finding_id", id)
+            .in("finding_id", idList)
           const assignedUserIds = relatedTasks
             ? Array.from(
                 new Set(
@@ -871,7 +982,7 @@ router.post(
           basecamp_comment_url: createdCommentUrl || null,
           updated_at: new Date().toISOString(),
         })
-        .eq("id", id)
+        .in("id", idList)
 
       return res.status(200).json({
         success: true,
@@ -897,14 +1008,16 @@ router.delete(
     const { id } = req.params
 
     try {
-      const { data: finding, error: findingError } = await supabase
+      const idList = id.split(",")
+      const { data: findingsList, error: findingError } = await supabase
         .from("findings")
         .select("*, qa_runs:run_id (project_id)")
-        .eq("id", id)
-        .single()
+        .in("id", idList)
 
-      if (findingError || !finding)
+      if (findingError || !findingsList || findingsList.length === 0)
         return res.status(404).json({ error: "Finding not found" })
+      
+      const finding = findingsList[0]
       if (!finding.basecamp_comment_id)
         return res
           .status(400)
@@ -961,7 +1074,7 @@ router.delete(
           basecamp_comment_id: null,
           updated_at: new Date().toISOString(),
         })
-        .eq("id", id)
+        .in("id", idList)
 
       return res.status(200).json({ success: true })
     } catch (err: any) {

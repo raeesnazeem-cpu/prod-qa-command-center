@@ -56,14 +56,51 @@ export const ContactFormFindingCard: React.FC<ContactFormFindingCardProps> = ({
   const [localTitle, setLocalTitle] = useState(finding.title)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isPushing, setIsPushing] = useState(false)
-  const [isPushed, setIsPushed] = useState(finding.status === "confirmed")
+  const initialIsPushed =
+    finding.status === "confirmed" &&
+    (!!(finding as any).basecamp_comment_url ||
+      !!(finding as any).basecamp_comment_id)
+  const [isPushed, setIsPushed] = useState(initialIsPushed)
+  const [isDeletingPush, setIsDeletingPush] = useState(false)
+  const [commentUrl, setCommentUrl] = useState<string | null>(
+    finding.status === "confirmed"
+      ? (finding as any).basecamp_comment_url || null
+      : null,
+  )
   const { galleryImages: allGalleryImages, addImage } = useGalleryStore()
   const galleryImages = allGalleryImages[finding.id] || []
+
+  const handleDeletePush = async () => {
+    setIsDeletingPush(true)
+    try {
+      await api.delete(`/api/findings/${finding.id}/delete-basecamp-push`)
+      setIsPushed(false)
+      try {
+        await api.patch(`/api/findings/${finding.id}`, {
+          basecamp_comment_id: null,
+          basecamp_comment_url: null,
+          status: "pending",
+        })
+        if (onConfirm) {
+           onConfirm(finding.id)
+        }
+      } catch (e) {
+        console.error("Failed to clear state from DB", e)
+      }
+      return true
+    } catch (err: any) {
+      alert(err.response?.data?.error || "Failed to delete Basecamp push.")
+      return false
+    } finally {
+      setIsDeletingPush(false)
+    }
+  }
 
   const handlePushToBasecamp = async () => {
     setIsPushing(true)
     try {
-      await api.post(`/api/findings/${finding.id}/push-basecamp`, {})
+      const response = await api.post(`/api/findings/${finding.id}/push-basecamp`, {})
+      if (response.data?.commentUrl) setCommentUrl(response.data.commentUrl)
       setIsPushed(true)
       if (onConfirm) {
         onConfirm(finding.id)
@@ -248,12 +285,19 @@ export const ContactFormFindingCard: React.FC<ContactFormFindingCardProps> = ({
           {!(hasTask || isAssigned) && (
             <>
               <button
-                onClick={handlePushToBasecamp}
-                disabled={isPushing || isPushed}
-                title="Push to Basecamp"
-                className={`btn-unified px-3 flex items-center justify-center transition-all active:scale-95 ${
+                onClick={(e) => {
+                  e.stopPropagation()
+                  if (isPushed && commentUrl) {
+                    window.open(commentUrl, "_blank")
+                  } else {
+                    handlePushToBasecamp()
+                  }
+                }}
+                disabled={isPushing}
+                title={isPushed ? "View in Basecamp" : "Push to Basecamp"}
+                className={`btn-unified px-3 flex items-center justify-center transition-all active:scale-95 whitespace-nowrap ${
                   isPushed
-                    ? "bg-emerald-100 text-emerald-800 border border-emerald-200 cursor-default animate-fade-in"
+                    ? "bg-emerald-100 text-emerald-800 border border-emerald-200 cursor-pointer animate-fade-in"
                     : "bg-[#0b1016] hover:bg-slate-800 text-white"
                 }`}
               >
@@ -289,7 +333,40 @@ export const ContactFormFindingCard: React.FC<ContactFormFindingCardProps> = ({
                 )}
               </button>
 
-              <div className="w-px h-6 bg-slate-200 mx-1"></div>
+            {isPushed && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleDeletePush()
+                }}
+                disabled={isDeletingPush}
+                className="p-2 text-slate-400 hover:text-red-500 transition-colors"
+                title="Delete from Basecamp"
+              >
+                {isDeletingPush ? (
+                  <span className="text-[10px] uppercase font-bold animate-pulse">
+                    ...
+                  </span>
+                ) : (
+                  <div className="flex items-center justify-center gap-1 text-slate-600 dark:text-slate-200 hover:text-red-500 dark:hover:text-red-500 transition-colors">
+                    <span className="text-[8px] font-semibold">
+                      Remove from{""}
+                    </span>
+                    <span>
+                      <svg
+                        width="10"
+                        height="10"
+                        viewBox="0 0 35 30"
+                        fill="currentColor"
+                        xmlns="http://www.w3.org/2000/svg"
+                      >
+                        <path d="M18.088.27c9.1 0 15.215 10.518 15.977 21.937.02.313-.053.626-.212.896-3.14 5.35-10.061 6.527-15.737 6.558-5.487.1-10.7-2.188-14.412-6.301a1.566 1.566 0 0 1-.303-1.6 36.177 36.177 0 0 1 1.912-4.147c1.052-1.928 2.644-4.681 5.154-4.763 2.343 0 3.516 2.174 5.114 3.519 1.633-1.672 2.552-3.94 3.567-6.014a1.565 1.565 0 0 1 2.837 1.326c-.885 1.829-1.814 3.651-2.954 5.336-1.172 1.732-2.073 2.636-3.33 2.636-.746 0-1.385-.292-2.03-.801-1.103-.92-1.937-2.088-3.15-2.873-1.567.785-2.99 4.079-3.824 5.98 2.925 2.88 6.898 4.55 11.008 4.573 4.622-.028 10.286-.49 13.197-4.62-.575-7.111-4.013-18.377-12.814-18.51-7.097 0-11.754 5.047-14.775 13.644A1.565 1.565 0 1 1 .36 16.008C3.771 6.299 9.333.27 18.088.27Z"></path>
+                      </svg>
+                    </span>
+                  </div>
+                )}
+              </button>
+            )}
             </>
           )}
           {isFalsePositive ? (
@@ -299,7 +376,7 @@ export const ContactFormFindingCard: React.FC<ContactFormFindingCardProps> = ({
             >
               Re-flag as genuine
             </button>
-          ) : (
+          ) : !isPushed ? (
             <>
               {!(hasTask || isAssigned) && (
                 <button
@@ -310,26 +387,29 @@ export const ContactFormFindingCard: React.FC<ContactFormFindingCardProps> = ({
                 </button>
               )}
               <div className="flex items-center gap-2">
-                <button
-                  onClick={() => {
-                    const missingForms = pagesData.filter((d) => !d.hasForm)
-                    const desc =
-                      missingForms.length > 0
-                        ? `Missing contact forms on the following URLs:\n\n${missingForms.map((d) => `- ${d.url}`).join("\n")}`
-                        : finding.description || "All contact forms are present."
+                {!isPushed && (
+                  <button
+                    onClick={() => {
+                      const missingForms = pagesData.filter((d) => !d.hasForm)
+                      const desc =
+                        missingForms.length > 0
+                          ? `Missing contact forms on the following URLs:\n\n${missingForms.map((d) => `- ${d.url}`).join("\n")}`
+                          : finding.description || "All contact forms are present."
 
-                    onCreateTask?.({
-                      ...finding,
-                      title: localTitle,
-                      description: desc,
-                      gallery_images: galleryImages,
-                    })
-                  }}
-                  disabled={hasTask || isAssigned}
-                  className={`btn-unified ${hasTask || isAssigned ? "bg-accent text-white border-accent cursor-not-allowed" : ""}`}
-                >
-                  {hasTask || isAssigned ? "Task Linked" : "Add to Tasks"}
-                </button>
+                      onCreateTask?.({
+                        ...finding,
+                        title: localTitle,
+                        description: desc,
+                        gallery_images: galleryImages,
+                      })
+                    }}
+                    disabled={hasTask || isAssigned}
+                    className={`btn-unified ${hasTask || isAssigned ? "bg-accent text-white border-accent cursor-not-allowed" : ""}`}
+                  >
+                    {hasTask || isAssigned ? "Task Linked" : "Add to Tasks"}
+                  </button>
+                )}
+
                 {(hasTask || isAssigned) &&
                   (() => {
                     const activeTaskIds =
@@ -374,7 +454,7 @@ export const ContactFormFindingCard: React.FC<ContactFormFindingCardProps> = ({
                   })()}
               </div>
             </>
-          )}
+          ) : null}
         </div>
 
         {allAssigneesListForUI.length > 0 && (
