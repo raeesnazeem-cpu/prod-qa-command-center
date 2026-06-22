@@ -229,8 +229,10 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
       } catch (e) {
         console.error("Failed to clear state from DB", e)
       }
+      return true
     } catch (err: any) {
       alert(err.response?.data?.error || "Failed to delete Basecamp push.")
+      return false
     } finally {
       setIsDeletingPush(false)
     }
