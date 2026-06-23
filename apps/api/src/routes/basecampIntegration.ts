@@ -109,20 +109,40 @@ router.get("/people", clerkAuth, async (req: Request, res: Response) => {
   }
 
   try {
-    const projectSettings = await getProjectSettings(projectId as string)
+    const [projectSettings, currentUserResult] = await Promise.all([
+      getProjectSettings(projectId as string),
+      supabase
+        .from("users")
+        .select("basecamp_access_token, role")
+        .eq("id", req.auth?.userId)
+        .single(),
+    ])
 
-    if (
-      !projectSettings ||
-      !projectSettings.basecamp_token ||
-      !projectSettings.basecamp_account_id
-    ) {
+    const currentUser = currentUserResult.data
+    let activeBasecampToken = currentUser?.basecamp_access_token
+
+    if (!activeBasecampToken) {
+      if (
+        req.auth?.role === "super_admin" ||
+        currentUser?.role === "super_admin"
+      ) {
+        activeBasecampToken = projectSettings?.basecamp_token
+      } else {
+        return res.status(403).json({
+          error:
+            "Please connect your personal Basecamp account to fetch people.",
+        })
+      }
+    }
+
+    if (!projectSettings || !activeBasecampToken || !projectSettings.basecamp_account_id) {
       return res
         .status(400)
         .json({ error: "Basecamp not configured for this project" })
     }
 
     const people = await getBasecampPeople(
-      projectSettings.basecamp_token,
+      activeBasecampToken,
       projectSettings.basecamp_account_id,
     )
 
