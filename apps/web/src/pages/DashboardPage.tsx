@@ -870,17 +870,17 @@ export const DashboardPage = () => {
                 Critical Assignments
               </h3>
               <div className="bg-slate-50 dark:bg-[#1D2A31] border border-slate-300 dark:border-slate-800 rounded-lg shadow-sm divide-y divide-slate-50 dark:divide-slate-800 overflow-hidden">
-                {data?.my_tasks.length === 0 ? (
+                {data?.my_tasks?.filter((t) => t.status === "open").length === 0 ? (
                   <div className="p-12 text-center">
                     <p className="text-xs text-slate-400 font-medium italic">
                       No urgent tasks for you
                     </p>
                   </div>
                 ) : (
-                  data?.my_tasks.map((task) => (
+                  data?.my_tasks?.filter((t) => t.status === "open").map((task) => (
                     <Link
                       key={task.id}
-                      to={`/tasks?taskId=${task.id}`}
+                      to={`/projects/${task.project_id}?tab=tasks&taskId=${task.id}`}
                       className="p-6 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors block group"
                     >
                       <div className="flex items-start justify-between gap-4">
