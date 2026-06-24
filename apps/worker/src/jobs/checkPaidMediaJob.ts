@@ -317,7 +317,7 @@ export async function processCheckPaidMediaJob(job: Job) {
   const needsPageScan = runData?.enabled_checks?.some((c: string) =>
     PAGE_CHECKS.includes(c),
   )
-  if (!needsPageScan || isRetry) {
+  if (!needsPageScan && !isRetry) {
     const { qaQueue } = require("../lib/queue")
     await supabase
       .from("qa_runs")

@@ -838,10 +838,10 @@ router.post(
 
       // 4. Enqueue jobs based on the checkKey
       if (checkKey === "project_plan") {
-        await supabase.from("qa_runs").update({ status: "running" }).eq("id", id)
+        // await supabase.from("qa_runs").update({ status: "running" }).eq("id", id)
         await qaQueue.add("check_project_plan", { runId: id, projectId: run.project_id, isRetry: true })
       } else if (checkKey === "paid_media") {
-        await supabase.from("qa_runs").update({ status: "running" }).eq("id", id)
+        // await supabase.from("qa_runs").update({ status: "running" }).eq("id", id)
         await qaQueue.add("check_paid_media", { runId: id, projectId: run.project_id, isRetry: true })
       } else if (pages && pages.length > 0) {
         // Filter pages for homepage-only checks so we don't queue redundant tasks

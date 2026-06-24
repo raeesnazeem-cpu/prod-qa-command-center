@@ -58,6 +58,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import toast from "react-hot-toast"
 import { useAiResultsStore } from "../store/aiResultsStore"
 import { SignOffTab } from "../components/SignOffTab"
+import { supabase } from "../lib/supabase"
 
 export const RunDetailPage = () => {
   const { id: projectId, runId } = useParams<{ id: string; runId: string }>()
@@ -385,12 +386,33 @@ export const RunDetailPage = () => {
     setRetryingChecks((prev) => [...prev, checkKey])
     try {
       await retryCheckMutation.mutateAsync({ runId: runId!, checkKey, wp_password: password })
-    } finally {
-      setTimeout(() => {
-        setRetryingChecks((prev) => prev.filter((k) => k !== checkKey))
-      }, 1000)
+    } catch (e) {
+      setRetryingChecks((prev) => prev.filter((k) => k !== checkKey))
     }
   }
+
+  // Clear retry spinners when backend broadcasts that it finished processing
+  useEffect(() => {
+    if (!runId) return
+
+    const channel = supabase
+      .channel(`spinner-clear-${runId}`)
+      .on("broadcast", { event: "progress" }, (payload) => {
+        if (payload.payload?.status === "done" || payload.payload?.status === "failed") {
+          setRetryingChecks([])
+        }
+      })
+      .on("broadcast", { event: "page_progress" }, (payload) => {
+        if (payload.payload?.status === "done" || payload.payload?.status === "failed" || payload.payload?.status === "checked") {
+          setRetryingChecks([])
+        }
+      })
+      .subscribe()
+
+    return () => {
+      channel.unsubscribe()
+    }
+  }, [runId])
   const { mutate: createTask } = useCreateTask()
 
   // Helper to consolidate all dead link findings into a single finding
@@ -2089,7 +2111,7 @@ export const RunDetailPage = () => {
               ) : runGeneralFindings.length > 0 ? (
                 <FindingReviewPanel
                   findings={runGeneralFindings}
-                  generalFindings={runGeneralFindings}
+                  generalFindings={[]}
                   hideSummary={true}
                   runId={runId!}
                   onSingleConfirm={handleConfirmFinding}

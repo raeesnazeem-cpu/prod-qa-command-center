@@ -59,9 +59,9 @@ export async function processCheckProjectPlanJob(job: Job) {
       }])
     }
 
-    if (isRetry) {
-      await supabase.from("qa_runs").update({ status: "completed" }).eq("id", runId)
-    }
+    // if (isRetry) {
+    //   await supabase.from("qa_runs").update({ status: "completed" }).eq("id", runId)
+    // }
     return
   }
 
@@ -92,9 +92,9 @@ export async function processCheckProjectPlanJob(job: Job) {
       }])
     }
 
-    if (isRetry) {
-      await supabase.from("qa_runs").update({ status: "completed" }).eq("id", runId)
-    }
+    // if (isRetry) {
+    //   await supabase.from("qa_runs").update({ status: "completed" }).eq("id", runId)
+    // }
     return
   }
 
@@ -271,7 +271,7 @@ export async function processCheckProjectPlanJob(job: Job) {
     PAGE_CHECKS.includes(c),
   )
 
-  if (!needsPageScan || isRetry) {
+  if (!needsPageScan && !isRetry) {
     const { qaQueue } = require("../lib/queue") // Dyn import queue
     await supabase
       .from("qa_runs")
