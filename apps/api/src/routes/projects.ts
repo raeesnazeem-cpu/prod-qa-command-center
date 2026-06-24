@@ -518,8 +518,25 @@ router.patch(
       }
       if (req.body.basecamp_account_id !== undefined)
         settingsUpdate.basecamp_account_id = req.body.basecamp_account_id
-      if (req.body.basecamp_project_id !== undefined)
+      if (req.body.basecamp_project_id !== undefined) {
         settingsUpdate.basecamp_project_id = req.body.basecamp_project_id
+
+        // Auto-fetch user's global Basecamp token if they are linking a project
+        // but not explicitly providing a new token.
+        if (req.body.basecamp_api_token === undefined && req.auth?.userId) {
+          const { data: userData } = await supabase
+            .from("users")
+            .select("basecamp_access_token")
+            .eq("id", req.auth.userId)
+            .single()
+
+          if (userData?.basecamp_access_token) {
+            settingsUpdate.basecamp_token_encrypted = encrypt(
+              userData.basecamp_access_token
+            )
+          }
+        }
+      }
       if (req.body.basecamp_todo_list_id !== undefined)
         settingsUpdate.basecamp_todolist_id = req.body.basecamp_todo_list_id
       if (req.body.basecamp_post_todo_list_id !== undefined)
