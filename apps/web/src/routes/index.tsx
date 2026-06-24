@@ -1,7 +1,8 @@
-import { createBrowserRouter, Navigate } from "react-router-dom"
-import { AppLayout } from "@/layouts/AppLayout"
-import { ChatProvider } from "@/contexts/ChatContext"
-import { ProtectedRoute } from "@/components/ProtectedRoute"
+import { createBrowserRouter, Navigate } from "react-router-dom";
+import { AppLayout } from "@/layouts/AppLayout";
+import { ChatProvider } from "@/contexts/ChatContext";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
+import { MaintenanceGuard } from "@/components/MaintenanceGuard";
 import {
   LoginPage,
   RegisterPage,
@@ -20,125 +21,130 @@ import {
   StatsPage,
   AllTasksPage,
   FeedbackPage,
-} from "@/pages"
-import { AuthenticateWithRedirectCallback } from "@clerk/react"
+} from "@/pages";
+import { AuthenticateWithRedirectCallback } from "@clerk/react";
 
 export const router = createBrowserRouter(
   [
     {
-      path: "/",
-      element: <Navigate to="/dashboard" replace />,
-    },
-    {
-      path: "/login",
+      element: <MaintenanceGuard />,
       children: [
         {
-          index: true,
-          element: <LoginPage />,
+          path: "/",
+          element: <Navigate to="/dashboard" replace />,
         },
         {
-          path: "*",
-          element: <LoginPage />,
-        },
-      ],
-    },
-    {
-      path: "/register",
-      children: [
-        {
-          index: true,
-          element: <RegisterPage />,
-        },
-        {
-          path: "*",
-          element: <RegisterPage />,
-        },
-      ],
-    },
-    {
-      element: <ProtectedRoute />,
-      children: [
-        {
-          element: (
-            <ChatProvider>
-              <AppLayout />
-            </ChatProvider>
-          ),
+          path: "/login",
           children: [
             {
-              path: "/onboarding",
-              element: <OnboardingPage />,
+              index: true,
+              element: <LoginPage />,
             },
             {
-              path: "/dashboard",
-              element: <DashboardPage />,
+              path: "*",
+              element: <LoginPage />,
+            },
+          ],
+        },
+        {
+          path: "/register",
+          children: [
+            {
+              index: true,
+              element: <RegisterPage />,
             },
             {
-              path: "/test",
-              element: <TestPage />,
+              path: "*",
+              element: <RegisterPage />,
             },
+          ],
+        },
+        {
+          element: <ProtectedRoute />,
+          children: [
             {
-              path: "/sso-callback",
-              element: <AuthenticateWithRedirectCallback />,
-            },
-            // If Clerk is specifically sending to /login/sso-callback, use this:
-            {
-              path: "/login/sso-callback",
-              element: <AuthenticateWithRedirectCallback />,
-            },
+              element: (
+                <ChatProvider>
+                  <AppLayout />
+                </ChatProvider>
+              ),
+              children: [
+                {
+                  path: "/onboarding",
+                  element: <OnboardingPage />,
+                },
+                {
+                  path: "/dashboard",
+                  element: <DashboardPage />,
+                },
+                {
+                  path: "/test",
+                  element: <TestPage />,
+                },
+                {
+                  path: "/sso-callback",
+                  element: <AuthenticateWithRedirectCallback />,
+                },
+                // If Clerk is specifically sending to /login/sso-callback, use this:
+                {
+                  path: "/login/sso-callback",
+                  element: <AuthenticateWithRedirectCallback />,
+                },
 
-            {
-              path: "/projects",
-              element: <ProjectsPage />,
-            },
-            {
-              path: "/projects/:id",
-              element: <ProjectDetailPage />,
-            },
-            {
-              path: "/projects/:id/runs/:runId",
-              element: <RunDetailPage />,
-            },
-            {
-              path: "/projects/:id/runs/:runId/diff",
-              element: <VisualDiffPage />,
-            },
-            {
-              path: "/tasks",
-              element: <TasksPage />,
-            },
-            {
-              path: "/all-tasks",
-              element: <AllTasksPage />,
-            },
-            {
-              path: "/settings",
-              element: <SettingsPage />,
-            },
-            {
-              path: "/team",
-              element: <TeamPage />,
-            },
-            {
-              path: "/team",
-              element: <TeamPage />,
-            },
-            {
-              path: "/stats",
-              element: <StatsPage />,
-            },
+                {
+                  path: "/projects",
+                  element: <ProjectsPage />,
+                },
+                {
+                  path: "/projects/:id",
+                  element: <ProjectDetailPage />,
+                },
+                {
+                  path: "/projects/:id/runs/:runId",
+                  element: <RunDetailPage />,
+                },
+                {
+                  path: "/projects/:id/runs/:runId/diff",
+                  element: <VisualDiffPage />,
+                },
+                {
+                  path: "/tasks",
+                  element: <TasksPage />,
+                },
+                {
+                  path: "/all-tasks",
+                  element: <AllTasksPage />,
+                },
+                {
+                  path: "/settings",
+                  element: <SettingsPage />,
+                },
+                {
+                  path: "/team",
+                  element: <TeamPage />,
+                },
+                {
+                  path: "/team",
+                  element: <TeamPage />,
+                },
+                {
+                  path: "/stats",
+                  element: <StatsPage />,
+                },
 
-            {
-              path: "/admin/queue-history",
-              element: <QueueHistoryPage />,
-            },
-            {
-              path: "/admin/activity-logs",
-              element: <ActivityLogPage />,
-            },
-            {
-              path: "/feedback",
-              element: <FeedbackPage />,
+                {
+                  path: "/admin/queue-history",
+                  element: <QueueHistoryPage />,
+                },
+                {
+                  path: "/admin/activity-logs",
+                  element: <ActivityLogPage />,
+                },
+                {
+                  path: "/feedback",
+                  element: <FeedbackPage />,
+                },
+              ],
             },
           ],
         },
@@ -150,4 +156,4 @@ export const router = createBrowserRouter(
       v7_relativeSplatPath: true,
     },
   },
-)
+);

@@ -339,4 +339,37 @@ router.delete(
   },
 )
 
+/**
+ * PATCH /api/admin/maintenance-mode
+ * Toggles maintenance mode. Super-Admin only.
+ */
+router.patch(
+  "/maintenance-mode",
+  clerkAuth,
+  requireRole("super_admin"),
+  async (req: Request, res: Response) => {
+    try {
+      const { is_maintenance_mode } = req.body
+
+      if (typeof is_maintenance_mode !== "boolean") {
+        return res.status(400).json({ error: "is_maintenance_mode must be a boolean" })
+      }
+
+      const { data, error } = await supabase
+        .from("system_settings")
+        .update({ is_maintenance_mode })
+        .eq("id", 1)
+        .select()
+        .single()
+
+      if (error) throw error
+
+      return res.json({ success: true, is_maintenance_mode: data.is_maintenance_mode })
+    } catch (error: any) {
+      logger.error({ error: error.message }, "Failed to update maintenance mode")
+      return res.status(500).json({ error: error.message })
+    }
+  },
+)
+
 export { router as adminRouter }

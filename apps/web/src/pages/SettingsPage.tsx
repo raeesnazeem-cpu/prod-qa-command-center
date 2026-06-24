@@ -3,12 +3,14 @@ import { useState, useEffect } from "react"
 import { useUser, SignOutButton } from "@clerk/react"
 import { useRole } from "../hooks/useRole"
 import { useAuthAxios } from "../lib/useAuthAxios"
+import { useSystemSettings } from "../hooks/useSystemSettings"
 import { Save, Loader2, Edit2, RefreshCw } from "lucide-react"
 import toast from "react-hot-toast"
 
 export const SettingsPage = () => {
   const { user } = useUser()
   const { role } = useRole()
+  const { systemSettings, updateMaintenanceMode } = useSystemSettings()
   const axios = useAuthAxios()
   const [googleChatUserId, setGoogleChatUserId] = useState("")
   const [isSaving, setIsSaving] = useState(false)
@@ -171,7 +173,22 @@ export const SettingsPage = () => {
     }
   }
 
-  const sections = [
+  type SettingsItem = {
+    label: string
+    value: any
+    type: string
+    placeholder?: string
+  }
+  
+  type SettingsSection = {
+    id: string
+    title: string
+    description: string
+    icon: any
+    items: SettingsItem[]
+  }
+
+  const sections: SettingsSection[] = [
     {
       id: "profile",
       title: "Profile Settings",
@@ -244,6 +261,22 @@ export const SettingsPage = () => {
     //   ],
     // },
   ]
+
+  if (role === "super_admin") {
+    sections.push({
+      id: "system",
+      title: "System Administration",
+      description: "Global settings affecting all users in the system.",
+      icon: Shield,
+      items: [
+        {
+          label: "Maintenance Mode",
+          value: systemSettings?.is_maintenance_mode ?? false,
+          type: "maintenance_toggle",
+        },
+      ],
+    })
+  }
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in duration-500 pb-20">
@@ -470,6 +503,22 @@ export const SettingsPage = () => {
                           readOnly
                         />
                         <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-50 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent"></div>
+                      </label>
+                    )}
+                    {item.type === "maintenance_toggle" && (
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(item.value)}
+                          onChange={(e) => {
+                            if (!updateMaintenanceMode.isPending) {
+                              updateMaintenanceMode.mutate(e.target.checked)
+                            }
+                          }}
+                          disabled={updateMaintenanceMode.isPending}
+                          className="sr-only peer"
+                        />
+                        <div className={`w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-50 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent ${updateMaintenanceMode.isPending ? 'opacity-50 cursor-not-allowed' : ''}`}></div>
                       </label>
                     )}
                     {item.type === "status" && (

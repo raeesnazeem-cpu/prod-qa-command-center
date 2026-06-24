@@ -23,6 +23,7 @@ import { adminRouter } from "./routes/admin"
 import { findingsRouter } from "./routes/findings"
 import { visualDiffRouter } from "./routes/visualDiff"
 import { chatRouter } from "./routes/chat"
+import { systemSettingsRouter } from "./routes/systemSettings"
 import { basecampIntegrationRouter } from "./routes/basecampIntegration"
 import { onboardingRouter } from "./routes/onboarding"
 import { proxyRouter } from "./routes/proxy"
@@ -92,6 +93,7 @@ app.use((req, res, next) => {
 // Core Routes
 app.use("/api/me", meRouter)
 app.use("/api/dashboard", dashboardRouter)
+app.use("/api/system-settings", systemSettingsRouter)
 app.use("/api", proxyRouter)
 
 // Resource Routes
