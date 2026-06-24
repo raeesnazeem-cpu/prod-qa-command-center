@@ -354,6 +354,12 @@ export async function checkOptimizedLinks(
   onProgress?: (progress: number, message: string) => Promise<void>,
 ): Promise<Finding[]> {
   const pageUrl = pageRecord.url
+  // Clear stale in-memory caches when this is a retry so links are re-checked fresh
+  const runId = pageRecord.run_id
+  if (runId && pageRecord.isRetry) {
+    runCheckedLinks.delete(runId)
+    runBrokenLinks.delete(runId)
+  }
   let extractedLinks: ExtractedLink[] = []
   try {
     try {

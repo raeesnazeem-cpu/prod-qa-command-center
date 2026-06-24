@@ -10,7 +10,7 @@ import toast from 'react-hot-toast';
  */
 export const useRealtimeNotifications = () => {
   const queryClient = useQueryClient();
-  const { profile } = useRole();
+  const { profile, isAdmin } = useRole();
 
   useEffect(() => {
     if (!profile?.id) return;
@@ -18,6 +18,10 @@ export const useRealtimeNotifications = () => {
     console.log(`[Realtime] Subscribing to notifications for user ${profile.id}`);
 
     // Subscribe to INSERT events on the notifications table for this specific user
+    const filterOptions = isAdmin 
+      ? {} 
+      : { filter: `user_id=eq.${profile.id}` };
+
     const channel = supabase
       .channel(`user-notifications-${profile.id}`)
       .on(
@@ -26,7 +30,7 @@ export const useRealtimeNotifications = () => {
           event: 'INSERT',
           schema: 'public',
           table: 'notifications',
-          filter: `user_id=eq.${profile.id}`
+          ...filterOptions
         },
         (payload) => {
           console.log('[Realtime] New notification row detected:', payload);
@@ -44,12 +48,15 @@ export const useRealtimeNotifications = () => {
           });
 
           // 3. Play a subtle sound if enabled (optional)
-          try {
-            const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
-            audio.volume = 0.4;
-            audio.play().catch(() => {}); // Ignore errors if browser blocks autoplay
-          } catch (e) {
-            // Silently fail if audio setup fails
+          const dingEnabled = profile?.notification_prefs?.ding ?? true;
+          if (dingEnabled) {
+            try {
+              const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+              audio.volume = 0.4;
+              audio.play().catch(() => {}); // Ignore errors if browser blocks autoplay
+            } catch (e) {
+              // Silently fail if audio setup fails
+            }
           }
         }
       )
@@ -63,5 +70,5 @@ export const useRealtimeNotifications = () => {
       console.log('[Realtime] Unsubscribing from notifications channel');
       supabase.removeChannel(channel);
     };
-  }, [profile?.id, queryClient]);
+  }, [profile?.id, queryClient, isAdmin, profile?.notification_prefs?.ding]);
 };

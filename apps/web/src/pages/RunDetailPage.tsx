@@ -4,6 +4,7 @@ import { QAFinding, QAPage } from "../api/runs.api"
 import { useAuthAxios } from "../lib/useAuthAxios"
 import { useGalleryStore } from "../store/galleryStore"
 import { PagesTable } from "../components/PagesTable"
+import { CheckHealthPanel } from "../components/CheckHealthPanel"
 import { FindingReviewPanel } from "../components/FindingReviewPanel"
 import { CreateTaskModal } from "../components/CreateTaskModal"
 import { useRunProgress } from "../hooks/useRunProgress"
@@ -101,6 +102,8 @@ export const RunDetailPage = () => {
     [run?.pages, selectedPageId],
   )
 
+  const queryClient = useQueryClient()
+
   const [activeTab, setActiveTab] = useState<
     | "overview"
     | "pages"
@@ -123,6 +126,7 @@ export const RunDetailPage = () => {
   )
   const [isCreateTaskModalOpen, setIsCreateTaskModalOpen] = useState(false)
   const [prefillFinding, setPrefillFinding] = useState<QAFinding | null>(null)
+  const [filterCheckFactor, setFilterCheckFactor] = useState<string | null>(null)
 
   // Reset view to overview or specific tab when navigating
   useEffect(() => {
@@ -226,7 +230,7 @@ export const RunDetailPage = () => {
   }, [run?.status, hasRefetched, refetchFindings, refetchRunFindings])
 
   const trueAverageProgress = useMemo(() => {
-    if (!run?.enabled_checks || !run?.pages) return progress
+    if (!run || !run.enabled_checks || run.enabled_checks.length === 0) return progress
 
     const SINGLE_PAGE_CHECKS = [
       "project_plan",
@@ -246,98 +250,112 @@ export const RunDetailPage = () => {
       "logo_chatbot",
     ]
 
-    const normalize = (u: string) =>
-      u.replace(/^https?:\/\//, "").replace(/\/$/, "")
-    const homepage = run.pages.find(
-      (p) => normalize(p.url) === normalize(run.site_url),
-    )
-    const isRunCompleted = run.status === "completed"
-    const totalPages = run.pages.length
-    const completedPages = isRunCompleted
-      ? totalPages
-      : run.pages.filter(
-          (p) =>
-            p.status === "done" ||
-            p.status === "checked" ||
-            p.status === "failed",
-        ).length
-    const allPagesProgress = (() => {
-      if (totalPages === 0) return 0
-      if (isRunCompleted) return 100
-
-      const hasUrlTabCompare = run.enabled_checks?.includes("url_tab_compare")
-
-      if (hasUrlTabCompare) {
-        // Weight normal pages 50%, and homepage crawl 50%
-        const completedWithoutHomepage = run.pages.filter(
-          (p) =>
-            (p.status === "done" ||
-              p.status === "checked" ||
-              p.status === "failed") &&
-            p.id !== homepage?.id,
-        ).length
-
-        const basePagesToProcess = Math.max(1, totalPages - 1)
-        const baseProgress =
-          (completedWithoutHomepage / basePagesToProcess) * 50
-        const homeProgress = homepage
-          ? ((homepage.progress || 0) / 100) * 50
-          : 0
-
-        return baseProgress + homeProgress
-      }
-
-      return (completedPages / totalPages) * 100
-    })()
-
-    // Detect API only run for accurate progress calculation
-    const isApiOnlyRun = !run.enabled_checks.some((c: string) =>
-      [
-        "visual_regression",
-        "accessibility",
-        "console_errors",
-        "performance",
-        "seo",
-        "spelling",
-        "broken_links",
-        "dummy_content",
-        "image_compliance",
-        "ai_content_audit",
-        "hero_media",
-        "dead_links",
-        "footer_logo",
-        "single_script",
-        "top_bar_sticky",
-        "favicon",
-        "url_matching",
-        "contact_form",
-        "chatbot_consultation",
-        "text_share",
-        "logo_chatbot",
-      ].includes(c),
-    )
-
-    const homepageProgress = homepage
-      ? isApiOnlyRun
-        ? homepage.progress || 0
-        : homepage.status === "done" || homepage.status === "checked"
-          ? 100
-          : homepage.progress || 0
-      : 0
+    const isRunCompleted =
+      run.status === "completed" ||
+      run.status === "cancelled" ||
+      run.status === "failed"
 
     let totalCheckProgress = 0
 
-    run.enabled_checks.forEach((checkKey) => {
+    run.enabled_checks.forEach((checkKey: string) => {
+      let relevantPages = run.pages || []
       if (SINGLE_PAGE_CHECKS.includes(checkKey)) {
-        totalCheckProgress += homepageProgress
+        relevantPages = relevantPages.filter((p) => {
+          const normalize = (u: string) =>
+            u
+              .replace(/^https?:\/\//, "")
+              .replace(/^www\./, "")
+              .replace(/\/$/, "")
+              .toLowerCase()
+          return normalize(p.url) === normalize(run.site_url)
+        })
+
+        if (relevantPages.length === 0 && (run.pages || []).length > 0) {
+          relevantPages = [run.pages![0]]
+        }
+      }
+
+      if (
+        checkKey === "dead_links" ||
+        checkKey === "learn_more_buttons" ||
+        checkKey === "url_tab_compare"
+      ) {
+        const totalPages = relevantPages.length
+        const completedPages = relevantPages.filter((p) => {
+          const spCheck = (p as any).check_progress?.[checkKey]
+          if (spCheck && spCheck.status) {
+            return spCheck.status === "done" || spCheck.status === "failed"
+          }
+          if (isRunCompleted) return true
+          return (
+            p.status === "done" ||
+            p.status === "checked" ||
+            p.status === "failed"
+          )
+        }).length
+
+        const deadLinksProgress = (() => {
+          if (totalPages === 0) return 0
+          const isUrlTabCompare = checkKey === "url_tab_compare"
+
+          if (isUrlTabCompare) {
+            const localHomepage = run.pages?.find(
+              (p) =>
+                p.url.replace(/^https?:\/\//, "").replace(/\/$/, "") ===
+                run.site_url.replace(/^https?:\/\//, "").replace(/\/$/, ""),
+            )
+
+            const completedWithoutHomepage = relevantPages.filter((p) => {
+              const spCheck = (p as any).check_progress?.[checkKey]
+              const isPageDone = spCheck?.status 
+                ? (spCheck.status === "done" || spCheck.status === "failed")
+                : (p.status === "done" || p.status === "checked" || p.status === "failed")
+              return isPageDone && p.id !== localHomepage?.id
+            }).length
+
+            const basePagesToProcess = Math.max(1, totalPages - 1)
+            const baseProgress = (completedWithoutHomepage / basePagesToProcess) * 50
+            
+            const hpCheck = localHomepage ? (localHomepage as any).check_progress?.[checkKey] : null
+            const isHpDone = hpCheck?.status
+              ? (hpCheck.status === "done" || hpCheck.status === "failed")
+              : (localHomepage?.status === "done" || localHomepage?.status === "checked" || localHomepage?.status === "failed")
+            const homeProgressRaw = isHpDone ? 100 : (hpCheck?.progress ?? localHomepage?.progress ?? 0)
+            const homeProgress = (homeProgressRaw / 100) * 50
+
+            return isRunCompleted && !relevantPages.some(p => (p as any).check_progress?.[checkKey]?.status === "processing") ? 100 : Math.round(baseProgress + homeProgress)
+          }
+
+          return Math.round((completedPages / totalPages) * 100)
+        })()
+        
+        totalCheckProgress += deadLinksProgress
       } else {
-        totalCheckProgress += allPagesProgress
+        if (relevantPages.length === 0) {
+          totalCheckProgress += isRunCompleted ? 100 : 0
+        } else {
+          let checkSum = 0
+          relevantPages.forEach((page) => {
+            const specificCheck = (page as any).check_progress?.[checkKey]
+            let isDone = false
+            if (specificCheck && specificCheck.status) {
+              isDone = specificCheck.status === "done" || specificCheck.status === "failed"
+            } else {
+              isDone = page.status === "done" || isRunCompleted
+            }
+
+            const pageProgress = isDone
+              ? 100
+              : (specificCheck?.progress ?? page.progress ?? 0)
+              
+            checkSum += pageProgress
+          })
+          totalCheckProgress += checkSum / relevantPages.length
+        }
       }
     })
 
-    return run.enabled_checks.length > 0
-      ? totalCheckProgress / run.enabled_checks.length
-      : progress
+    return totalCheckProgress / run.enabled_checks.length
   }, [run?.enabled_checks, run?.pages, run?.status, run?.site_url, progress])
 
   const computedAverageProgress = Math.min(
@@ -400,11 +418,17 @@ export const RunDetailPage = () => {
       .on("broadcast", { event: "progress" }, (payload) => {
         if (payload.payload?.status === "done" || payload.payload?.status === "failed") {
           setRetryingChecks([])
+          refetchFindings()
+          refetchRunFindings()
+          queryClient.invalidateQueries({ queryKey: ["run", runId] })
         }
       })
       .on("broadcast", { event: "page_progress" }, (payload) => {
         if (payload.payload?.status === "done" || payload.payload?.status === "failed" || payload.payload?.status === "checked") {
           setRetryingChecks([])
+          refetchFindings()
+          refetchRunFindings()
+          queryClient.invalidateQueries({ queryKey: ["run", runId] })
         }
       })
       .subscribe()
@@ -412,7 +436,7 @@ export const RunDetailPage = () => {
     return () => {
       channel.unsubscribe()
     }
-  }, [runId])
+  }, [runId, refetchFindings, refetchRunFindings, queryClient])
   const { mutate: createTask } = useCreateTask()
 
   // Helper to consolidate all dead link findings into a single finding
@@ -626,8 +650,6 @@ export const RunDetailPage = () => {
       ) || []
     )
   }, [findings])
-
-  const queryClient = useQueryClient()
 
   const runGeneralFindings = useMemo(() => {
     const baseGeneral =
@@ -1366,7 +1388,7 @@ export const RunDetailPage = () => {
                     ? "40%"
                     : displayStatus === "completed"
                       ? "100%"
-                      : `${Math.max(2, displayProgress)}%`,
+                      : `${Math.max(2, safeDisplayProgress)}%`,
                 }}
               >
                 {(run.status === "running" || isDiscovering) && (
@@ -1602,20 +1624,19 @@ export const RunDetailPage = () => {
                                 run.status === "failed"
 
                               const totalPages = relevantPages.length
-                              const completedPages = isRunCompleted
-                                ? totalPages
-                                : relevantPages.filter((p) => {
-                                    // If we have check_progress for this specific check, respect it
-                                    const spCheck = (p as any).check_progress?.[checkKey]
-                                    if (spCheck && spCheck.status) {
-                                      return spCheck.status === "done" || spCheck.status === "failed"
-                                    }
-                                    return (
-                                      p.status === "done" ||
-                                      p.status === "checked" ||
-                                      p.status === "failed"
-                                    )
-                                  }).length
+                              const completedPages = relevantPages.filter((p) => {
+                                // If we have check_progress for this specific check, respect it
+                                const spCheck = (p as any).check_progress?.[checkKey]
+                                if (spCheck && spCheck.status) {
+                                  return spCheck.status === "done" || spCheck.status === "failed"
+                                }
+                                if (isRunCompleted) return true
+                                return (
+                                  p.status === "done" ||
+                                  p.status === "checked" ||
+                                  p.status === "failed"
+                                )
+                              }).length
 
                               const deadLinksProgress = (() => {
                                 if (totalPages === 0) return 0
@@ -1654,7 +1675,7 @@ export const RunDetailPage = () => {
                                   const homeProgressRaw = isHpDone ? 100 : (hpCheck?.progress ?? localHomepage?.progress ?? 0)
                                   const homeProgress = (homeProgressRaw / 100) * 50
 
-                                  return isRunCompleted
+                                  return isRunCompleted && !relevantPages.some(p => (p as any).check_progress?.[checkKey]?.status === "processing")
                                     ? 100
                                     : Math.round(baseProgress + homeProgress)
                                 }
@@ -1687,7 +1708,7 @@ export const RunDetailPage = () => {
                               const checkProgress = deadLinksProgress
 
                               // Use the fast loop effect if we are not complete, so it feels realtime
-                              const displayUrl = isRunCompleted
+                              const displayUrl = isRunCompleted && !activePage
                                 ? "All pages checked"
                                 : relevantPages.length > 0
                                   ? relevantPages[
@@ -1885,6 +1906,17 @@ export const RunDetailPage = () => {
               </div>
             </div>
           </div>
+
+          {(run.status === "completed" || run.status === "failed" || displayStatus === "partial" || run.status === "paused") && (
+            <CheckHealthPanel 
+              run={run} 
+              displayStatus={displayStatus}
+              onCheckClick={(checkKey) => {
+                setFilterCheckFactor(checkKey);
+                setActiveTab("pages");
+              }} 
+            />
+          )}
         </div>
       )}
 
@@ -1897,8 +1929,26 @@ export const RunDetailPage = () => {
             </span>
           </div>
           <div className="bg-slate-50 dark:bg-[#1D2A31] rounded-md border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
+            {filterCheckFactor && (
+              <div className="bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-700/50 px-6 py-3 flex items-center justify-between">
+                <p className="text-sm text-amber-800 dark:text-amber-200 font-medium">
+                  Showing pages related to stuck/failed check: <span className="font-bold">{filterCheckFactor}</span>
+                </p>
+                <button
+                  onClick={() => setFilterCheckFactor(null)}
+                  className="text-xs font-bold uppercase tracking-widest text-amber-600 dark:text-amber-400 hover:text-amber-800 dark:hover:text-amber-300"
+                >
+                  Clear Filter
+                </button>
+              </div>
+            )}
             <PagesTable
-              pages={run.pages || []}
+              pages={(run.pages || []).filter((p: any) => {
+                if (!filterCheckFactor) return true;
+                const prog = p.check_progress?.[filterCheckFactor];
+                const isDone = prog?.progress === 100 || p.status === "done" || p.status === "checked";
+                return !isDone;
+              })}
               onPageSelect={(page) => {
                 setSelectedPageId(page.id)
                 setActiveTab("findings")

@@ -16,13 +16,15 @@ export const NotificationSettingsPage = ({
   const [isSaving, setIsSaving] = useState(false)
   const [isTestingSlack, setIsTestingSlack] = useState(false)
 
-  // Email Notification State
   const [emailPrefs, setEmailPrefs] = useState({
     taskAssigned: true,
     newComment: true,
     rebuttalVerdict: true,
     runCompleted: false,
   })
+
+  // Ding Notification State
+  const [dingEnabled, setDingEnabled] = useState(true)
 
   // Slack Notification State
   const [slackPrefs, setSlackPrefs] = useState({
@@ -51,6 +53,7 @@ export const NotificationSettingsPage = ({
           setEmailPrefs(userPrefs.email || emailPrefs)
           setFrequency(userPrefs.frequency || frequency)
           setGoogleChatUserId(userPrefs.google_chat_user_id || "")
+          if (userPrefs.ding !== undefined) setDingEnabled(userPrefs.ding)
         }
 
         const { data: projSettings } = await axios.get(
@@ -84,6 +87,7 @@ export const NotificationSettingsPage = ({
         email: emailPrefs,
         frequency,
         google_chat_user_id: googleChatUserId,
+        notification_prefs: { email: emailPrefs, frequency, ding: dingEnabled },
       })
 
       // 2. Save Project Slack Settings (if admin)
@@ -201,6 +205,30 @@ export const NotificationSettingsPage = ({
             onChange={(val) =>
               setEmailPrefs({ ...emailPrefs, runCompleted: val })
             }
+          />
+        </div>
+      </section>
+
+      {/* App Notifications */}
+      <section className="bg-slate-50 dark:bg-[#1d2a31] border border-slate-400/50 rounded-md overflow-hidden shadow-sm">
+        <div className="px-6 py-4 border-b border-slate-400/50 flex items-center space-x-3 bg-slate-50/50 dark:bg-[#131D22]/50">
+          <div className="p-2 bg-slate-50 dark:bg-[#131D22] border border-slate-400/50 rounded-md text-slate-400 shadow-sm">
+            <Bell className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="font-bold text-slate-900 dark:text-slate-200">
+              App Notifications
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">
+              Configure in-app notification alerts.
+            </p>
+          </div>
+        </div>
+        <div className="p-6 divide-y divide-slate-400/50">
+          <Toggle
+            label="Play sound (ding) for new notifications"
+            checked={dingEnabled}
+            onChange={(val) => setDingEnabled(val)}
           />
         </div>
       </section>

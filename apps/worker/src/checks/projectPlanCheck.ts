@@ -37,9 +37,11 @@ export async function checkProjectPlan(
     "Starting Basecamp project plan check",
   )
 
+  const userAgent = process.env.BASECAMP_USER_AGENT || "QACC (dev@growth99.com)"
+  
   const headers = {
     Authorization: `Bearer ${basecamp_token}`,
-    "User-Agent": "QACC (raees.nazeem@growth99.com)",
+    "User-Agent": userAgent,
     "Content-Type": "application/json",
     Accept: "application/json",
   }
@@ -72,23 +74,38 @@ export async function checkProjectPlan(
     if (onProgress)
       await onProgress(60, "Fetching messages from Message Board...")
 
-    // 3. Fetch messages from Message Board
-    const messagesUrl = messageBoardTool.url.replace(".json", "/messages.json")
-    logger.info({ messagesUrl }, "Fetching messages from Message Board via API")
-    const messagesResponse = await axios.get(messagesUrl, { headers })
-    const messages = messagesResponse.data || []
+    // 3. Fetch messages from Message Board with pagination
+    let messages: any[] = []
+    let nextUrl: string | null = messageBoardTool.url.replace(".json", "/messages.json")
+    let orderDetailsMsg: any = null
+    let pagesFetched = 0
 
-    logger.info(
-      { count: messages.length },
-      "Fetched messages from Message Board",
-    )
+    while (nextUrl && !orderDetailsMsg && pagesFetched < 10) {
+      logger.info({ nextUrl, page: pagesFetched + 1 }, "Fetching messages from Message Board via API")
+      const messagesResponse = await axios.get(nextUrl, { headers })
+      const currentMessages = messagesResponse.data || []
+      messages = messages.concat(currentMessages)
+      pagesFetched++
 
-    // 4. Find the "Project Order Details" message
-    const orderDetailsMsg = messages.find((msg: any) =>
-      (msg.subject || msg.title || "")
-        .toLowerCase()
-        .includes("order details"),
-    )
+      orderDetailsMsg = messages.find((msg: any) =>
+        (msg.subject || msg.title || "")
+          .toLowerCase()
+          .includes("order details"),
+      )
+
+      if (orderDetailsMsg) {
+        break
+      }
+
+      // Basecamp uses Link header for pagination
+      const linkHeader = messagesResponse.headers.link
+      if (linkHeader && linkHeader.includes('rel="next"')) {
+        const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/)
+        nextUrl = match ? match[1] : null
+      } else {
+        nextUrl = null
+      }
+    }
 
     let contentHtml = ""
     let planValue = ""
@@ -166,47 +183,60 @@ export async function checkProjectPlan(
     })
 
     try {
-      const context = await browser.newContext()
+      const context = await browser.newContext({
+        userAgent:
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        extraHTTPHeaders: {
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+        bypassCSP: true,
+      })
+
+      // Add stealth script to bypass basic bot detection
+      await context.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", {
+          get: () => undefined,
+        })
+      })
+
       const page = await context.newPage()
 
       page.setDefaultTimeout(15000)
       page.setDefaultNavigationTimeout(15000)
       if (onProgress) await onProgress(80, "Capturing visual evidence...")
 
+      const availableSubjects = messages.map((m: any) => m.subject || m.title || "Untitled").slice(0, 10).join(", ")
       const styledHtml = `
         <html>
           <head>
             <style>
               body {
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                color: #2e2f30;
-                line-height: 1.5;
-                padding: 40px;
-                background-color: #ffffff;
+                background-color: #f4f5f7;
                 margin: 0;
+                padding: 40px;
+                color: #2e3033;
               }
               .container {
-                max-width: 650px;
-                margin: 0 auto;
-                border: 1px solid #e3e4e6;
+                background: white;
                 border-radius: 8px;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
-                background: #ffffff;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
                 overflow: hidden;
+                max-width: 800px;
+                margin: 0 auto;
               }
               .header {
-                background: #f7f9fa;
+                background: #f8f9fa;
                 padding: 24px 32px;
-                border-bottom: 1px solid #e3e4e6;
+                border-bottom: 1px solid #e1e3e8;
               }
               .title {
-                font-size: 24px;
-                font-weight: 700;
                 margin: 0 0 8px 0;
-                color: #1a1a1a;
+                font-size: 24px;
+                color: #2e3033;
               }
               .meta {
-                font-size: 13px;
+                font-size: 14px;
                 color: #747679;
               }
               .content {
@@ -218,11 +248,11 @@ export async function checkProjectPlan(
           <body>
             <div class="container">
               <div class="header">
-                <h1 class="title">${orderDetailsMsg ? orderDetailsMsg.subject || orderDetailsMsg.title || "Project Order Details" : "Message Board Info"}</h1>
+                <h1 class="title">${orderDetailsMsg ? orderDetailsMsg.subject || orderDetailsMsg.title || "Order Details" : "Message Board Info"}</h1>
                 <div class="meta">Basecamp Integration • QA Command Center</div>
               </div>
               <div class="content">
-                ${contentHtml || '<em>No "Project Order Details" message found on the project Message Board.</em>'}
+                ${contentHtml || `<em>No message containing "order details" found. Evaluated ${messages.length} messages. Subjects found: ${availableSubjects || "None"}</em>`}
               </div>
             </div>
           </body>
@@ -322,6 +352,9 @@ export async function checkProjectPlan(
           }
         }
 
+        logger.info("Waiting 5 seconds for reviews to fully load before screenshot")
+        await reviewsPage.waitForTimeout(5000)
+
         const reviewsScreenshotBuffer = await reviewsPage
           .screenshot()
           .catch(() => null)
@@ -367,13 +400,16 @@ export async function checkProjectPlan(
     let title = "Project Plan Retrieved"
     let description = ""
     let severity: "low" | "medium" | "high" = "low"
+    let status: "open" | "failed" = "open"
 
     if (!orderDetailsMsg) {
-      title = 'Project Plan - "Project Order Details" message not found'
-      description = `We successfully connected to your Basecamp project "${bucketData.name || basecamp_project_id}", but could not find the "Project Order Details" message inside the Message Board to extract the plan.`
+      status = "failed"
+      title = 'Project Plan - "Order Details" message not found'
+      description = `We connected to your Basecamp project "${bucketData.name || basecamp_project_id}", but could not find any message containing "order details" in the Message Board. Evaluated ${messages.length} messages. Subjects found: ${availableSubjects || "None"}`
     } else if (!planValue) {
-      title = "Project Plan Retrieved (Plan Not Listed)"
-      description = `Successfully fetched "Project Order Details" from Basecamp, but no "Growth99 Plan: <Plan>" section was found inside the message body.`
+      status = "failed"
+      title = "Project Plan - Content extraction failed"
+      description = `Successfully fetched "${orderDetailsMsg.subject || orderDetailsMsg.title}" from Basecamp, but no "Growth99 Plan: <Plan>" section was found inside the message body.`
     } else {
       description = `Successfully fetched project plan from Basecamp: "${planValue}"`
     }

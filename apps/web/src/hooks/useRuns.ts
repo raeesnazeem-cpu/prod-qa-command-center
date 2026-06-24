@@ -58,9 +58,19 @@ export const useRun = (runId: string) => {
     enabled: !!runId,
     refetchInterval: (query) => {
       const data = query.state.data as QARun | undefined
+      
+      const hasRetryingChecks = data?.pages?.some((page) => 
+        page.status === "processing" || 
+        page.status === "pending" ||
+        Object.values((page as any).check_progress || {}).some(
+          (cp: any) => cp.status === "processing" || cp.status === "pending"
+        )
+      )
+
       return data?.status === "running" ||
         data?.status === "pending" ||
-        (data as any)?.recording_status === "recording"
+        (data as any)?.recording_status === "recording" ||
+        hasRetryingChecks
         ? 3000
         : false
     },

@@ -41,19 +41,24 @@ router.get('/notifications', clerkAuth, async (req: Request, res: Response) => {
     const { clerkUserId } = req.auth!;
     const { data: user } = await supabase
       .from('users')
-      .select('id')
+      .select('id, role')
       .eq('clerk_user_id', clerkUserId)
       .single();
 
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const { data, error } = await supabase
+    let query = supabase
       .from('notifications')
       .select(`
         *,
         activity:activity_logs (*)
-      `)
-      .eq('user_id', user.id)
+      `);
+
+    if (user.role !== 'admin' && user.role !== 'super_admin') {
+      query = query.eq('user_id', user.id);
+    }
+
+    const { data, error } = await query
       .order('created_at', { ascending: false })
       .limit(20);
 

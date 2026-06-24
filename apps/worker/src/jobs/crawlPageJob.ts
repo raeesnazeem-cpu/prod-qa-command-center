@@ -418,6 +418,7 @@ export async function processCrawlPageJob(job: Job) {
                   run_id: runId,
                   site_url: run.site_url,
                   url: pageUrl,
+                  isRetry: !!job.data.overrideChecks,
                 },
                 undefined,
                 async (p, m) => {
