@@ -173,6 +173,8 @@ export async function checkProjectPlan(
     }
 
     // 5. Render HTML in local Playwright page and take a screenshot
+    const availableSubjects = messages.map((m: any) => m.subject || m.title || "Untitled").slice(0, 10).join(", ")
+    
     const browser = await chromium.launch({
       headless: true,
       args: [
@@ -205,7 +207,6 @@ export async function checkProjectPlan(
       page.setDefaultNavigationTimeout(15000)
       if (onProgress) await onProgress(80, "Capturing visual evidence...")
 
-      const availableSubjects = messages.map((m: any) => m.subject || m.title || "Untitled").slice(0, 10).join(", ")
       const styledHtml = `
         <html>
           <head>

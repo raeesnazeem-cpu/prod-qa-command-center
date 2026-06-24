@@ -120,11 +120,38 @@ export const DeadLinksFindingCard: React.FC<FindingCardProps> = ({
       // 1. Try to parse as JSON first
       return JSON.parse(finding.description)
     } catch (e) {
-      // 2. If it's not JSON, extract columns from the Markdown text format
+      const extracted: any[] = []
+      
+      // 2. Try to parse Markdown Table (new format)
+      if (finding.description.includes("| Error | URL | Anchor Text | Linked From |")) {
+        const lines = finding.description.split("\n")
+        let inTable = false
+        for (const line of lines) {
+          if (line.includes("| Error | URL |")) {
+            inTable = true
+            continue
+          }
+          if (inTable && line.includes("|---|---|")) continue
+          
+          if (inTable && line.trim().startsWith("|")) {
+            const parts = line.split("|").map(p => p.trim())
+            if (parts.length >= 5) {
+              extracted.push({
+                reason: parts[1],
+                url: parts[2],
+                link_text: parts[3].replace(/`/g, ""),
+                found_on: parts[4], 
+              })
+            }
+          }
+        }
+        if (extracted.length > 0) return extracted
+      }
+
+      // 3. Fallback to old bullet format
       const regex =
         /- \*\*(.*?)\*\*\s*\* Reason:\s*(.*?)\s*\* Link Text:\s*(.*?)\s*\* Found on:\s*(.*?)(?=\s+- \*\*|$)/gs
       let match
-      const extracted = []
       while ((match = regex.exec(finding.description)) !== null) {
         extracted.push({
           url: match[1].trim(),
@@ -136,6 +163,37 @@ export const DeadLinksFindingCard: React.FC<FindingCardProps> = ({
       return extracted
     }
   }, [finding.description])
+
+  const renderFoundOn = (text: string) => {
+    if (!text) return "-"
+    
+    // Check if it's our new consolidated format with <br> and markdown links
+    if (text.includes("](") || text.includes("<br>")) {
+      const parts = text.split("<br>").map(p => p.trim()).filter(Boolean)
+      return (
+        <div className="flex flex-col gap-1">
+          {parts.map((p, i) => {
+            const match = p.match(/\[(.*?)\]\((.*?)\)/)
+            if (match) {
+              return (
+                <a key={i} href={match[2]} target="_blank" rel="noreferrer" className="hover:underline text-blue-500 block">
+                  {match[1]}
+                </a>
+              )
+            }
+            return <span key={i} className="text-slate-500">{p}</span>
+          })}
+        </div>
+      )
+    }
+
+    // Fallback for old single-url format
+    return (
+      <a href={text} target="_blank" rel="noreferrer" className="hover:underline text-blue-500">
+        {text}
+      </a>
+    )
+  }
 
   const handlePushToBasecamp = async () => {
     setIsPushing(true)
@@ -298,16 +356,14 @@ export const DeadLinksFindingCard: React.FC<FindingCardProps> = ({
 
             {finding.description && (
               <div className="mb-4">
-                {finding.context_text?.includes(
-                  "Total unique URLs checked",
-                ) && (
+                {(finding.context_text?.includes("Total unique URLs checked") || finding.context_text?.includes("URLs extracted from this page")) && (
                   <div className="flex flex-wrap items-center gap-2 mb-3">
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-100 text-[10px] font-bold text-emerald-600 border border-emerald-200 uppercase">
                       {Math.max(
                         0,
                         ...Array.from(
                           finding.context_text.matchAll(
-                            /Total unique URLs checked in run so far: (\d+)/g,
+                            /(?:Total unique URLs checked in run so far:|Total URLs checked in run so far:|URLs extracted from this page:)\s*(\d+)/g,
                           ),
                           (m) => parseInt(m[1], 10),
                         ),
@@ -562,14 +618,14 @@ export const DeadLinksFindingCard: React.FC<FindingCardProps> = ({
         className={`grid grid-cols-1 ${isFullWidth ? "w-full" : "lg:grid-cols-2"} gap-8 items-start`}
       >
         <div className={`space-y-4 ${isFullWidth ? "col-span-full" : ""}`}>
-          {finding.context_text?.includes("Total unique URLs checked") && (
+          {(finding.context_text?.includes("Total unique URLs checked") || finding.context_text?.includes("URLs extracted from this page")) && (
             <div className="flex flex-wrap items-center gap-2 mb-3">
               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-100 text-[10px] font-bold text-emerald-600 border border-emerald-200 uppercase">
                 {Math.max(
                   0,
                   ...Array.from(
                     finding.context_text.matchAll(
-                      /Total unique URLs checked in run so far: (\d+)/g,
+                      /(?:Total unique URLs checked in run so far:|Total URLs checked in run so far:|URLs extracted from this page:)\s*(\d+)/g,
                     ),
                     (m) => parseInt(m[1], 10),
                   ),
@@ -627,18 +683,7 @@ export const DeadLinksFindingCard: React.FC<FindingCardProps> = ({
                                 {link["Link text"] || link.link_text}
                               </td>
                               <td className="px-3 py-2 break-all text-blue-500 min-w-[150px]">
-                                {link.found_on ? (
-                                  <a
-                                    href={link.found_on}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="hover:underline"
-                                  >
-                                    {link.found_on}
-                                  </a>
-                                ) : (
-                                  "-"
-                                )}
+                                {renderFoundOn(link.found_on)}
                               </td>
                             </tr>
                           ))}
@@ -935,18 +980,7 @@ export const DeadLinksFindingCard: React.FC<FindingCardProps> = ({
                         {link["Link text"] || link.link_text}
                       </td>
                       <td className="px-4 py-3 break-all text-blue-500 min-w-[200px]">
-                        {link.found_on ? (
-                          <a
-                            href={link.found_on}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="hover:underline"
-                          >
-                            {link.found_on}
-                          </a>
-                        ) : (
-                          "-"
-                        )}
+                        {renderFoundOn(link.found_on)}
                       </td>
                     </tr>
                   ))}

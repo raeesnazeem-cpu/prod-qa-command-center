@@ -275,11 +275,7 @@ export const RunDetailPage = () => {
         }
       }
 
-      if (
-        checkKey === "dead_links" ||
-        checkKey === "learn_more_buttons" ||
-        checkKey === "url_tab_compare"
-      ) {
+      if (checkKey === "url_tab_compare") {
         const totalPages = relevantPages.length
         const completedPages = relevantPages.filter((p) => {
           const spCheck = (p as any).check_progress?.[checkKey]
@@ -446,42 +442,67 @@ export const RunDetailPage = () => {
 
     if (deadLinks.length === 0) return nonDeadLinks
 
-    const violations: string[] = []
-    const uniqueLinks = new Set<string>()
-    let totalDeadLinksCount = 0
+    type BrokenLinkData = {
+      url: string
+      reason: string
+      text: string
+      sources: Set<string>
+    }
+    const urlMap = new Map<string, BrokenLinkData>()
 
     deadLinks.forEach((f) => {
-      // Clean up and extract bullet points from descriptions
       const parts = f.description?.split("- **") || []
       parts.forEach((part, index) => {
         if (index === 0) return // Before the first "- **"
-        const cleanPart = part.trim()
-        if (cleanPart) {
-          // Deduplicate by the URL (everything before the closing **)
-          const urlMatch = cleanPart.split("**")[0]
-          if (!uniqueLinks.has(urlMatch)) {
-            uniqueLinks.add(urlMatch)
-            violations.push(`- **${cleanPart}`)
-            totalDeadLinksCount++
+        
+        const lines = part.split("\n").map(l => l.trim()).filter(Boolean)
+        const url = lines[0]?.replace("**", "")?.trim()
+        const reasonLine = lines.find(l => l.startsWith("* Reason:"))
+        const textLine = lines.find(l => l.startsWith("* Link Text:"))
+        const sourceLine = lines.find(l => l.startsWith("* Found on:"))
+
+        if (url) {
+          const reason = reasonLine ? reasonLine.replace("* Reason:", "").trim() : "Failed"
+          const text = textLine ? textLine.replace("* Link Text:", "").trim() : ""
+          const source = sourceLine ? sourceLine.replace("* Found on:", "").trim() : "Unknown"
+
+          if (!urlMap.has(url)) {
+            urlMap.set(url, { url, reason, text, sources: new Set() })
           }
+          urlMap.get(url)!.sources.add(source)
         }
       })
     })
 
-    if (violations.length === 0) {
-      deadLinks.forEach((f) => {
-        if (f.description) {
-          violations.push(f.description)
-          // Fallback to safely counting bullet points instead of URLs (which double-counted)
-          const fallbackCount = (f.description.match(/- /g) || []).length
-          totalDeadLinksCount += fallbackCount > 0 ? fallbackCount : 1
-        }
-      })
-    }
+    const totalDeadLinksCount = urlMap.size
 
-    const mergedDescription =
-      `The following dead or broken links were detected:\n\n` +
-      violations.join("\n\n")
+    let mergedDescription = `The following dead or broken links were detected:\n\n`
+    
+    if (totalDeadLinksCount > 0) {
+      mergedDescription += `| Error | URL | Anchor Text | Linked From |\n`
+      mergedDescription += `|---|---|---|---|\n`
+      
+      for (const data of urlMap.values()) {
+        const error = data.reason
+        const url = data.url
+        const text = data.text ? `\`${data.text}\`` : ""
+        const linkedFrom = Array.from(data.sources).map(src => {
+          try {
+            const parsed = new URL(src)
+            let path = parsed.pathname
+            if (path === '/') path = 'Home'
+            else if (path.startsWith('/')) path = path.substring(1)
+            // Limit path length for clean display
+            if (path.length > 25) path = path.substring(0, 22) + "..."
+            return `[${path || parsed.hostname}](${src})`
+          } catch {
+            return src
+          }
+        }).join(" <br> ")
+        
+        mergedDescription += `| ${error} | ${url} | ${text} | ${linkedFrom} |\n`
+      }
+    }
 
     let severity: "medium" | "high" | "critical" = "medium"
     if (totalDeadLinksCount >= 10) severity = "critical"
@@ -493,7 +514,7 @@ export const RunDetailPage = () => {
       id: combinedId,
       check_factor: "dead_links",
       severity,
-      title: `${totalDeadLinksCount} dead link${totalDeadLinksCount > 1 ? "s" : ""} found`,
+      title: `${totalDeadLinksCount} dead link${totalDeadLinksCount !== 1 ? "s" : ""} found`,
       description: mergedDescription,
       context_text: deadLinks
         .map((f) => f.context_text)
@@ -1614,9 +1635,7 @@ export const RunDetailPage = () => {
                       </summary>
 
                       <div className="space-y-3 mt-3">
-                        {checkKey === "dead_links" ||
-                        checkKey === "learn_more_buttons" ||
-                        checkKey === "url_tab_compare"
+                        {checkKey === "url_tab_compare"
                           ? (() => {
                               const isRunCompleted =
                                 run.status === "completed" ||

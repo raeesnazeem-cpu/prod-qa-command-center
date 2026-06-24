@@ -255,11 +255,11 @@ const logger = pino({
 })
 
 // Global caches — keyed by runId so they survive across multiple jobs in a single run
-const runCheckedLinks = new Map<string, Set<string>>()
-const runBrokenLinks = new Map<
-  string,
-  { url: string; reason: string; text: string; statusCode?: number }[]
->()
+const runLinkPromises = new Map<string, Map<string, Promise<LinkCheckResult>>>()
+const runCacheMetadata = new Map<string, { createdAt: number }>()
+const runTotalExtractedLinks = new Map<string, number>()
+
+type LinkCheckResult = { status: number; reason: string } | null
 
 const BROWSER_HEADERS = {
   "User-Agent":
@@ -354,12 +354,19 @@ export async function checkOptimizedLinks(
   onProgress?: (progress: number, message: string) => Promise<void>,
 ): Promise<Finding[]> {
   const pageUrl = pageRecord.url
-  // Clear stale in-memory caches when this is a retry so links are re-checked fresh
   const runId = pageRecord.run_id
+
+  // Clear stale in-memory caches when this is a retry, but avoid race conditions
   if (runId && pageRecord.isRetry) {
-    runCheckedLinks.delete(runId)
-    runBrokenLinks.delete(runId)
+    const meta = runCacheMetadata.get(runId)
+    // Only clear if the cache is older than 5 minutes (meaning it's from the original run, not a concurrent retry job)
+    if (meta && Date.now() - meta.createdAt > 5 * 60 * 1000) {
+      runLinkPromises.delete(runId)
+      runCacheMetadata.delete(runId)
+      runTotalExtractedLinks.delete(runId)
+    }
   }
+
   let extractedLinks: ExtractedLink[] = []
   try {
     try {
@@ -390,72 +397,93 @@ export async function checkOptimizedLinks(
         40,
         `Checking status of ${extractedLinks.length} extracted links...`,
       )
+      
     const brokenLinks: {
       url: string
       status: number
       sourceUrl: string
       text: string
     }[] = []
+    
     const checkLimit = pLimit(50)
-    const runId = pageRecord.run_id
 
-    if (!runCheckedLinks.has(runId)) runCheckedLinks.set(runId, new Set())
-    if (!runBrokenLinks.has(runId)) runBrokenLinks.set(runId, [])
-
-    const checkedLinks = runCheckedLinks.get(runId)!
-    const knownBrokenLinks = runBrokenLinks.get(runId)!
+    if (!runLinkPromises.has(runId)) {
+      runLinkPromises.set(runId, new Map())
+      runCacheMetadata.set(runId, { createdAt: Date.now() })
+      runTotalExtractedLinks.set(runId, 0)
+    }
+    
+    const currentTotal = runTotalExtractedLinks.get(runId) || 0
+    runTotalExtractedLinks.set(runId, currentTotal + extractedLinks.length)
+    
+    const linkPromises = runLinkPromises.get(runId)!
 
     const checkPromises = extractedLinks.map(
       ({ url: urlToCheck, text: linkText }) =>
         checkLimit(async () => {
-          // --- CACHE CHECK: skip if we already checked this URL in this run ---
-          if (checkedLinks.has(urlToCheck)) {
-            // We do not add it to brokenLinks again to prevent massive UI duplication
-            return
+          let checkPromise = linkPromises.get(urlToCheck)
+          
+          if (!checkPromise) {
+            checkPromise = (async (): Promise<LinkCheckResult> => {
+              try {
+                const response = await got.head(urlToCheck, {
+                  headers: BROWSER_HEADERS,
+                  timeout: { request: 10000 },
+                  retry: { limit: 1 },
+                  followRedirect: true,
+                })
+
+                if (response.statusCode >= 400) {
+                  return { status: response.statusCode, reason: `Status ${response.statusCode}` }
+                }
+                return null // Healthy
+              } catch (error: any) {
+                const statusCode = error.response?.statusCode || 0
+                
+                // Fallback to GET for servers that reject HEAD requests
+                if (statusCode === 405 || statusCode === 403 || statusCode === 0) {
+                  try {
+                    const getResponse = await got.get(urlToCheck, {
+                      headers: BROWSER_HEADERS,
+                      timeout: { request: 15000 },
+                      retry: { limit: 1 },
+                      followRedirect: true,
+                    })
+                    if (getResponse.statusCode >= 400) {
+                      return { status: getResponse.statusCode, reason: `Status ${getResponse.statusCode}` }
+                    }
+                    return null // Healthy on fallback
+                  } catch (getFallbackError: any) {
+                    const fallbackStatus = getFallbackError.response?.statusCode || 0
+                    return { 
+                      status: fallbackStatus, 
+                      reason: fallbackStatus === 0 ? "Connection Failed" : `Status ${fallbackStatus}` 
+                    }
+                  }
+                }
+
+                if (statusCode >= 400 || statusCode === 0) {
+                  return { 
+                    status: statusCode, 
+                    reason: statusCode === 0 ? "Connection Failed" : `Status ${statusCode}` 
+                  }
+                }
+                return null
+              }
+            })()
+            
+            linkPromises.set(urlToCheck, checkPromise)
           }
-          checkedLinks.add(urlToCheck)
 
-          try {
-            const response = await got.head(urlToCheck, {
-              headers: BROWSER_HEADERS,
-              timeout: { request: 10000 },
-              retry: { limit: 1 },
-              followRedirect: true,
+          const result = await checkPromise
+          
+          if (result) {
+            brokenLinks.push({
+              url: urlToCheck,
+              status: result.status,
+              sourceUrl: pageUrl,
+              text: linkText,
             })
-
-            if (response.statusCode >= 400) {
-              brokenLinks.push({
-                url: urlToCheck,
-                status: response.statusCode,
-                sourceUrl: pageUrl,
-                text: linkText,
-              })
-              knownBrokenLinks.push({
-                url: urlToCheck,
-                reason: `Status ${response.statusCode}`,
-                text: linkText,
-                statusCode: response.statusCode,
-              })
-            }
-          } catch (error: any) {
-            const statusCode = error.response?.statusCode || 0
-            if (statusCode >= 400 || statusCode === 0) {
-              brokenLinks.push({
-                url: urlToCheck,
-                status: statusCode,
-                sourceUrl: pageUrl,
-                text: linkText,
-              })
-              knownBrokenLinks.push({
-                url: urlToCheck,
-                reason:
-                  statusCode === 0
-                    ? "Connection Failed"
-                    : `Status ${statusCode}`,
-                text: linkText,
-                statusCode,
-              })
-            }
           }
         }),
     )
@@ -477,7 +505,7 @@ export async function checkOptimizedLinks(
         status: "open",
         ai_generated: false,
         screenshot_url: null,
-        context_text: `URLs scanned on this page: ${extractedLinks.length} | Total unique URLs checked in run so far: ${runCheckedLinks.get(runId)!.size}`,
+        context_text: `URLs extracted from this page: ${extractedLinks.length} | Total URLs checked in run so far: ${runTotalExtractedLinks.get(runId)}`,
       },
     ]
   } catch (error: any) {
