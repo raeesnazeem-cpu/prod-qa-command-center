@@ -87,7 +87,7 @@ export async function checkProjectPlan(
     const orderDetailsMsg = messages.find((msg: any) =>
       (msg.subject || msg.title || "")
         .toLowerCase()
-        .includes("project order details"),
+        .includes("order details"),
     )
 
     let contentHtml = ""
