@@ -31,8 +31,8 @@ export async function processCaptureScreenshotJob(job: Job) {
 
   try {
     // Use provided viewport dimensions or fallback to width/height
-    const vWidth = Math.max(Math.floor(Number(viewportWidth)) || Math.floor(Number(width)) || 1280, 100);
-    const vHeight = Math.max(Math.floor(Number(viewportHeight)) || Math.floor(Number(height)) || 720, 100);
+    const vWidth = Math.max(Math.floor(Number(viewportWidth)) || Math.floor(Number(width)) || 1920, 100);
+    const vHeight = Math.max(Math.floor(Number(viewportHeight)) || Math.floor(Number(height)) || 1080, 100);
     
     const finalScrollX = Math.max(0, Math.floor(Number(scrollX)) || 0);
     const finalScrollY = Math.max(0, Math.floor(Number(scrollY)) || 0);

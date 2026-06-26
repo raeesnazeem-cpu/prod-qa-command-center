@@ -361,7 +361,7 @@ export async function checkFooterLogo(
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
     const viewports = [
-      { name: "desktop", width: 1440, height: 900 },
+      { name: "desktop", width: 1920, height: 1080 },
       { name: "tablet", width: 768, height: 1024 },
       { name: "mobile", width: 375, height: 812 },
     ]
@@ -467,7 +467,7 @@ export async function checkSingleScript(
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
     const viewports = [
-      { name: "desktop", width: 1440, height: 900 },
+      { name: "desktop", width: 1920, height: 1080 },
       { name: "tablet", width: 768, height: 1024 },
       { name: "mobile", width: 375, height: 812 },
     ]
@@ -605,7 +605,7 @@ export async function checkTopBarAndStickyHeader(
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
     const context = await browser.newContext({
-      viewport: { width: 1440, height: 900 },
+      viewport: { width: 1920, height: 1080 },
     })
     const newPage = await context.newPage()
     if (onProgress)
@@ -634,6 +634,11 @@ export async function checkTopBarAndStickyHeader(
     if (onProgress) await onProgress(70, "Extracting header code snippet...")
 
     const codeSnippet = await newPage.evaluate(() => {
+      const stickyEl = document.querySelector(
+        '.elementor-sticky, [data-settings*="sticky"], .is-sticky, [class*="sticky"]'
+      )
+      if (stickyEl) return stickyEl.outerHTML
+
       const el = document.querySelector(
         "header, .site-header, #masthead, [data-elementor-type='header']",
       )
@@ -712,7 +717,7 @@ export async function checkFavicon(
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
     const viewports = [
-      { name: "desktop", width: 1440, height: 900 },
+      { name: "desktop", width: 1920, height: 1080 },
       { name: "tablet", width: 768, height: 1024 },
       { name: "mobile", width: 375, height: 812 },
     ]
@@ -1022,7 +1027,7 @@ export async function checkGrowth99ContactForm(
           )
 
         const viewports = [
-          { name: "desktop", width: 1440, height: 900 },
+          { name: "desktop", width: 1920, height: 1080 },
           { name: "tablet", width: 768, height: 1024 },
           { name: "mobile", width: 375, height: 812 },
         ]
@@ -1706,7 +1711,7 @@ export async function checkPluginUpdates(
     if (onProgress)
       await onProgress(10, "Navigating to WordPress admin login...")
 
-    await newPage.setViewportSize({ width: 1440, height: 900 })
+    await newPage.setViewportSize({ width: 1920, height: 1080 })
 
     const loginUrl = url.endsWith("/")
       ? `${url}wp-login.php`
@@ -1813,7 +1818,7 @@ export async function checkSocialShareHeading(
   try {
     browser = sharedBrowser || (await chromium.launch({ headless: true }))
     const context = await browser.newContext({
-      viewport: { width: 1440, height: 900 },
+      viewport: { width: 1920, height: 1080 },
     })
     const page = await context.newPage()
 
@@ -1966,7 +1971,7 @@ export async function checkLogoOnChatbot(
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
     const context = await browser.newContext({
-      viewport: { width: 1440, height: 900 },
+      viewport: { width: 1920, height: 1080 },
       userAgent:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     })

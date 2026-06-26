@@ -164,21 +164,31 @@ export const RunDetailPage = () => {
   }, [])
 
   useEffect(() => {
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        setIsTabsSticky(!entry.isIntersecting)
-      },
-      { 
-        root: document.getElementById("main-scroll-container"),
-        threshold: 0 
-      },
-    )
+    const mainContainer = document.getElementById("main-scroll-container")
+    if (!mainContainer) return
 
-    if (tabsMarkerRef.current) {
-      observer.observe(tabsMarkerRef.current)
+    const handleScroll = () => {
+      if (tabsMarkerRef.current) {
+        const markerRect = tabsMarkerRef.current.getBoundingClientRect()
+        // Header height is 64px, so if marker goes above 64px, it's scrolled out
+        if (markerRect.top <= 64) {
+          setIsTabsSticky(true)
+        } else {
+          setIsTabsSticky(false)
+        }
+      }
     }
 
-    return () => observer.disconnect()
+    // Initial check
+    handleScroll()
+
+    mainContainer.addEventListener("scroll", handleScroll, { passive: true })
+    window.addEventListener("resize", handleScroll, { passive: true })
+    
+    return () => {
+      mainContainer.removeEventListener("scroll", handleScroll)
+      window.removeEventListener("resize", handleScroll)
+    }
   }, [])
 
   useEffect(() => {

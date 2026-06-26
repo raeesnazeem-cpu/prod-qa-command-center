@@ -12,7 +12,7 @@ export async function checkResponsiveVisual(
   mobileScreenshotBuffer: Buffer,
   pageUrl: string
 ): Promise<Finding[]> {
-  const prompt = `These are screenshots of the same webpage at desktop (1440px) and mobile (375px). Identify ONLY obvious responsive layout issues: text too small to read, content cut off, buttons overlapping, images overflowing their container, horizontal scrollbar visible. Return JSON: [{issue: string, viewport: 'mobile'|'desktop', severity: 'high'|'medium'|'low'}]. Return [] if no issues.`;
+  const prompt = `These are screenshots of the same webpage at desktop (1920px) and mobile (375px). Identify ONLY obvious responsive layout issues: text too small to read, content cut off, buttons overlapping, images overflowing their container, horizontal scrollbar visible. Return JSON: [{issue: string, viewport: 'mobile'|'desktop', severity: 'high'|'medium'|'low'}]. Return [] if no issues.`;
 
   try {
     const responseText = await analyzeImage([desktopScreenshotBuffer, mobileScreenshotBuffer], prompt);

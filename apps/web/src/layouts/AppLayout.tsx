@@ -385,7 +385,7 @@ export const AppLayout = () => {
             )}
           </div>
 
-          <div id="header-portal" className="flex-1 flex justify-center mx-4 empty:hidden" />
+          <div id="header-portal" className="flex-1 flex justify-center mx-4 " />
 
           <div className="flex items-center space-x-6">
             <ActiveUsersDropdown />
