@@ -466,7 +466,7 @@ export async function checkSingleScript(
 
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
-    
+
     if (onProgress)
       await onProgress(10, "Initializing single script check session...")
 
@@ -477,62 +477,81 @@ export async function checkSingleScript(
     })
 
     const newPage = await context.newPage()
-    
-    let activeJsRequests = 0;
-    newPage.on('request', (request: any) => {
-      if (request.resourceType() === 'script' || request.url().endsWith('.js')) {
-        activeJsRequests++;
-      }
-    });
-    newPage.on('requestfinished', (request: any) => {
-      if (request.resourceType() === 'script' || request.url().endsWith('.js')) {
-        activeJsRequests = Math.max(0, activeJsRequests - 1);
-      }
-    });
-    newPage.on('requestfailed', (request: any) => {
-      if (request.resourceType() === 'script' || request.url().endsWith('.js')) {
-        activeJsRequests = Math.max(0, activeJsRequests - 1);
-      }
-    });
 
-    if (onProgress) await onProgress(30, `Loading page and waiting for external scripts...`)
-    
+    let activeJsRequests = 0
+    newPage.on("request", (request: any) => {
+      if (
+        request.resourceType() === "script" ||
+        request.url().endsWith(".js")
+      ) {
+        activeJsRequests++
+      }
+    })
+    newPage.on("requestfinished", (request: any) => {
+      if (
+        request.resourceType() === "script" ||
+        request.url().endsWith(".js")
+      ) {
+        activeJsRequests = Math.max(0, activeJsRequests - 1)
+      }
+    })
+    newPage.on("requestfailed", (request: any) => {
+      if (
+        request.resourceType() === "script" ||
+        request.url().endsWith(".js")
+      ) {
+        activeJsRequests = Math.max(0, activeJsRequests - 1)
+      }
+    })
+
+    if (onProgress)
+      await onProgress(30, `Loading page and waiting for external scripts...`)
+
     await newPage
       .goto(url, { waitUntil: "networkidle", timeout: 30000 })
       .catch(() => {})
-    
+
     await newPage.evaluate(() => window.scrollBy(0, 500)).catch(() => {})
     await newPage
       .waitForSelector("#feature-buttons", { timeout: 15000 })
       .catch(() => {})
-      
+
     // Wait for JS network requests to settle (max 15s)
-    let waited = 0;
+    let waited = 0
     while (activeJsRequests > 0 && waited < 15000) {
-      await newPage.waitForTimeout(500);
-      waited += 500;
+      await newPage.waitForTimeout(500)
+      waited += 500
     }
-    
-    // Give external scripts 2 more seconds to parse and modify the DOM
-    await newPage.waitForTimeout(2000);
+
+    // Give external scripts 20 more seconds to parse, inject sub-scripts, and modify the DOM
+    await newPage.waitForTimeout(20000)
 
     // Desktop screenshot
     const desktopBuffer = await newPage.screenshot({ fullPage: false })
-    desktopUrl = await uploadScreenshot(desktopBuffer, `${runId}/${pageId}/single_script_desktop.png`)
+    desktopUrl = await uploadScreenshot(
+      desktopBuffer,
+      `${runId}/${pageId}/single_script_desktop.png`,
+    )
 
     // Tablet screenshot
     if (onProgress) await onProgress(50, `Capturing tablet view...`)
-    await newPage.setViewportSize({ width: 768, height: 1024 });
-    await newPage.waitForTimeout(1000); // allow layout to shift
+    await newPage.setViewportSize({ width: 768, height: 1024 })
+    await newPage.waitForTimeout(1000) // allow layout to shift
     const tabletBuffer = await newPage.screenshot({ fullPage: false })
-    tabletUrl = await uploadScreenshot(tabletBuffer, `${runId}/${pageId}/single_script_tablet.png`)
+    tabletUrl = await uploadScreenshot(
+      tabletBuffer,
+      `${runId}/${pageId}/single_script_tablet.png`,
+    )
 
     // Mobile screenshot
     if (onProgress) await onProgress(60, `Capturing mobile view...`)
-    await newPage.setViewportSize({ width: 375, height: 812 });
-    await newPage.waitForTimeout(1000); // allow layout to shift
+    await newPage.setViewportSize({ width: 375, height: 812 })
+    await newPage.waitForTimeout(1000) // allow layout to shift
     const mobileBuffer = await newPage.screenshot({ fullPage: false })
-    mobileUrl = await uploadScreenshot(mobileBuffer, `${runId}/${pageId}/single_script_mobile.png`)
+    mobileUrl = await uploadScreenshot(
+      mobileBuffer,
+      `${runId}/${pageId}/single_script_mobile.png`,
+    )
 
     // 4th screenshot: Page source of #feature-buttons code (reusing the same page)
     if (onProgress)
@@ -554,7 +573,7 @@ export async function checkSingleScript(
       codeBuffer,
       `${runId}/${pageId}/single_script_code.png`,
     )
-    await renderPage.close().catch(() => {});
+    await renderPage.close().catch(() => {})
 
     await context.close()
     if (!sharedBrowser) await browser.close()
@@ -646,7 +665,7 @@ export async function checkTopBarAndStickyHeader(
 
     const codeSnippet = await newPage.evaluate(() => {
       const stickyEl = document.querySelector(
-        '.elementor-sticky, [data-settings*="sticky"], .is-sticky, [class*="sticky"]'
+        '.elementor-sticky, [data-settings*="sticky"], .is-sticky, [class*="sticky"]',
       )
       if (stickyEl) return stickyEl.outerHTML
 
