@@ -1,5 +1,11 @@
 import { createPortal } from "react-dom"
-import { useParams, Link, useLocation, useNavigate, useSearchParams } from "react-router-dom"
+import {
+  useParams,
+  Link,
+  useLocation,
+  useNavigate,
+  useSearchParams,
+} from "react-router-dom"
 import { useProject } from "../hooks/useProjects"
 import { QAFinding, QAPage } from "../api/runs.api"
 import { useAuthAxios } from "../lib/useAuthAxios"
@@ -126,7 +132,7 @@ export const RunDetailPage = () => {
   }, [activeTab, runId])
 
   const [searchParams, setSearchParams] = useSearchParams()
-  
+
   useEffect(() => {
     const t = searchParams.get("t")
     if (t && t !== activeTab) {
@@ -184,7 +190,7 @@ export const RunDetailPage = () => {
 
     mainContainer.addEventListener("scroll", handleScroll, { passive: true })
     window.addEventListener("resize", handleScroll, { passive: true })
-    
+
     return () => {
       mainContainer.removeEventListener("scroll", handleScroll)
       window.removeEventListener("resize", handleScroll)
@@ -1419,7 +1425,7 @@ export const RunDetailPage = () => {
                   navigate(
                     activeTab === "report" || activeTab === "tasks"
                       ? `/projects/${projectId}?tab=runs`
-                      : `/projects/${projectId}`
+                      : `/projects/${projectId}`,
                   )
                 }
               }}
@@ -2791,14 +2797,7 @@ export const RunDetailPage = () => {
                   const isAssigned = !!findingToTaskMap[f.id]
                   const isConfirmed =
                     f.status === "confirmed" || hasTask || isAssigned
-                  console.log("Finding eval:", {
-                    id: f.id,
-                    factor: f.check_factor,
-                    status: f.status,
-                    hasTask,
-                    isAssigned,
-                    isConfirmed,
-                  })
+
                   return isConfirmed
                 }).length
                 const falsePositives = runGeneralFindings.filter(

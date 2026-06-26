@@ -516,10 +516,10 @@ export const FindingReviewPanel: React.FC<FindingReviewPanelProps> = ({
             className={`fixed top-[30vh] max-md:right-6 max-md:bottom-24 max-md:top-auto max-md:left-auto group z-[50] transition-all duration-300 ${showIcon ? "opacity-100 pointer-events-auto scale-100" : "opacity-0 pointer-events-none scale-90"}`}
             style={{ left: iconLeft !== null ? `${iconLeft}px` : undefined }}
           >
-            <div className="relative p-2.5 bg-slate-900/90 dark:bg-[#1D2A31] rounded-full border border-emerald-600 dark:border-emerald-600 shadow-2xl cursor-pointer hover:bg-slate-800 dark:hover:bg-[#131D22] dark:hover:text-white transition-all hover:scale-110 active:scale-95 flex items-center justify-center">
+            <div className="relative p-2.5 bg-slate-800 dark:bg-slate-800 rounded-full border-2 border-accent hover:border-accent active:border-accent shadow-2xl cursor-pointer hover:bg-slate-700 dark:hover:bg-slate-700 text-white transition-all flex items-center justify-center">
               <ListChecks size={18} className="text-accent" />
               <select
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer outline-none focus:outline-none focus:ring-0 border-none hover:border-none active:border-none"
                 title="Jump to Check"
                 onChange={(e) => {
                   if (!e.target.value) return

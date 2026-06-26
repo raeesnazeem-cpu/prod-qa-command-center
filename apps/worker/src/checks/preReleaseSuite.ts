@@ -466,76 +466,86 @@ export async function checkSingleScript(
 
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
-    const viewports = [
-      { name: "desktop", width: 1920, height: 1080 },
-      { name: "tablet", width: 768, height: 1024 },
-      { name: "mobile", width: 375, height: 812 },
-    ]
+    
     if (onProgress)
-      await onProgress(10, "Initializing viewports for single script check...")
+      await onProgress(10, "Initializing single script check session...")
 
-    for (const vp of viewports) {
-      if (onProgress)
-        await onProgress(30, `Checking single script on ${vp.name}...`)
-
-      const context = await browser.newContext({
-        viewport: { width: vp.width, height: vp.height },
-        userAgent:
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      })
-
-      const newPage = await context.newPage()
-      await newPage
-        // networkidle waits until there are no network connections for at least 500 ms (ensures JS fully loads)
-        .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-        .catch(() => {})
-      await newPage.evaluate(() => window.scrollBy(0, 500)).catch(() => {})
-
-      await newPage
-        .waitForSelector("#feature-buttons", { timeout: 15000 })
-        .catch(() => {})
-      await newPage.waitForTimeout(5000)
-
-      // Capture visible viewport only
-      const buffer = await newPage.screenshot({ fullPage: false })
-      const storagePath = `${runId}/${pageId}/single_script_${vp.name}.png`
-      const publicUrl = await uploadScreenshot(buffer, storagePath)
-
-      if (vp.name === "desktop") desktopUrl = publicUrl
-      if (vp.name === "tablet") tabletUrl = publicUrl
-      if (vp.name === "mobile") mobileUrl = publicUrl
-
-      await context.close()
-    }
-
-    // 4th screenshot: Page source of #feature-buttons code
-    if (onProgress)
-      await onProgress(70, "Fetching page source for script verification...")
-
-    const codeContext = await browser.newContext({
+    const context = await browser.newContext({
+      viewport: { width: 1920, height: 1080 },
       userAgent:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     })
 
-    const codePage = await codeContext.newPage()
-    await codePage
+    const newPage = await context.newPage()
+    
+    let activeJsRequests = 0;
+    newPage.on('request', (request: any) => {
+      if (request.resourceType() === 'script' || request.url().endsWith('.js')) {
+        activeJsRequests++;
+      }
+    });
+    newPage.on('requestfinished', (request: any) => {
+      if (request.resourceType() === 'script' || request.url().endsWith('.js')) {
+        activeJsRequests = Math.max(0, activeJsRequests - 1);
+      }
+    });
+    newPage.on('requestfailed', (request: any) => {
+      if (request.resourceType() === 'script' || request.url().endsWith('.js')) {
+        activeJsRequests = Math.max(0, activeJsRequests - 1);
+      }
+    });
+
+    if (onProgress) await onProgress(30, `Loading page and waiting for external scripts...`)
+    
+    await newPage
       .goto(url, { waitUntil: "networkidle", timeout: 30000 })
       .catch(() => {})
-    await codePage.evaluate(() => window.scrollBy(0, 500)).catch(() => {})
-
-    await codePage
+    
+    await newPage.evaluate(() => window.scrollBy(0, 500)).catch(() => {})
+    await newPage
       .waitForSelector("#feature-buttons", { timeout: 15000 })
       .catch(() => {})
-    await codePage.waitForTimeout(5000)
+      
+    // Wait for JS network requests to settle (max 15s)
+    let waited = 0;
+    while (activeJsRequests > 0 && waited < 15000) {
+      await newPage.waitForTimeout(500);
+      waited += 500;
+    }
+    
+    // Give external scripts 2 more seconds to parse and modify the DOM
+    await newPage.waitForTimeout(2000);
 
-    const codeSnippet = await codePage.evaluate(() => {
+    // Desktop screenshot
+    const desktopBuffer = await newPage.screenshot({ fullPage: false })
+    desktopUrl = await uploadScreenshot(desktopBuffer, `${runId}/${pageId}/single_script_desktop.png`)
+
+    // Tablet screenshot
+    if (onProgress) await onProgress(50, `Capturing tablet view...`)
+    await newPage.setViewportSize({ width: 768, height: 1024 });
+    await newPage.waitForTimeout(1000); // allow layout to shift
+    const tabletBuffer = await newPage.screenshot({ fullPage: false })
+    tabletUrl = await uploadScreenshot(tabletBuffer, `${runId}/${pageId}/single_script_tablet.png`)
+
+    // Mobile screenshot
+    if (onProgress) await onProgress(60, `Capturing mobile view...`)
+    await newPage.setViewportSize({ width: 375, height: 812 });
+    await newPage.waitForTimeout(1000); // allow layout to shift
+    const mobileBuffer = await newPage.screenshot({ fullPage: false })
+    mobileUrl = await uploadScreenshot(mobileBuffer, `${runId}/${pageId}/single_script_mobile.png`)
+
+    // 4th screenshot: Page source of #feature-buttons code (reusing the same page)
+    if (onProgress)
+      await onProgress(70, "Fetching page source for script verification...")
+
+    const codeSnippet = await newPage.evaluate(() => {
       const el = document.querySelector("#feature-buttons")
       return el
         ? el.outerHTML
         : "Element #feature-buttons not found in page source"
     })
 
-    const renderPage = await codeContext.newPage()
+    const renderPage = await context.newPage()
     await renderPage.setContent(
       `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
     )
@@ -544,8 +554,9 @@ export async function checkSingleScript(
       codeBuffer,
       `${runId}/${pageId}/single_script_code.png`,
     )
+    await renderPage.close().catch(() => {});
 
-    await codeContext.close()
+    await context.close()
     if (!sharedBrowser) await browser.close()
     if (onProgress) await onProgress(90, "Finalizing findings...")
   } catch (e: any) {

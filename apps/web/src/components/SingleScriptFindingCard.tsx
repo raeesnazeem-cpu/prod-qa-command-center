@@ -135,14 +135,14 @@ export const SingleScriptFindingCard: React.FC<FindingCardProps> = ({
 
       const isVerified =
         originalHtml &&
-        (originalHtml.includes('id="features-button"') ||
-          originalHtml.includes("#features-button"))
+        (originalHtml.includes('id="feature-buttons"') ||
+          originalHtml.includes("#feature-buttons"))
 
       const resultData = {
         status: isVerified ? "verified" : "error",
         message: isVerified
           ? "Verified single script addition"
-          : "Please check manually. Element #features-button not found in page source.",
+          : "Please check manually. Element #feature-buttons not found in page source.",
       }
 
       setAiResultData(resultData)
