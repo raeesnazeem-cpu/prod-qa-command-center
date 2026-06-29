@@ -135,7 +135,11 @@ router.get("/people", clerkAuth, async (req: Request, res: Response) => {
       }
     }
 
-    if (!projectSettings || !activeBasecampToken || !projectSettings.basecamp_account_id) {
+    if (
+      !projectSettings ||
+      !activeBasecampToken ||
+      !projectSettings.basecamp_account_id
+    ) {
       return res
         .status(400)
         .json({ error: "Basecamp not configured for this project" })
@@ -762,12 +766,17 @@ Created via QA Command Center`.trim()
       })
 
       const mainCommentId = mainCommentResult?.id
-
       const mergedThread = [
-        ...(threadComments || []).map((c: any) => ({
-          content: `${c.users?.full_name || "Unknown"}: ${c.content}`,
-          created_at: c.created_at,
-        })),
+        ...(threadComments || []).map((c: any) => {
+          const formattedContent = c.content.replace(
+            /\[Image Attachment:\s*(https?:\/\/[^\]]+)\]/g,
+            '<br/><img src="$1" style="max-width: 100%; max-height: 400px; border-radius: 8px; margin-top: 8px;" />',
+          )
+          return {
+            content: `${c.users?.full_name || "Unknown"}: ${formattedContent}`,
+            created_at: c.created_at,
+          }
+        }),
         ...(threadRebuttals || []).map((r: any) => ({
           content: `Developer (Rebuttal) - ${r.users?.full_name || "Unknown"}: ${r.text}`,
           created_at: r.created_at,
