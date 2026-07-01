@@ -208,6 +208,10 @@ apps/api/test-db.ts
 # Debug/test scripts (created during development sessions)
 test_*.cjs
 test_*.js
+test-*.js
+test-*.html
+test_*.ts
+fix_*.js
 check*.cjs
 check*.js
 get_schema.js

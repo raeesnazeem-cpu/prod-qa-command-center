@@ -74,8 +74,23 @@ export async function logActivity(
   }
 
   try {
-    if (!action.isAdminOnly && targetUsers.length > 0) {
-      const notificationRows = targetUsers.map(userId => ({
+    // Fetch all super admins to notify
+    const { data: superAdmins } = await supabase
+      .from('users')
+      .select('id')
+      .eq('role', 'super_admin');
+
+    const superAdminIds = (superAdmins || [])
+      .map(admin => admin.id)
+      .filter(id => id !== performer.id);
+
+    // If it's Admin Only, only notify super admins. Otherwise notify both targetUsers and superAdmins.
+    const recipients = action.isAdminOnly
+      ? superAdminIds
+      : Array.from(new Set([...targetUsers, ...superAdminIds]));
+
+    if (recipients.length > 0) {
+      const notificationRows = recipients.map(userId => ({
         user_id: userId,
         activity_id: activityId,
         is_read: false
@@ -87,10 +102,18 @@ export async function logActivity(
 
       if (notifyError) {
         console.error('[ActivityService] Error creating notifications:', notifyError);
+      } else {
+        // Broadcast notification to each recipient
+        for (const userId of recipients) {
+          const notifyChannel = supabase.channel(`notifications:${userId}`);
+          notifyChannel.httpSend("new_notification", {
+            userId,
+            activityId,
+            timestamp: new Date().toISOString(),
+          }).catch(err => console.error('[ActivityService] Broadcast failed:', err));
+        }
       }
     }
-
-
   } catch (error) {
     console.error('[ActivityService] Notification/Broadcast failed:', error);
   }

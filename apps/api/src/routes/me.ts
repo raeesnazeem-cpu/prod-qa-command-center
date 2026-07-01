@@ -47,16 +47,13 @@ router.get('/notifications', clerkAuth, async (req: Request, res: Response) => {
 
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    let query = supabase
+    const query = supabase
       .from('notifications')
       .select(`
         *,
         activity:activity_logs (*)
-      `);
-
-    if (user.role !== 'admin' && user.role !== 'super_admin') {
-      query = query.eq('user_id', user.id);
-    }
+      `)
+      .eq('user_id', user.id);
 
     const { data, error } = await query
       .order('created_at', { ascending: false })
@@ -97,19 +94,12 @@ router.patch('/notifications/:id/read', clerkAuth, async (req: Request, res: Res
  */
 router.patch('/notifications/read-all', clerkAuth, async (req: Request, res: Response) => {
   try {
-    const { userId: clerkUserId } = req.auth!;
-    const { data: user } = await supabase
-      .from('users')
-      .select('id')
-      .eq('clerk_user_id', clerkUserId)
-      .single();
-
-    if (!user) return res.status(404).json({ error: 'User not found' });
+    const { userId } = req.auth!;
 
     const { error } = await supabase
       .from('notifications')
       .update({ is_read: true })
-      .eq('user_id', user.id)
+      .eq('user_id', userId)
       .eq('is_read', false);
 
     if (error) throw error;

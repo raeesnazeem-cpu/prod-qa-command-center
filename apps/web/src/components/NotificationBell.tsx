@@ -98,8 +98,8 @@ export const NotificationBell: React.FC = () => {
       >
         <Bell className="w-5 h-5" />
         {unreadCount > 0 && (
-          <span className="absolute top-1.5 right-1.5 w-4 h-4 bg-rose-500 text-slate-200 text-[10px] font-bold flex items-center justify-center rounded-full border-2 border-white dark:border-[#0B151B] shadow-sm animate-in zoom-in duration-300">
-            {unreadCount > 9 ? "9+" : unreadCount}
+          <span className="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 bg-rose-500 text-slate-200 text-[9px] font-bold flex items-center justify-center rounded-full border-2 border-white dark:border-[#0B151B] shadow-sm animate-in zoom-in duration-300">
+            {unreadCount > 99 ? "+" : unreadCount}
           </span>
         )}
       </button>

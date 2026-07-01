@@ -21,6 +21,8 @@ export const SettingsPage = () => {
   >(null)
   const [countdown, setCountdown] = useState<string>("")
   const [isSavingGoogle, setIsSavingGoogle] = useState(false)
+  const [dingEnabled, setDingEnabled] = useState(true)
+  const [isUpdatingDing, setIsUpdatingDing] = useState(false)
 
   useEffect(() => {
     const fetchProfile = async () => {
@@ -57,6 +59,12 @@ export const SettingsPage = () => {
           if (data.basecamp_token_expires_at) {
             setBasecampTokenExpiresAt(data.basecamp_token_expires_at)
           }
+        }
+
+        if (data && data.ding !== undefined) {
+          setDingEnabled(data.ding)
+        } else {
+          setDingEnabled(true)
         }
       } catch (error) {
         console.error("Failed to fetch profile settings:", error)
@@ -173,13 +181,37 @@ export const SettingsPage = () => {
     }
   }
 
+  const handleToggleDing = async (checked: boolean) => {
+    setIsUpdatingDing(true)
+    try {
+      const { data } = await axios.get("/api/users/notification-prefs")
+      const updatedPrefs = {
+        ...data,
+        ding: checked,
+      }
+      delete updatedPrefs.google_chat_user_id
+      delete updatedPrefs.basecamp_person_id
+      delete updatedPrefs.basecamp_token_expires_at
+
+      await axios.patch("/api/users/notification-prefs", {
+        notification_prefs: updatedPrefs,
+      })
+      setDingEnabled(checked)
+      toast.success("Notification sound preferences updated")
+    } catch (error: any) {
+      toast.error("Failed to update notification sound preferences")
+    } finally {
+      setIsUpdatingDing(false)
+    }
+  }
+
   type SettingsItem = {
     label: string
     value: any
     type: string
     placeholder?: string
   }
-  
+
   type SettingsSection = {
     id: string
     title: string
@@ -232,6 +264,11 @@ export const SettingsPage = () => {
           label: "Google Integration",
           value: "",
           type: "google_oauth",
+        },
+        {
+          label: "Notification Ding",
+          value: dingEnabled,
+          type: "ding_toggle",
         },
       ],
     },
@@ -505,6 +542,24 @@ export const SettingsPage = () => {
                         <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-50 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent"></div>
                       </label>
                     )}
+                    {item.type === "ding_toggle" && (
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(item.value)}
+                          onChange={(e) => {
+                            if (!isUpdatingDing) {
+                              handleToggleDing(e.target.checked)
+                            }
+                          }}
+                          disabled={isUpdatingDing}
+                          className="sr-only peer"
+                        />
+                        <div
+                          className={`w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-50 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent ${isUpdatingDing ? "opacity-50 cursor-not-allowed" : ""}`}
+                        ></div>
+                      </label>
+                    )}
                     {item.type === "maintenance_toggle" && (
                       <label className="relative inline-flex items-center cursor-pointer">
                         <input
@@ -518,7 +573,9 @@ export const SettingsPage = () => {
                           disabled={updateMaintenanceMode.isPending}
                           className="sr-only peer"
                         />
-                        <div className={`w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-50 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent ${updateMaintenanceMode.isPending ? 'opacity-50 cursor-not-allowed' : ''}`}></div>
+                        <div
+                          className={`w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-50 after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-accent ${updateMaintenanceMode.isPending ? "opacity-50 cursor-not-allowed" : ""}`}
+                        ></div>
                       </label>
                     )}
                     {item.type === "status" && (
@@ -533,7 +590,8 @@ export const SettingsPage = () => {
                       (role === "admin" || role === "super_admin"
                         ? item.label !== "Google Integration" &&
                           item.label !== "Basecamp Integration" &&
-                          item.label !== "Basecamp Personal Token"
+                          item.label !== "Basecamp Personal Token" &&
+                          item.label !== "Notification Ding"
                         : item.label === "Full Name" ||
                           item.label === "Role") && (
                         <button className="h-6 w-6 p-0 flex items-center justify-center dark:bg-transparent border-none shadow-none`">

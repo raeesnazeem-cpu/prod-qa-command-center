@@ -15,25 +15,15 @@ export const useRealtimeNotifications = () => {
   useEffect(() => {
     if (!profile?.id) return;
 
-    console.log(`[Realtime] Subscribing to notifications for user ${profile.id}`);
-
-    // Subscribe to INSERT events on the notifications table for this specific user
-    const filterOptions = isAdmin 
-      ? {} 
-      : { filter: `user_id=eq.${profile.id}` };
+    console.log(`[Realtime] Subscribing to notifications broadcast for user ${profile.id}`);
 
     const channel = supabase
-      .channel(`user-notifications-${profile.id}`)
+      .channel(`notifications:${profile.id}`)
       .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'notifications',
-          ...filterOptions
-        },
+        'broadcast',
+        { event: 'new_notification' },
         (payload) => {
-          console.log('[Realtime] New notification row detected:', payload);
+          console.log('[Realtime] New notification broadcast detected:', payload);
           
           // 1. Invalidate the notifications list to trigger a refetch
           queryClient.invalidateQueries({
@@ -62,13 +52,13 @@ export const useRealtimeNotifications = () => {
       )
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
-          console.log('[Realtime] Subscribed to notifications channel');
+          console.log('[Realtime] Subscribed to notifications broadcast channel');
         }
       });
 
     return () => {
-      console.log('[Realtime] Unsubscribing from notifications channel');
+      console.log('[Realtime] Unsubscribing from notifications broadcast channel');
       supabase.removeChannel(channel);
     };
-  }, [profile?.id, queryClient, isAdmin, profile?.notification_prefs?.ding]);
+  }, [profile?.id, queryClient, profile?.notification_prefs?.ding]);
 };
