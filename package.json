@@ -5,6 +5,7 @@
     "dev:web": "pnpm --filter web dev",
     "dev:api": "pnpm --filter api dev",
     "dev:worker": "pnpm --filter worker dev",
+    "dev:proxy": "pnpm --filter proxy-worker dev",
     "build:web": "pnpm --filter web build",
     "build:api": "pnpm --filter api build",
     "build:worker": "pnpm --filter worker build",

@@ -336,7 +336,10 @@ export const BrowserOverlay: React.FC<BrowserOverlayProps> = ({
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 bg-slate-100 dark:bg-[#131d22] rounded-lg flex items-center justify-center border border-slate-200 dark:border-slate-700">
-              <ImageIcon size={16} className="text-slate-400 dark:text-slate-500" />
+              <ImageIcon
+                size={16}
+                className="text-slate-400 dark:text-slate-500"
+              />
             </div>
             <div>
               <p className="text-[10px] font-bold text-slate-900 dark:text-white uppercase tracking-widest leading-none">

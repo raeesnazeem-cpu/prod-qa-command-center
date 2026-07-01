@@ -1,0 +1,6 @@
+name = "proxy-browser-worker"
+main = "src/index.ts"
+compatibility_date = "2024-03-20"
+
+# Optional: If you want to use a specific node compatibility mode for any Node.js libraries
+# compatibility_flags = [ "nodejs_compat" ]

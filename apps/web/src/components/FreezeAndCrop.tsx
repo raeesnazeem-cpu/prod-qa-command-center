@@ -13,6 +13,7 @@ import {
 } from "lucide-react"
 import { useAuthAxios } from "../lib/useAuthAxios"
 import toast from "react-hot-toast"
+import html2canvas from "html2canvas"
 
 interface FreezeAndCropProps {
   url: string
@@ -50,15 +51,25 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
   const [isLoadingProxy, setIsLoadingProxy] = useState(false)
 
   // Canvas annotation state
-  const [tool, setTool] = useState<"select" | "rect" | "arrow" | "text">("select")
+  const [tool, setTool] = useState<"select" | "rect" | "arrow" | "text">(
+    "select",
+  )
   const [annotations, setAnnotations] = useState<Annotation[]>([])
-  const [currentAnnotation, setCurrentAnnotation] = useState<Partial<Annotation> | null>(null)
+  const [currentAnnotation, setCurrentAnnotation] =
+    useState<Partial<Annotation> | null>(null)
   const [isDrawing, setIsDrawing] = useState(false)
-  const [selection, setSelection] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
+  const [selection, setSelection] = useState<{
+    x: number
+    y: number
+    w: number
+    h: number
+  } | null>(null)
   const [selectedColor, setSelectedColor] = useState("#ef4444")
   const [activeTextId, setActiveTextId] = useState<string | null>(null)
   const [textInput, setTextInput] = useState("")
-  const [typingPos, setTypingPos] = useState<{ x: number; y: number } | null>(null)
+  const [typingPos, setTypingPos] = useState<{ x: number; y: number } | null>(
+    null,
+  )
 
   // Load proxied content into iframe
   useEffect(() => {
@@ -66,11 +77,21 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
       if (!url) return
       setIsLoadingProxy(true)
       try {
-        const response = await axios.post(
-          "/api/proxy-browser",
-          { url },
-          { responseType: "blob" },
-        )
+        let response
+        const cloudflareProxy = import.meta.env.VITE_CLOUDFLARE_PROXY_URL
+        if (cloudflareProxy) {
+          response = await axios.get(
+            `${cloudflareProxy}/?url=${encodeURIComponent(url)}`,
+            { responseType: "blob" },
+          )
+        } else {
+          response = await axios.post(
+            "/api/proxy-browser",
+            { url },
+            { responseType: "blob" },
+          )
+        }
+
         const blob = new Blob([response.data], { type: "text/html" })
         const dataUrl = URL.createObjectURL(blob)
         setIframeUrl(dataUrl)
@@ -94,12 +115,17 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
   }, [activeTextId])
 
   const finishText = () => {
-    if (!activeTextId) { setTypingPos(null); return }
+    if (!activeTextId) {
+      setTypingPos(null)
+      return
+    }
     const text = textInput.trim()
     if (text === "") {
       setAnnotations((prev) => prev.filter((a) => a.id !== activeTextId))
     } else {
-      setAnnotations((prev) => prev.map((a) => (a.id === activeTextId ? { ...a, text } : a)))
+      setAnnotations((prev) =>
+        prev.map((a) => (a.id === activeTextId ? { ...a, text } : a)),
+      )
     }
     setActiveTextId(null)
     setTypingPos(null)
@@ -112,10 +138,17 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
   useEffect(() => {
     if (!activeTextId) return
     const handler = (e: MouseEvent) => {
-      if (!textareaRef.current?.contains(e.target as Node)) finishTextRef.current()
+      if (!textareaRef.current?.contains(e.target as Node))
+        finishTextRef.current()
     }
-    const t = setTimeout(() => document.addEventListener("mousedown", handler), 0)
-    return () => { clearTimeout(t); document.removeEventListener("mousedown", handler) }
+    const t = setTimeout(
+      () => document.addEventListener("mousedown", handler),
+      0,
+    )
+    return () => {
+      clearTimeout(t)
+      document.removeEventListener("mousedown", handler)
+    }
   }, [activeTextId])
 
   // Canvas draw
@@ -131,8 +164,11 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     ctx.drawImage(snapshotImg, 0, 0)
 
-    annotations.forEach((ann) => { if (ann.id !== activeTextId) drawAnnotation(ctx, ann) })
-    if (currentAnnotation && isDrawing) drawAnnotation(ctx, currentAnnotation as Annotation)
+    annotations.forEach((ann) => {
+      if (ann.id !== activeTextId) drawAnnotation(ctx, ann)
+    })
+    if (currentAnnotation && isDrawing)
+      drawAnnotation(ctx, currentAnnotation as Annotation)
 
     if (selection) {
       ctx.strokeStyle = "#3b82f6"
@@ -162,9 +198,15 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
       ctx.beginPath()
       ctx.moveTo(ann.x, ann.y)
       ctx.lineTo(tox, toy)
-      ctx.lineTo(tox - headlen * Math.cos(angle - Math.PI / 6), toy - headlen * Math.sin(angle - Math.PI / 6))
+      ctx.lineTo(
+        tox - headlen * Math.cos(angle - Math.PI / 6),
+        toy - headlen * Math.sin(angle - Math.PI / 6),
+      )
       ctx.moveTo(tox, toy)
-      ctx.lineTo(tox - headlen * Math.cos(angle + Math.PI / 6), toy - headlen * Math.sin(angle + Math.PI / 6))
+      ctx.lineTo(
+        tox - headlen * Math.cos(angle + Math.PI / 6),
+        toy - headlen * Math.sin(angle + Math.PI / 6),
+      )
       ctx.stroke()
     } else if (ann.type === "text" && ann.text) {
       ctx.font = "bold 24px Outfit, sans-serif"
@@ -173,7 +215,9 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
     }
   }
 
-  useEffect(() => { drawCanvas() }, [snapshotImg, annotations, currentAnnotation, selection, isDrawing])
+  useEffect(() => {
+    drawCanvas()
+  }, [snapshotImg, annotations, currentAnnotation, selection, isDrawing])
 
   const getMousePos = (e: React.MouseEvent) => {
     const canvas = canvasRef.current
@@ -186,11 +230,24 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
   }
 
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (activeTextId) { finishText(); return }
+    if (activeTextId) {
+      finishText()
+      return
+    }
     const pos = getMousePos(e)
     if (tool === "text") {
       const id = Math.random().toString(36).substr(2, 9)
-      setAnnotations((prev) => [...prev, { id, type: "text", x: pos.x, y: pos.y, text: "", color: selectedColor }])
+      setAnnotations((prev) => [
+        ...prev,
+        {
+          id,
+          type: "text",
+          x: pos.x,
+          y: pos.y,
+          text: "",
+          color: selectedColor,
+        },
+      ])
       setActiveTextId(id)
       const rect = canvasRef.current!.getBoundingClientRect()
       setTypingPos({ x: e.clientX - rect.left, y: e.clientY - rect.top })
@@ -201,7 +258,15 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
     if (tool === "select") {
       setSelection({ x: pos.x, y: pos.y, w: 0, h: 0 })
     } else {
-      setCurrentAnnotation({ id: Math.random().toString(36).substr(2, 9), type: tool, x: pos.x, y: pos.y, width: 0, height: 0, color: selectedColor })
+      setCurrentAnnotation({
+        id: Math.random().toString(36).substr(2, 9),
+        type: tool,
+        x: pos.x,
+        y: pos.y,
+        width: 0,
+        height: 0,
+        color: selectedColor,
+      })
     }
   }
 
@@ -209,9 +274,17 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
     if (!isDrawing) return
     const pos = getMousePos(e)
     if (tool === "select" && selection) {
-      setSelection({ ...selection, w: pos.x - selection.x, h: pos.y - selection.y })
+      setSelection({
+        ...selection,
+        w: pos.x - selection.x,
+        h: pos.y - selection.y,
+      })
     } else if (currentAnnotation) {
-      setCurrentAnnotation({ ...currentAnnotation, width: pos.x - currentAnnotation.x!, height: pos.y - currentAnnotation.y! })
+      setCurrentAnnotation({
+        ...currentAnnotation,
+        width: pos.x - currentAnnotation.x!,
+        height: pos.y - currentAnnotation.y!,
+      })
     }
   }
 
@@ -224,46 +297,135 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
   }
 
   // Freeze: call backend, load snapshot into Image
+  // const handleFreeze = async () => {
+  //   if (!url) return
+  //   setIsProcessing(true)
+  //   try {
+  //     const resolutions = {
+  //       desktop: { width: 1920, height: 1080 },
+  //       laptop: { width: 1366, height: 768 },
+  //       tablet: { width: 768, height: 1024 },
+  //       mobile: { width: 375, height: 667 },
+  //     }
+  //     const res = resolutions[viewport]
+  //     const response = await axios.post("/api/proxy-browser/capture", {
+  //       url,
+  //       fullPage: true,
+  //       viewportWidth: res.width,
+  //       viewportHeight: res.height,
+  //     })
+  //     if (response.data?.imageUrl) {
+  //       const img = new Image()
+  //       img.crossOrigin = "anonymous"
+  //       img.src = response.data.imageUrl
+  //       img.onload = () => {
+  //         setSnapshotImg(img)
+  //         setIsFrozen(true)
+  //         setAnnotations([])
+  //         setSelection(null)
+  //         setTool("select")
+  //       }
+  //       img.onerror = () => {
+  //         toast.error("Failed to load captured snapshot image")
+  //       }
+  //     } else {
+  //       toast.error("Freeze failed: no image returned from API")
+  //     }
+  //   } catch (err: any) {
+  //     console.error("Failed to freeze view using API:", err)
+  //     toast.error(
+  //       `Freeze failed: ${err?.response?.data?.error || err.message || "Unknown error"}`,
+  //     )
+  //   } finally {
+  //     setIsProcessing(false)
+  //   }
+  // }
+
+  // Freeze: call backend, load snapshot into Image
   const handleFreeze = async () => {
     if (!url) return
     setIsProcessing(true)
-    try {
-      const resolutions = {
-        desktop: { width: 1920, height: 1080 },
-        laptop:  { width: 1366, height: 768 },
-        tablet:  { width: 768,  height: 1024 },
-        mobile:  { width: 375,  height: 667 },
+
+    const fallbackToPlaywright = async () => {
+      try {
+        const resolutions = {
+          desktop: { width: 1920, height: 1080 },
+          laptop: { width: 1366, height: 768 },
+          tablet: { width: 768, height: 1024 },
+          mobile: { width: 375, height: 667 },
+        }
+        const res = resolutions[viewport]
+        const response = await axios.post("/api/proxy-browser/capture", {
+          url,
+          fullPage: true,
+          viewportWidth: res.width,
+          viewportHeight: res.height,
+        })
+        if (response.data?.imageUrl) {
+          const img = new Image()
+          img.crossOrigin = "anonymous"
+          img.src = response.data.imageUrl
+          img.onload = () => {
+            setSnapshotImg(img)
+            setIsFrozen(true)
+            setAnnotations([])
+            setSelection(null)
+            setTool("select")
+          }
+          img.onerror = () => {
+            toast.error("Failed to load captured snapshot image")
+          }
+        } else {
+          toast.error("Freeze failed: no image returned from API")
+        }
+      } catch (err: any) {
+        console.error("Failed to freeze view using API:", err)
+        toast.error(
+          `Freeze failed: ${err?.response?.data?.error || err.message || "Unknown error"}`,
+        )
+      } finally {
+        setIsProcessing(false)
       }
-      const res = resolutions[viewport]
-      const response = await axios.post("/api/proxy-browser/capture", {
-        url,
-        fullPage: true,
-        viewportWidth: res.width,
-        viewportHeight: res.height,
-      })
-      if (response.data?.imageUrl) {
+    }
+
+    const iframe = iframeRef.current
+    if (iframe?.contentDocument?.body) {
+      try {
+        const canvas = await html2canvas(iframe.contentDocument.body, {
+          useCORS: true,
+          allowTaint: false,
+          proxy: import.meta.env.VITE_CLOUDFLARE_PROXY_URL,
+          scale: 1,
+          width: iframe.contentDocument.body.scrollWidth,
+          height: iframe.contentDocument.body.scrollHeight,
+          windowWidth: iframe.contentDocument.body.scrollWidth,
+          windowHeight: iframe.contentDocument.body.scrollHeight,
+        })
         const img = new Image()
-        img.crossOrigin = "anonymous"
-        img.src = response.data.imageUrl
+        img.src = canvas.toDataURL("image/png")
         img.onload = () => {
           setSnapshotImg(img)
           setIsFrozen(true)
           setAnnotations([])
           setSelection(null)
           setTool("select")
+          setIsProcessing(false)
         }
         img.onerror = () => {
-          toast.error("Failed to load captured snapshot image")
+          toast.error("Client-side capture failed, trying server...")
+          fallbackToPlaywright()
         }
-      } else {
-        toast.error("Freeze failed: no image returned from API")
+        return // Exit early so we don't run Playwright if this succeeded
+      } catch (clientErr) {
+        console.warn(
+          "[FreezeAndCrop] Client-side capture failed, falling back to Playwright:",
+          clientErr,
+        )
       }
-    } catch (err: any) {
-      console.error("Failed to freeze view using API:", err)
-      toast.error(`Freeze failed: ${err?.response?.data?.error || err.message || "Unknown error"}`)
-    } finally {
-      setIsProcessing(false)
     }
+
+    // If html2canvas failed or iframe wasn't ready, automatically fallback to Playwright
+    await fallbackToPlaywright()
   }
 
   // Confirm: crop the selection from canvas (with annotations baked in)
@@ -286,7 +448,17 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
     const tempCtx = tempCanvas.getContext("2d")
     if (!tempCtx) return
 
-    tempCtx.drawImage(canvasRef.current, sourceX, sourceY, sourceW, sourceH, 0, 0, sourceW, sourceH)
+    tempCtx.drawImage(
+      canvasRef.current,
+      sourceX,
+      sourceY,
+      sourceW,
+      sourceH,
+      0,
+      0,
+      sourceW,
+      sourceH,
+    )
     const base64 = tempCanvas.toDataURL("image/png")
     onCapture(base64)
 
@@ -306,7 +478,9 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
       {/* Controls Header */}
       <div className="h-12 bg-slate-50 dark:bg-[#1d2a31] border-b border-slate-200 dark:border-slate-700 flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${isFrozen ? "bg-amber-500" : "bg-emerald-500 animate-pulse"}`} />
+          <div
+            className={`w-2 h-2 rounded-full ${isFrozen ? "bg-amber-500" : "bg-emerald-500 animate-pulse"}`}
+          />
           <span className="text-[10px] font-bold text-slate-900 dark:text-white uppercase tracking-widest">
             {isFrozen ? "Frozen — Annotate & Crop" : "Live Browser"}
           </span>
@@ -319,8 +493,14 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
               disabled={isProcessing || isLoadingProxy}
               className="flex items-center gap-2 px-4 py-1.5 bg-black text-white rounded-sm hover:bg-accent hover:text-black transition-all disabled:opacity-30"
             >
-              {isProcessing ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
-              <span className="text-[10px] font-bold uppercase tracking-widest">Freeze View</span>
+              {isProcessing ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Camera size={14} />
+              )}
+              <span className="text-[10px] font-bold uppercase tracking-widest">
+                Freeze View
+              </span>
             </button>
           ) : (
             <>
@@ -329,7 +509,9 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
                 className="flex items-center gap-2 px-4 py-1.5 bg-slate-100 dark:bg-[#131d22] text-slate-600 dark:text-slate-300 rounded-sm hover:bg-slate-200 dark:hover:bg-[#1d2a31] transition-all"
               >
                 <X size={14} />
-                <span className="text-[10px] font-bold uppercase tracking-widest">Unfreeze</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest">
+                  Unfreeze
+                </span>
               </button>
               <button
                 onClick={handleConfirm}
@@ -337,7 +519,9 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
                 className="flex items-center gap-2 px-4 py-1.5 bg-accent text-black rounded-sm hover:bg-black hover:text-white transition-all disabled:opacity-30"
               >
                 <Check size={14} />
-                <span className="text-[10px] font-bold uppercase tracking-widest">Confirm Crop</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest">
+                  Confirm Crop
+                </span>
               </button>
             </>
           )}
@@ -349,19 +533,26 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
         <div className="shrink-0 bg-slate-50 dark:bg-[#1d2a31] border-b border-slate-200 dark:border-slate-700 flex items-center gap-3 px-4 py-2">
           <div className="flex items-center bg-slate-100 dark:bg-[#131d22] rounded-lg p-0.5 gap-0.5">
             {[
-              { id: "select", icon: <MousePointer2 size={13} />, label: "Crop" },
-              { id: "rect",   icon: <Square size={13} />,        label: "Box" },
-              { id: "arrow",  icon: <ArrowUpRight size={13} />,  label: "Arrow" },
-              { id: "text",   icon: <Type size={13} />,          label: "Text" },
+              {
+                id: "select",
+                icon: <MousePointer2 size={13} />,
+                label: "Crop",
+              },
+              { id: "rect", icon: <Square size={13} />, label: "Box" },
+              { id: "arrow", icon: <ArrowUpRight size={13} />, label: "Arrow" },
+              { id: "text", icon: <Type size={13} />, label: "Text" },
             ].map((t) => (
               <button
                 key={t.id}
                 onClick={() => setTool(t.id as any)}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md transition-all text-[9px] font-bold uppercase tracking-widest ${
-                  tool === t.id ? "bg-slate-50 dark:bg-[#1d2a31] shadow-sm text-blue-600 dark:text-blue-400" : "text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                  tool === t.id
+                    ? "bg-slate-50 dark:bg-[#1d2a31] shadow-sm text-blue-600 dark:text-blue-400"
+                    : "text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
                 }`}
               >
-                {t.icon}{t.label}
+                {t.icon}
+                {t.label}
               </button>
             ))}
           </div>
@@ -369,12 +560,21 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
           <div className="w-px h-4 bg-slate-200 dark:bg-slate-700" />
 
           <div className="flex items-center gap-1">
-            {["#ef4444", "#3b82f6", "#22c55e", "#eab308", "#000000", "#ffffff"].map((c) => (
+            {[
+              "#ef4444",
+              "#3b82f6",
+              "#22c55e",
+              "#eab308",
+              "#000000",
+              "#ffffff",
+            ].map((c) => (
               <button
                 key={c}
                 onClick={() => setSelectedColor(c)}
                 className={`w-5 h-5 rounded-full border-2 transition-all ${
-                  selectedColor === c ? "border-blue-500 scale-110" : "border-transparent opacity-50 hover:opacity-100"
+                  selectedColor === c
+                    ? "border-blue-500 scale-110"
+                    : "border-transparent opacity-50 hover:opacity-100"
                 }`}
                 style={{ backgroundColor: c }}
               />
@@ -398,15 +598,21 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
         {isLoadingProxy && (
           <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-slate-50/80 dark:bg-[#131d22]/80 backdrop-blur-sm">
             <Loader2 className="w-8 h-8 text-accent animate-spin mb-2" />
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Loading Live Page...</p>
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+              Loading Live Page...
+            </p>
           </div>
         )}
 
         {isProcessing && !isFrozen && (
           <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm">
             <Loader2 className="w-10 h-10 text-white animate-spin mb-3" />
-            <p className="text-sm font-bold text-white uppercase tracking-widest">Capturing full page...</p>
-            <p className="text-[10px] font-bold text-white/50 uppercase tracking-widest mt-1">This may take ~15 seconds</p>
+            <p className="text-sm font-bold text-white uppercase tracking-widest">
+              Capturing full page...
+            </p>
+            <p className="text-[10px] font-bold text-white/50 uppercase tracking-widest mt-1">
+              This may take ~15 seconds
+            </p>
           </div>
         )}
 
@@ -439,7 +645,10 @@ export const FreezeAndCrop: React.FC<FreezeAndCropProps> = ({
                   onMouseDown={(e) => e.stopPropagation()}
                   placeholder="Type here..."
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); finishText() }
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault()
+                      finishText()
+                    }
                   }}
                   style={{
                     left: `${typingPos.x}px`,
