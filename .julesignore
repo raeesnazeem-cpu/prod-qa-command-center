@@ -1,0 +1,119 @@
+# .julesignore
+# Prevents Google Jules from wasting context windows and compute on non-code assets.
+
+# --- Dependencies & Package Managers ---
+node_modules/
+bower_components/
+.pnpm-store/
+.yarn/
+vendor/
+packages/*/node_modules/
+
+# --- Build, Compilations, & Output Targets ---
+dist/
+build/
+out/
+bin/
+obj/
+.next/
+.nuxt/
+target/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# --- Media, Heavy Assets, & Binary Files ---
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.ico
+*.mp4
+*.mp3
+*.pdf
+*.zip
+*.tar.gz
+*.rar
+assets/media/
+public/images/
+
+# --- Local IDEs, AI Cache, & System Files ---
+.idea/
+.vscode/
+.project
+.classpath
+.DS_Store
+Thumbs.db
+.cursor/
+.git/
+.hg/
+
+# --- Cache, Logs, & Live Data ---
+*.log
+.npm/
+.eslintcache
+.turbo/
+.cache/
+tmp/
+temp/
+coverage/
+.nyc_output/
+
+# --- Environment Secrets & Credentials ---
+# (Jules explicitly flags these for safety blockouts)
+.env
+.env.*
+*.pem
+*.key
+*.cert
+secret.json
+
+# --- Irrelevant to Jules (Test Scripts, Lockfiles & Misc) ---
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+scratch/
+**/scratch/
+scratch*
+test_*.cjs
+test_*.js
+test-*.js
+test-*.html
+test_*.ts
+fix_*.js
+check*.cjs
+check*.js
+get_schema.js
+apps/api/check_*.js
+apps/api/test_*.cjs
+apps/worker/check*.cjs
+apps/worker/check*.js
+apps/worker/get_schema.js
+apps/worker/test_*.cjs
+apps/worker/src/check_*.ts
+apps/web/check*.cjs
+apps/web/check*.js
+
+# Graphify
+.graphify/
+**/.graphify/
+.graphify_*.json
+**/.graphify_*.json
+graphify-out/
+**/graphify-out/
+
+# Playwright & Storybook
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+.storybook-out
+storybook-static
+
+# Backups & Recordings
+*.sql
+!supabase/migrations/*.sql
+!supabase/seed.sql
+*.recordings
