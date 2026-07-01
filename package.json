@@ -14,7 +14,12 @@
   "devDependencies": {
     "@bull-board/api": "^6.20.6",
     "@bull-board/express": "^6.20.6",
-    "bullmq": "^5.71.1"
+    "@types/jest": "^30.0.0",
+    "@types/supertest": "^7.2.0",
+    "bullmq": "^5.71.1",
+    "jest": "^30.4.2",
+    "supertest": "^7.2.2",
+    "ts-jest": "^29.4.11"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
