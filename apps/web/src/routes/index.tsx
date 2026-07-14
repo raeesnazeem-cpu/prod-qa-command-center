@@ -14,7 +14,7 @@ import {
   TasksPage,
   TeamPage,
   OnboardingPage,
-  TestPage,
+  // TestPage,
   VisualDiffPage,
   QueueHistoryPage,
   ActivityLogPage,
@@ -77,10 +77,10 @@ export const router = createBrowserRouter(
                   path: "/dashboard",
                   element: <DashboardPage />,
                 },
-                {
-                  path: "/test",
-                  element: <TestPage />,
-                },
+                // {
+                //   path: "/test",
+                //   element: <TestPage />,
+                // },
                 {
                   path: "/sso-callback",
                   element: <AuthenticateWithRedirectCallback />,
