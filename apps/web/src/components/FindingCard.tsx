@@ -18,6 +18,7 @@ import { SocialShareHeadingFindingCard } from "./SocialShareHeadingFindingCard"
 import { FaviconFindingCard } from "./FaviconFindingCard"
 import { ContactFormFindingCard } from "./ContactFormFindingCard"
 import { LogoOnChatbotFindingCard } from "./LogoOnChatbotFindingCard"
+import { GsrCheckFindingCard } from "./GsrCheckFindingCard"
 
 interface FindingCardProps {
   finding: QAFinding
@@ -121,6 +122,10 @@ export const FindingCard: React.FC<FindingCardProps> = (props) => {
 
   if (finding.check_factor === "logo_chatbot") {
     return <LogoOnChatbotFindingCard {...props} />
+  }
+
+  if (finding.check_factor === "gsr_check") {
+    return <GsrCheckFindingCard {...props} />
   }
 
   // Fallback for everything else (Paid Media, Generic, SEO, etc.)

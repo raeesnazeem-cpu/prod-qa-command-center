@@ -208,6 +208,15 @@ export const FindingReviewPanel: React.FC<FindingReviewPanelProps> = ({
       "verify_plugin_updates",
       "social_share_heading",
       "logo_chatbot",
+      "gsr_check",
+      "accessibility_ada_check",
+      "two_way_text_setup",
+      "grammarly_check",
+      "live_site_link_check",
+      "beta_url_check",
+      "backup_size_check",
+      "plugin_number_check",
+      "plugin_update_check",
     ]
 
     const confirmed = allUniqueFindings.filter((f) => {

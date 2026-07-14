@@ -317,6 +317,7 @@ export const RunDetailPage = () => {
       "verify_plugin_updates",
       "social_share_heading",
       "logo_chatbot",
+      "gsr_check",
     ]
 
     const isRunCompleted =
@@ -473,6 +474,38 @@ export const RunDetailPage = () => {
   const [retryCheckKey, setRetryCheckKey] = useState<string | null>(null)
   const [retryPassword, setRetryPassword] = useState("")
 
+  const lastKnownFindingRef = useRef<QAFinding | null>(null)
+  const currentFindingId = searchParams.get("findingId")
+  
+  useEffect(() => {
+    if (findings && currentFindingId) {
+      const selected = findings.find((f) => f.id === currentFindingId)
+      if (selected) {
+        lastKnownFindingRef.current = selected
+      }
+    }
+  }, [findings, currentFindingId])
+
+  useEffect(() => {
+    if (!findings || findings.length === 0 || !lastKnownFindingRef.current) return
+    if (!currentFindingId) return
+
+    const stillExists = findings.find((f) => f.id === currentFindingId)
+    if (!stillExists) {
+      const replacement = findings.find(
+        (f) =>
+          f.check_factor === lastKnownFindingRef.current!.check_factor &&
+          f.page_id === lastKnownFindingRef.current!.page_id
+      )
+      if (replacement) {
+        setSearchParams((prev) => {
+          prev.set("findingId", replacement.id)
+          return prev
+        })
+      }
+    }
+  }, [findings, currentFindingId, setSearchParams])
+
   const handleRetryCheck = async (checkKey: string) => {
     if (checkKey === "verify_plugin_updates") {
       setRetryCheckKey(checkKey)
@@ -498,37 +531,17 @@ export const RunDetailPage = () => {
 
   // Clear retry spinners when backend broadcasts that it finished processing
   useEffect(() => {
-    if (!runId) return
+    const handleProgressDone = () => {
+      console.log("CUSTOM EVENT RECEIVED: CLEARING RETRY SPINNERS AND REFETCHING FINDINGS")
+      setRetryingChecks([])
+      refetchFindings()
+      refetchRunFindings()
+      queryClient.invalidateQueries({ queryKey: ["run", runId] })
+    }
 
-    const channel = supabase
-      .channel(`spinner-clear-${runId}`)
-      .on("broadcast", { event: "progress" }, (payload) => {
-        if (
-          payload.payload?.status === "done" ||
-          payload.payload?.status === "failed"
-        ) {
-          setRetryingChecks([])
-          refetchFindings()
-          refetchRunFindings()
-          queryClient.invalidateQueries({ queryKey: ["run", runId] })
-        }
-      })
-      .on("broadcast", { event: "page_progress" }, (payload) => {
-        if (
-          payload.payload?.status === "done" ||
-          payload.payload?.status === "failed" ||
-          payload.payload?.status === "checked"
-        ) {
-          setRetryingChecks([])
-          refetchFindings()
-          refetchRunFindings()
-          queryClient.invalidateQueries({ queryKey: ["run", runId] })
-        }
-      })
-      .subscribe()
-
+    window.addEventListener("run-progress-done", handleProgressDone)
     return () => {
-      channel.unsubscribe()
+      window.removeEventListener("run-progress-done", handleProgressDone)
     }
   }, [runId, refetchFindings, refetchRunFindings, queryClient])
   const { mutate: createTask } = useCreateTask()
@@ -755,6 +768,15 @@ export const RunDetailPage = () => {
     "verify_plugin_updates",
     "social_share_heading",
     "logo_chatbot",
+    "gsr_check",
+    "accessibility_ada_check",
+    "two_way_text_setup",
+    "grammarly_check",
+    "live_site_link_check",
+    "beta_url_check",
+    "backup_size_check",
+    "plugin_number_check",
+    "plugin_update_check",
   ]
 
   // 1. Extract any general run-level findings (null page_id OR project plan factor OR hero_media matching selected page)
@@ -1834,7 +1856,8 @@ export const RunDetailPage = () => {
                     checkKey === "text_share" ||
                     checkKey === "verify_plugin_updates" ||
                     checkKey === "social_share_heading" ||
-                    checkKey === "logo_chatbot"
+                    checkKey === "logo_chatbot" ||
+                    checkKey === "gsr_check"
                   ) {
                     relevantPages = relevantPages.filter((p) => {
                       const normalize = (u: string) =>

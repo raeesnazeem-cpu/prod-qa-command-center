@@ -32,6 +32,7 @@ import {
   checkSocialShareHeading,
   checkLogoOnChatbot,
 } from "../checks/preReleaseSuite"
+import { checkGsr } from "../checks/gsrCheck"
 import pino from "pino"
 
 const logger = pino({
@@ -103,7 +104,7 @@ export async function processCrawlPageJob(job: Job) {
         pageId,
         progress,
         current_step: step,
-      }
+      },
     })
   }
   const { data: pageData } = await supabase
@@ -141,7 +142,7 @@ export async function processCrawlPageJob(job: Job) {
       payload: {
         pageId,
         check_progress: currentCheckProgress,
-      }
+      },
     })
   }
 
@@ -530,7 +531,10 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         await Promise.all(checkPromises)
-        if (enabledChecks.includes("single_script") && false /* Defer to end */) {
+        if (
+          enabledChecks.includes("single_script") &&
+          false /* Defer to end */
+        ) {
           checkPromises.push(
             checkSingleScript(pageUrl, runId, pageId, browser, async (p, m) => {
               await updateCheckProgress("single_script", p, m)
@@ -694,6 +698,32 @@ export async function processCrawlPageJob(job: Job) {
             }),
           )
         }
+
+        await Promise.all(checkPromises)
+        if (enabledChecks.includes("gsr_check")) {
+          checkPromises.push(
+            checkGsr(
+              page,
+              { url: run.live_site_url || pageUrl },
+              async (p, m) => {
+                await updateCheckProgress("gsr_check", p, m)
+              },
+            )
+              .then((res) => {
+                updateCheckProgress("gsr_check", 100, "Done").catch(() => {})
+                return res
+              })
+              .catch((err) => {
+                logger.error("GSR check failed:", err)
+                updateCheckProgress(
+                  "gsr_check",
+                  100,
+                  `Failed: ${err.message}`,
+                ).catch(() => {})
+                return []
+              }),
+          )
+        }
       }
 
       // --- ALL-PAGES CHECKS ---
@@ -708,6 +738,17 @@ export async function processCrawlPageJob(job: Job) {
               page_id: pageId,
               run_id: runId,
             }))
+
+            const isGsrCheck = findingsToInsert[0]?.check_factor === "gsr_check"
+            if (isGsrCheck) {
+              await supabase
+                .from("findings")
+                .delete()
+                .eq("run_id", runId)
+                .eq("page_id", pageId)
+                .eq("check_factor", "gsr_check")
+            }
+
             const { error: insertError } = await supabase
               .from("findings")
               .insert(findingsToInsert)
@@ -763,13 +804,24 @@ export async function processCrawlPageJob(job: Job) {
         // If it's an override, we only mark the specific check as done in check_progress
         const checkKey = job.data.overrideChecks[0]
         if (checkKey) {
-          const { data: pageData } = await supabase.from("pages").select("check_progress").eq("id", pageId).single()
+          const { data: pageData } = await supabase
+            .from("pages")
+            .select("check_progress")
+            .eq("id", pageId)
+            .single()
           if (pageData) {
             const updatedCheckProgress = {
               ...(pageData.check_progress || {}),
-              [checkKey]: { progress: 100, status: "done", step: "Check complete" }
+              [checkKey]: {
+                progress: 100,
+                status: "done",
+                step: "Check complete",
+              },
             }
-            await supabase.from("pages").update({ check_progress: updatedCheckProgress }).eq("id", pageId)
+            await supabase
+              .from("pages")
+              .update({ check_progress: updatedCheckProgress })
+              .eq("id", pageId)
           }
         }
       }
@@ -801,13 +853,24 @@ export async function processCrawlPageJob(job: Job) {
       } else {
         const checkKey = job.data.overrideChecks[0]
         if (checkKey) {
-          const { data: pageData } = await supabase.from("pages").select("check_progress").eq("id", pageId).single()
+          const { data: pageData } = await supabase
+            .from("pages")
+            .select("check_progress")
+            .eq("id", pageId)
+            .single()
           if (pageData) {
             const updatedCheckProgress = {
               ...(pageData.check_progress || {}),
-              [checkKey]: { progress: 0, status: "failed", step: `Error: ${errorMessage}` }
+              [checkKey]: {
+                progress: 0,
+                status: "failed",
+                step: `Error: ${errorMessage}`,
+              },
             }
-            await supabase.from("pages").update({ check_progress: updatedCheckProgress }).eq("id", pageId)
+            await supabase
+              .from("pages")
+              .update({ check_progress: updatedCheckProgress })
+              .eq("id", pageId)
           }
         }
       }
@@ -856,7 +919,9 @@ export async function processCrawlPageJob(job: Job) {
 
           qaQueue
             .add("generate_embeddings", { runId })
-            .catch((e) => logger.error("Failed to queue generate_embeddings:", e))
+            .catch((e) =>
+              logger.error("Failed to queue generate_embeddings:", e),
+            )
         }
       } else if (isComplete) {
         logger.info({ runId }, "Run marked as completed")
@@ -876,6 +941,13 @@ export async function processCrawlPageJob(job: Job) {
           status: "done",
           pageId,
         },
+      })
+
+      const spinnerChannel = supabase.channel(`spinner-clear-${runId}`)
+      await spinnerChannel.send({
+        type: "broadcast",
+        event: "progress",
+        payload: { pageId, status: "done" },
       })
     }
 

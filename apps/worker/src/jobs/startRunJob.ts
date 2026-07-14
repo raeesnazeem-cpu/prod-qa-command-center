@@ -94,6 +94,7 @@ export async function processStartRunJob(job: Job) {
       "verify_plugin_updates",
       "social_share_heading",
       "logo_chatbot",
+      "gsr_check",
     ]
 
     const PAGE_CHECKS = [...ALL_PAGES_CHECKS, ...HOMEPAGE_ONLY_CHECKS]

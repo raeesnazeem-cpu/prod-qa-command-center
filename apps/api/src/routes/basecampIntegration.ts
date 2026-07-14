@@ -154,7 +154,11 @@ router.get("/people", clerkAuth, async (req: Request, res: Response) => {
     return res.json(people)
   } catch (error: any) {
     console.error("[BasecampPeople] Error:", error.message)
-    return res.status(500).json({ error: error.message })
+    const status = error.status || error.response?.status || 500
+    if (status === 401) {
+      return res.status(401).json({ error: "Basecamp token expired or invalid. Please reconnect your Basecamp account." })
+    }
+    return res.status(status).json({ error: error.message || "Failed to fetch people from Basecamp" })
   }
 })
 

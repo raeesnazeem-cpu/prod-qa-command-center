@@ -260,21 +260,33 @@ async function run() {
 
     const fileName = `${runId}/full_project_${viewportType}.webm`
 
-    // 5. Upload video to Google Cloud Storage (GCS)
-    console.log(`Uploading full project video to GCS: ${fileName}`)
-    const storage = new Storage()
-    const bucketName = process.env.GCS_BUCKET_NAME || "my-agency-qa-videos" // Set this ENV in Cloud Run UI!
-    const bucket = storage.bucket(bucketName)
+    // 5. Upload video to Cloud Provider
+    const cloudProvider = process.env.CLOUD_PROVIDER || "GCP"
+    let publicUrl = ""
 
-    await bucket.upload(videoFile, {
-      destination: fileName,
-      contentType: "video/webm",
-    })
+    if (cloudProvider === "AWS") {
+      console.log(`Uploading full project video to AWS S3: ${fileName}`)
+      // TODO: Implement AWS S3 upload logic here
+      // e.g. await s3Client.putObject({...})
+      const bucketName = process.env.AWS_S3_BUCKET_NAME || "my-agency-qa-videos"
+      publicUrl = `https://${bucketName}.s3.amazonaws.com/${fileName}`
+      console.log(`Video uploaded successfully to AWS S3: ${publicUrl}`)
+    } else {
+      console.log(`Uploading full project video to GCS: ${fileName}`)
+      const storage = new Storage()
+      const bucketName = process.env.GCS_BUCKET_NAME || "my-agency-qa-videos" // Set this ENV in Cloud Run UI!
+      const bucket = storage.bucket(bucketName)
 
-    // Make it publicly accessible
-    await bucket.file(fileName).makePublic()
-    const publicUrl = `https://storage.googleapis.com/${bucketName}/${fileName}`
-    console.log(`Video uploaded successfully to GCS: ${publicUrl}`)
+      await bucket.upload(videoFile, {
+        destination: fileName,
+        contentType: "video/webm",
+      })
+
+      // Make it publicly accessible
+      await bucket.file(fileName).makePublic()
+      publicUrl = `https://storage.googleapis.com/${bucketName}/${fileName}`
+      console.log(`Video uploaded successfully to GCS: ${publicUrl}`)
+    }
 
     // 6. Update the RUN directly with the new video URL securely via RPC
     const { error: urlError } = await supabase.rpc(

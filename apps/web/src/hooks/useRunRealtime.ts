@@ -121,6 +121,14 @@ export const useRunRealtime = (runId: string) => {
       .channel(`run:${runId}`)
       .on("broadcast", { event: "progress" }, (payload) => {
         console.log("Granular progress broadcast received:", payload)
+        
+        if (
+          payload.payload?.status === "done" ||
+          payload.payload?.status === "failed"
+        ) {
+          window.dispatchEvent(new CustomEvent("run-progress-done"))
+        }
+        
         // Debounce: when many pages finish at once, batch invalidations to avoid 429s
         if (progressDebounceTimer) clearTimeout(progressDebounceTimer)
         progressDebounceTimer = setTimeout(() => {

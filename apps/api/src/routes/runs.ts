@@ -839,10 +839,18 @@ router.post(
       // 4. Enqueue jobs based on the checkKey
       if (checkKey === "project_plan") {
         // await supabase.from("qa_runs").update({ status: "running" }).eq("id", id)
-        await qaQueue.add("check_project_plan", { runId: id, projectId: run.project_id, isRetry: true })
+        await qaQueue.add("check_project_plan", {
+          runId: id,
+          projectId: run.project_id,
+          isRetry: true,
+        })
       } else if (checkKey === "paid_media") {
         // await supabase.from("qa_runs").update({ status: "running" }).eq("id", id)
-        await qaQueue.add("check_paid_media", { runId: id, projectId: run.project_id, isRetry: true })
+        await qaQueue.add("check_paid_media", {
+          runId: id,
+          projectId: run.project_id,
+          isRetry: true,
+        })
       } else if (pages && pages.length > 0) {
         // Filter pages for homepage-only checks so we don't queue redundant tasks
         const homepageChecks = [
@@ -858,12 +866,18 @@ router.post(
           "verify_plugin_updates",
           "social_share_heading",
           "url_tab_compare",
+          "gsr_check",
         ]
 
         let relevantPages = pages
         if (homepageChecks.includes(checkKey)) {
           relevantPages = relevantPages.filter((p) => {
-            const normalize = (u: string) => u.replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "").toLowerCase()
+            const normalize = (u: string) =>
+              u
+                .replace(/^https?:\/\//, "")
+                .replace(/^www\./, "")
+                .replace(/\/$/, "")
+                .toLowerCase()
             return normalize(p.url) === normalize(run.site_url)
           })
           if (relevantPages.length === 0 && pages.length > 0) {
@@ -873,17 +887,29 @@ router.post(
 
         // Don't change run status or pages_processed for targeted check retry.
         // The run stays "completed" so the UI keeps showing 100% for all other checks.
-        
+
         // ONLY update check_progress for the specific check, so we don't drop progress for all other checks!
         for (const page of relevantPages) {
           const updatedCheckProgress = {
             ...(page.check_progress || {}),
-            [checkKey]: { progress: 0, status: "processing", step: "Queued for retry..." }
+            [checkKey]: {
+              progress: 0,
+              status: "processing",
+              step: "Queued for retry...",
+            },
           }
-          await supabase.from("pages").update({ check_progress: updatedCheckProgress }).eq("id", page.id)
-          
+          await supabase
+            .from("pages")
+            .update({ check_progress: updatedCheckProgress })
+            .eq("id", page.id)
+
           // Delete the old finding so we don't get duplicates
-          await supabase.from("findings").delete().eq("run_id", id).eq("page_id", page.id).eq("check_factor", checkKey)
+          await supabase
+            .from("findings")
+            .delete()
+            .eq("run_id", id)
+            .eq("page_id", page.id)
+            .eq("check_factor", checkKey)
         }
 
         // Enqueue crawl_batch for the pages with overrideChecks
@@ -902,7 +928,7 @@ router.post(
                 pageId: chunk[0].id,
                 url: chunk[0].url,
                 overrideChecks: [checkKey],
-                wpPassword: wp_password
+                wpPassword: wp_password,
               },
               opts: {
                 attempts: 3,
@@ -916,7 +942,7 @@ router.post(
                 runId: id,
                 pages: chunk.map((p) => ({ id: p.id, url: p.url })),
                 overrideChecks: [checkKey],
-                wpPassword: wp_password
+                wpPassword: wp_password,
               },
               opts: {
                 attempts: 3,
@@ -953,8 +979,8 @@ router.delete(
     }
 
     try {
-      const { bulkDeleteRuns } = require("../services/runService");
-      await bulkDeleteRuns(runIds);
+      const { bulkDeleteRuns } = require("../services/runService")
+      await bulkDeleteRuns(runIds)
 
       return res.status(200).json({ message: "Runs deleted successfully" })
     } catch (error: any) {

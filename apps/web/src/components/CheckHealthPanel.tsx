@@ -48,6 +48,7 @@ const SINGLE_PAGE_CHECKS = [
   "verify_plugin_updates",
   "social_share_heading",
   "logo_chatbot",
+  "gsr_check",
 ]
 
 type CheckStatus = "complete" | "failed" | "stuck" | "processing"

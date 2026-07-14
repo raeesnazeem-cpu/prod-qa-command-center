@@ -27,15 +27,20 @@ router.post("/start", async (req, res) => {
       .eq("id", runId)
 
     const viewports = ["desktop", "tablet", "mobile"]
-    const jobName = process.env.GCP_RECORDING_JOB_NAME || "recording-worker"
-    const projectId = process.env.GCP_PROJECT_ID
-    const location = process.env.GCP_LOCATION || "us-central1"
+    const cloudProvider = process.env.CLOUD_PROVIDER || "GCP"
+    
+    let jobPath = ""
+    if (cloudProvider === "GCP") {
+      const jobName = process.env.GCP_RECORDING_JOB_NAME || "recording-worker"
+      const projectId = process.env.GCP_PROJECT_ID
+      const location = process.env.GCP_LOCATION || "us-central1"
 
-    if (!projectId) {
-      throw new Error("GCP_PROJECT_ID is not set")
+      if (!projectId) {
+        throw new Error("GCP_PROJECT_ID is not set")
+      }
+
+      jobPath = `projects/${projectId}/locations/${location}/jobs/${jobName}`
     }
-
-    const jobPath = `projects/${projectId}/locations/${location}/jobs/${jobName}`
 
     // 2. Trigger Cloud Run Jobs for each viewport
     const triggerPromises = viewports.map(async (viewportType) => {
@@ -45,28 +50,35 @@ router.post("/start", async (req, res) => {
       )
 
       try {
-        const [operation] = await jobsClient.runJob({
-          name: jobPath,
-          overrides: {
-            containerOverrides: [
-              {
-                env: [
-                  { name: "VIEWPORT_TYPE", value: viewportType },
-                  { name: "RUN_ID", value: runId },
-                  {
-                    name: "SUPABASE_URL",
-                    value: process.env.SUPABASE_URL || "",
-                  },
-                  {
-                    name: "SUPABASE_SERVICE_ROLE_KEY",
-                    value: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
-                  },
-                ],
-              },
-            ],
-          },
-        })
-        return operation
+        if (cloudProvider === "AWS") {
+          logger.info("AWS ECS RunTask trigger would execute here.")
+          // TODO: Implement AWS ECS RunTask logic here
+          // e.g. await ecsClient.runTask({...})
+          return { status: "AWS job simulated" }
+        } else {
+          const [operation] = await jobsClient.runJob({
+            name: jobPath,
+            overrides: {
+              containerOverrides: [
+                {
+                  env: [
+                    { name: "VIEWPORT_TYPE", value: viewportType },
+                    { name: "RUN_ID", value: runId },
+                    {
+                      name: "SUPABASE_URL",
+                      value: process.env.SUPABASE_URL || "",
+                    },
+                    {
+                      name: "SUPABASE_SERVICE_ROLE_KEY",
+                      value: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+                    },
+                  ],
+                },
+              ],
+            },
+          })
+          return operation
+        }
       } catch (err: any) {
         logger.error(
           { err: err.message, viewportType },

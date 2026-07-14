@@ -36,10 +36,16 @@ export const ProjectOverviewTab = ({
     project.id,
   )
 
-  const recentRuns = [
+  const allRecentRuns = [
     ...(runsData?.data || []),
     ...(pinnedRunsData?.data || []),
   ]
+
+  // Deduplicate by run.id
+  const uniqueRunsMap = new Map()
+  allRecentRuns.forEach(run => uniqueRunsMap.set(run.id, run))
+  
+  const recentRuns = Array.from(uniqueRunsMap.values())
     .sort(
       (a, b) =>
         new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),

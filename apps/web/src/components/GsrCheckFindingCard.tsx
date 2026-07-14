@@ -10,6 +10,7 @@ import {
   Sparkle,
   Unlink2,
   RefreshCw,
+  Search,
 } from "lucide-react"
 import { useParams, Link } from "react-router-dom"
 import { useQueryClient } from "@tanstack/react-query"
@@ -21,6 +22,47 @@ import { FindingCardWithScreenshot } from "./FindingCardWithScreenshot"
 import { useAuthAxios } from "../lib/useAuthAxios"
 import { useAiResultsStore } from "../store/aiResultsStore"
 import { useBulkDeleteTasks } from "../hooks/useTasks"
+
+const getCleanDescription = (desc: string, title: string, url: string) => {
+  if (!desc) return ""
+  let clean = desc
+  
+  // 1. Strip out the exact URL
+  clean = clean.replace(url, "")
+  
+  // 2. Strip out the URL without trailing slashes or protocols
+  try {
+    const urlObj = new URL(url)
+    const hostnameAndPath = urlObj.hostname + (urlObj.pathname === "/" ? "" : urlObj.pathname)
+    clean = clean.replace(hostnameAndPath, "")
+    clean = clean.replace(urlObj.hostname, "")
+    clean = clean.replace("https://", "").replace("http://", "")
+  } catch (e) {}
+
+  // 3. Strip out the exact title
+  clean = clean.replace(title, "")
+  
+  // 4. Try to extract site name from the title (usually before | or -) and strip it
+  const siteNameRegex = /^(.+?)\s*[|\-]/
+  const match = title.match(siteNameRegex)
+  if (match && match[1]) {
+    const siteName = match[1].trim()
+    while (clean.includes(siteName)) {
+      clean = clean.replace(siteName, "")
+    }
+  }
+
+  // 5. Remove breadcrumb arrows
+  clean = clean.replace(/›/g, "")
+  
+  // Clean up any double spaces, dangling punctuation left from stripping
+  clean = clean.replace(/\s+/g, " ").trim()
+  if (clean.startsWith("- ") || clean.startsWith("| ")) {
+    clean = clean.substring(2).trim()
+  }
+
+  return clean
+}
 
 interface FindingCardProps {
   finding: QAFinding
@@ -64,6 +106,30 @@ export const GsrCheckFindingCard: React.FC<FindingCardProps> = ({
       !!(finding as any).basecamp_comment_id)
   const [isManuallyVerified, setIsManuallyVerified] =
     React.useState(initialIsPushed)
+
+  const [isModalOpen, setIsModalOpen] = React.useState(false)
+  const [isExpanded, setIsExpanded] = React.useState(false)
+
+  const serps = React.useMemo(() => {
+    if (!finding.description) return []
+    if (Array.isArray(finding.description)) return finding.description
+    
+    let parsed: any = null
+    try {
+      parsed = JSON.parse(finding.description)
+      if (typeof parsed === "string") {
+        parsed = JSON.parse(parsed)
+      }
+    } catch (e) {
+      // Bulletproof fallback: if JSON is slightly malformed, try to evaluate it as JS object
+      try {
+        parsed = new Function("return " + finding.description)()
+      } catch (e2) {
+        console.error("Complete failure parsing serps:", e2)
+      }
+    }
+    return Array.isArray(parsed) ? parsed : []
+  }, [finding.description])
 
   // AI states
   const [isAiModalOpen, setIsAiModalOpen] = React.useState(false)
@@ -312,9 +378,70 @@ export const GsrCheckFindingCard: React.FC<FindingCardProps> = ({
       )}
 
       <div className="space-y-3">
-        <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium leading-relaxed break-words">
-          {finding.description}
-        </p>
+        {(() => {
+          if (!finding.description) return null
+
+          if (Array.isArray(serps) && serps.length > 0) {
+            const displaySerps = serps.slice(0, 3)
+            const hasMore = serps.length > 3
+            return (
+              <div className="flex flex-col gap-2">
+                <div className="overflow-x-hidden overflow-y-auto max-h-[140px] border border-slate-200 rounded-md my-2 relative [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:bg-slate-200 hover:[&::-webkit-scrollbar-thumb]:bg-slate-300 [&::-webkit-scrollbar-track]:bg-transparent">
+                  <table className="w-full table-fixed text-[10px] text-left">
+                    <thead className="bg-slate-50 dark:bg-[#131d22] text-slate-500 dark:text-slate-400 sticky top-0 z-10 shadow-[0_1px_0_0_#e2e8f0] dark:shadow-[0_1px_0_0_#334155]">
+                      <tr>
+                        <th className="px-3 py-2 font-bold uppercase tracking-wider w-1/3">Title</th>
+                        <th className="px-3 py-2 font-bold uppercase tracking-wider w-1/3">URL</th>
+                        <th className="px-3 py-2 font-bold uppercase tracking-wider w-1/3">Description</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-700 text-slate-600 dark:text-slate-300">
+                      {displaySerps.map((serp: any, idx: number) => (
+                        <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-[#1d2a31]">
+                          <td className="px-3 py-2 align-top font-medium break-words">{serp.title}</td>
+                          <td className="px-3 py-2 align-top break-words text-blue-500">
+                            <a href={serp.url} target="_blank" rel="noreferrer" className="hover:underline">
+                              {serp.url}
+                            </a>
+                          </td>
+                          <td className="px-3 py-2 align-top break-words">
+                            {getCleanDescription(serp.description, serp.title, serp.url)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {hasMore && (
+                  <button
+                    onClick={() => setIsModalOpen(true)}
+                    className="flex items-center text-accent hover:underline text-[10px] font-bold uppercase tracking-widest"
+                  >
+                    <Search className="w-3 h-3 mr-2" />
+                    View all {serps.length} SERPs
+                  </button>
+                )}
+              </div>
+            )
+          }
+
+          // Fallback to raw text
+          return (
+            <>
+              <p className={`text-[11px] text-slate-500 dark:text-slate-400 font-medium leading-relaxed break-words ${isFalsePositive ? "text-slate-400" : ""} ${!isExpanded ? "line-clamp-3" : ""}`}>
+                {finding.description}
+              </p>
+              {finding.description && finding.description.length > 150 && (
+                <button
+                  onClick={() => setIsExpanded(!isExpanded)}
+                  className="text-[10px] font-bold text-accent uppercase tracking-widest mt-1 hover:text-black transition-colors"
+                >
+                  {isExpanded ? "See less" : "See more"}
+                </button>
+              )}
+            </>
+          )
+        })()}
       </div>
 
       {screenshotUrls.length > 0 && (
@@ -1054,6 +1181,57 @@ export const GsrCheckFindingCard: React.FC<FindingCardProps> = ({
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {isModalOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsModalOpen(false)
+          }}
+        >
+          <div className="bg-slate-50 dark:bg-[#1D2A31] w-full max-w-4xl max-h-[85vh] rounded-md shadow-2xl flex flex-col">
+            <div className="p-4 border-b dark:border-slate-700 flex items-center justify-between shrink-0">
+              <h3 className="font-bold text-slate-900 dark:text-slate-200 text-sm uppercase tracking-widest flex items-center gap-2">
+                <Search size={16} className="text-sky-400" /> All SERPs ({serps.length})
+              </h3>
+              <button
+                onClick={() => setIsModalOpen(false)}
+                className="text-[10px] font-bold px-3 py-1.5 text-slate-500 uppercase bg-white border rounded"
+              >
+                Close
+              </button>
+            </div>
+            <div className="p-0 overflow-y-auto">
+              <table className="w-full table-fixed text-[11px] text-left">
+                <thead className="bg-slate-50 dark:bg-[#131d22] text-slate-500 dark:text-slate-400 sticky top-0 z-10 shadow-[0_1px_0_0_#e2e8f0]">
+                  <tr>
+                    <th className="px-4 py-3 font-bold uppercase tracking-wider w-1/3">Title</th>
+                    <th className="px-4 py-3 font-bold uppercase tracking-wider w-1/3">URL</th>
+                    <th className="px-4 py-3 font-bold uppercase tracking-wider w-1/3">Description</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700 text-slate-600 dark:text-slate-300">
+                  {serps.map((serp: any, idx: number) => (
+                    <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-[#1d2a31]">
+                      <td className="px-4 py-3 align-top font-medium text-slate-900 dark:text-slate-200">
+                        {serp.title}
+                      </td>
+                      <td className="px-4 py-3 align-top break-all text-blue-500">
+                        <a href={serp.url} target="_blank" rel="noreferrer" className="hover:underline">
+                          {serp.url}
+                        </a>
+                      </td>
+                      <td className="px-4 py-3 align-top break-words leading-relaxed text-slate-500">
+                        {getCleanDescription(serp.description, serp.title, serp.url)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}

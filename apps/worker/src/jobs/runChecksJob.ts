@@ -1,6 +1,7 @@
 import { Job } from "bullmq"
 import { chromium } from "playwright"
 import { supabase } from "../lib/supabase"
+import { qaQueue } from "../lib/queue"
 import { checkBrokenLinks } from "../checks/brokenLinksCheck"
 import { checkExternalLinks } from "../checks/externalLinkCheck"
 import { checkMeta } from "../checks/metaCheck"
@@ -10,6 +11,7 @@ import { checkImageCompliance } from "../checks/imageComplianceCheck"
 import { checkHeroMedia } from "../checks/heroMediaCheck"
 import { processCheckProjectPlanJob } from "./checkProjectPlanJob"
 import { checkOptimizedLinks } from "../checks/optimizedLinksCheck"
+import { checkGsr } from "../checks/gsrCheck"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import pino from "pino"
@@ -58,6 +60,33 @@ export async function processRunChecksJob(job: Job) {
       throw new Error(`Page not found: ${pageId}`)
     }
 
+    let currentCheckProgress: Record<string, { progress: number; step: string; status?: string }> =
+      page.check_progress || {}
+
+    const updateCheckProgress = async (
+      checkKey: string,
+      progress: number,
+      step: string,
+      status: string = "running"
+    ) => {
+      currentCheckProgress[checkKey] = { progress, step, status }
+
+      await supabase
+        .from("pages")
+        .update({ check_progress: currentCheckProgress })
+        .eq("id", pageId)
+
+      const progressChannel = supabase.channel(`run:${runId}`)
+      await progressChannel.send({
+        type: "broadcast",
+        event: "page_progress",
+        payload: {
+          pageId,
+          check_progress: currentCheckProgress,
+        },
+      })
+    }
+
     await updateProgress(10, "Initializing quality checks...")
 
     const browser = await chromium.launch({
@@ -97,7 +126,7 @@ export async function processRunChecksJob(job: Job) {
       // Before running checks, fetch enabled_checks from the run:
       const { data: run } = await supabase
         .from("qa_runs")
-        .select("enabled_checks, project_id")
+        .select("enabled_checks, project_id, run_type")
         .eq("id", runId)
         .single()
 
@@ -176,6 +205,22 @@ export async function processRunChecksJob(job: Job) {
         )
       }
 
+      if (run?.run_type === "post_release") {
+        checkPromises.push(
+          checkGsr(playwrightPage, page, async (p, m) => {
+            await updateCheckProgress("gsr_check", p, m)
+          })
+            .then((res) => {
+              updateCheckProgress("gsr_check", 100, "Done", "done").catch(() => {})
+              return res
+            })
+            .catch((err) => {
+              updateCheckProgress("gsr_check", 100, `Failed: ${err.message}`, "failed").catch(() => {})
+              throw err
+            }),
+        )
+      }
+
       // Execute enabled checks in parallel
       const checkResults = await Promise.all(checkPromises)
 
@@ -241,5 +286,83 @@ export async function processRunChecksJob(job: Job) {
       .update({ status: "failed", current_step: `Error: ${error.message}` })
       .eq("id", pageId)
     throw error
+  } finally {
+    if (!job.data.overrideChecks) {
+      // Step 6 & 7: Atomically increment pages_processed and check for run completion
+      const { data: isComplete, error: rpcError } = await supabase.rpc(
+        "increment_and_check_completion",
+        { run_id_param: runId },
+      )
+
+      if (rpcError) {
+        logger.warn(
+          { runId, error: rpcError.message },
+          "RPC increment_and_check_completion failed, falling back",
+        )
+
+        // Fallback: use old increment RPC
+        await supabase.rpc("increment_pages_processed", { run_id_param: runId })
+
+        // Fallback: check completion separately
+        const { data: runCheck } = await supabase
+          .from("qa_runs")
+          .select("pages_processed, pages_total, status")
+          .eq("id", runId)
+          .single()
+
+        if (
+          runCheck &&
+          runCheck.status === "running" &&
+          runCheck.pages_total > 0 &&
+          runCheck.pages_processed >= runCheck.pages_total
+        ) {
+          await supabase
+            .from("qa_runs")
+            .update({
+              status: "completed",
+              completed_at: new Date().toISOString(),
+            })
+            .eq("id", runId)
+
+          logger.info({ runId }, "Run marked as completed (fallback)")
+          
+          await supabase.channel(`run:${runId}`).send({
+            type: "broadcast",
+            event: "progress",
+            payload: { runId, status: "completed" },
+          })
+
+          qaQueue
+            .add("generate_embeddings", { runId })
+            .catch((e) =>
+              logger.error("Failed to queue generate_embeddings:", e),
+            )
+        }
+      } else if (isComplete) {
+        logger.info({ runId }, "Run marked as completed")
+        
+        await supabase.channel(`run:${runId}`).send({
+          type: "broadcast",
+          event: "progress",
+          payload: { runId, status: "completed" },
+        })
+
+        qaQueue
+          .add("generate_embeddings", { runId })
+          .catch((e) => logger.error("Failed to queue generate_embeddings:", e))
+      }
+
+      // Step 8: Broadcast progress update
+      const finalChannel = supabase.channel(`run:${runId}`)
+      await finalChannel.send({
+        type: "broadcast",
+        event: "progress",
+        payload: {
+          pageUrl,
+          status: "done",
+          pageId,
+        },
+      })
+    }
   }
 }
