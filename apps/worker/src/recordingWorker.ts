@@ -269,6 +269,19 @@ async function run() {
       // TODO: Implement AWS S3 upload logic here
       // e.g. await s3Client.putObject({...})
       const bucketName = process.env.AWS_S3_BUCKET_NAME || "my-agency-qa-videos"
+      
+      const { S3Client, PutObjectCommand } = await import("@aws-sdk/client-s3")
+      const s3Client = new S3Client({ region: process.env.AWS_REGION || "us-east-1" })
+      const fileStream = fs.createReadStream(videoFile)
+      
+      await s3Client.send(new PutObjectCommand({
+        Bucket: bucketName,
+        Key: fileName,
+        Body: fileStream,
+        ContentType: "video/webm",
+        ACL: "public-read"
+      }))
+
       publicUrl = `https://${bucketName}.s3.amazonaws.com/${fileName}`
       console.log(`Video uploaded successfully to AWS S3: ${publicUrl}`)
     } else {

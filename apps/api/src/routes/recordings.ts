@@ -28,7 +28,7 @@ router.post("/start", async (req, res) => {
 
     const viewports = ["desktop", "tablet", "mobile"]
     const cloudProvider = process.env.CLOUD_PROVIDER || "GCP"
-    
+
     let jobPath = ""
     if (cloudProvider === "GCP") {
       const jobName = process.env.GCP_RECORDING_JOB_NAME || "recording-worker"
@@ -51,10 +51,56 @@ router.post("/start", async (req, res) => {
 
       try {
         if (cloudProvider === "AWS") {
-          logger.info("AWS ECS RunTask trigger would execute here.")
-          // TODO: Implement AWS ECS RunTask logic here
-          // e.g. await ecsClient.runTask({...})
-          return { status: "AWS job simulated" }
+          logger.info("Triggering AWS ECS RunTask for recording")
+          // Pure additive: Dynamically import to avoid breaking GCP deployments if SDK isn't installed yet
+          const { ECSClient, RunTaskCommand } =
+            await import("@aws-sdk/client-ecs")
+          const ecsClient = new ECSClient({
+            region: process.env.AWS_REGION || "us-east-1",
+          })
+
+          const runTaskCommand = new RunTaskCommand({
+            cluster: process.env.AWS_ECS_CLUSTER || "qacc-cluster",
+            taskDefinition:
+              process.env.AWS_ECS_TASK_DEFINITION || "qacc-worker-task",
+            launchType: "FARGATE",
+            networkConfiguration: {
+              awsvpcConfiguration: {
+                subnets: (process.env.AWS_ECS_SUBNETS || "").split(","),
+                securityGroups: (
+                  process.env.AWS_ECS_SECURITY_GROUPS || ""
+                ).split(","),
+                assignPublicIp: process.env.AWS_ECS_ASSIGN_PUBLIC_IP === "DISABLED" ? "DISABLED" : "ENABLED",
+              },
+            },
+            overrides: {
+              ...(process.env.AWS_ECS_TASK_ROLE_ARN ? { taskRoleArn: process.env.AWS_ECS_TASK_ROLE_ARN } : {}),
+              ...(process.env.AWS_ECS_EXECUTION_ROLE_ARN ? { executionRoleArn: process.env.AWS_ECS_EXECUTION_ROLE_ARN } : {}),
+              containerOverrides: [
+                {
+                  name: "qacc-worker",
+                  environment: [
+                    { name: "VIEWPORT_TYPE", value: viewportType },
+                    { name: "RUN_ID", value: runId },
+                    {
+                      name: "SUPABASE_URL",
+                      value: process.env.SUPABASE_URL || "",
+                    },
+                    {
+                      name: "SUPABASE_SERVICE_ROLE_KEY",
+                      value: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+                    },
+                    { name: "CLOUD_PROVIDER", value: "AWS" },
+                    ...(process.env.AWS_S3_BUCKET_NAME ? [{ name: "AWS_S3_BUCKET_NAME", value: process.env.AWS_S3_BUCKET_NAME }] : []),
+                    ...(process.env.SCRAPER_API_KEY ? [{ name: "SCRAPER_API_KEY", value: process.env.SCRAPER_API_KEY }] : []),
+                  ],
+                },
+              ],
+            },
+          })
+
+          const operation = await ecsClient.send(runTaskCommand)
+          return operation
         } else {
           const [operation] = await jobsClient.runJob({
             name: jobPath,
