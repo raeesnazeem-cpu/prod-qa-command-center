@@ -235,6 +235,10 @@ update-basecamp-id.ts
 get_bc_id.ts
 dump-html.js
 
+# Allow real application jobs that start with test or check
+!apps/worker/src/jobs/test*.ts
+!apps/worker/src/jobs/check*.ts
+
 # HTML Dumps and Test Assets
 *_dump.html
 *dump.html
