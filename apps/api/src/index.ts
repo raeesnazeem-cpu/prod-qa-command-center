@@ -33,8 +33,8 @@ import { statsRouter } from "./routes/stats"
 import { dashboardRouter } from "./routes/dashboard"
 import { signOffRouter } from "./routes/signOff"
 import { projectSettingsRouter } from "./routes/projectSettings"
-import { debugRouter } from "./routes/debug"
-import { testWebhookRouter } from "./routes/test-webhook"
+// import { debugRouter } from "./routes/debug"
+// import { testWebhookRouter } from "./routes/test-webhook"
 import { adminRouter } from "./routes/admin"
 import { findingsRouter } from "./routes/findings"
 import { visualDiffRouter } from "./routes/visualDiff"
@@ -131,7 +131,7 @@ app.use("/api/tasks", basecampIntegrationRouter)
 app.use("/api/basecamp", basecampIntegrationRouter)
 app.use("/api/storage", storageRouter)
 app.use("/api/recordings", recordingsRouter)
-app.use("/debug", debugRouter)
+// app.use("/debug", debugRouter)
 
 // 404 handler
 app.use((_req: Request, res: Response) => {
