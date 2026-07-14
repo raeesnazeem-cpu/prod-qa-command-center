@@ -56,6 +56,10 @@ debug_*.ts
 scratch.ts
 scratch_*.js
 fix_*.js
+
+# Allow real application jobs that start with test or check
+!apps/worker/src/jobs/test*.ts
+!apps/worker/src/jobs/check*.ts
 *_dump.html
 *dump.html
 google.html
