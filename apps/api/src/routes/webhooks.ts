@@ -199,6 +199,37 @@ webhookRouter.post('/ted', async (req: Request, res: Response) => {
       if (payload.data?.status === 'Ready to Release' || payload.data?.status === 'Ready for Release') {
         console.log('✅ Project is marked as Ready to Release! Triggering QACC pre-release workflow...');
         console.log('Project Data:', payload.data);
+
+        // --- POST COMMENT BACK TO TED ---
+        const taskId = payload.data?.id; 
+        const apiToken = process.env.TED_API_TOKEN; 
+        
+        if (taskId && apiToken) {
+          try {
+            console.log(`💬 Sending confirmation comment back to TED Task #${taskId}...`);
+            const tedResponse = await fetch(`https://ted.growth99.com/api/tasks/${taskId}/comments`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${apiToken}`,
+                'Accept': 'application/json',
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                text: "QACC successfully received the release request and the automated connection is active! 🚀"
+              })
+            });
+
+            if (tedResponse.ok) {
+              console.log('✅ Successfully posted confirmation comment back to TED!');
+            } else {
+              console.error('❌ Failed to post comment back to TED. HTTP Status:', tedResponse.status);
+            }
+          } catch (fetchErr) {
+            console.error('❌ Error calling TED API for comment:', fetchErr);
+          }
+        } else {
+           console.log('⚠️ Could not post comment to TED: Either taskId is missing from payload, or TED_API_TOKEN is missing in your .env file!');
+        }
       }
     }
 
