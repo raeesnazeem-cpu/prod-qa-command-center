@@ -3,7 +3,8 @@ import { useState } from "react"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { CreateProjectSchema, CreateProjectInput } from "@qacc/shared"
 import { useCreateProject } from "../hooks/useProjects"
-import { X, Loader2, Globe, Building, CheckCircle2, Zap } from "lucide-react"
+import { useBasecampProjects, useFetchBasecampOrderDetails } from "../hooks/useBasecamp"
+import { X, Loader2, Globe, Building, CheckCircle2, Zap, Server } from "lucide-react"
 
 interface CreateProjectModalProps {
   isOpen: boolean
@@ -16,11 +17,17 @@ export const CreateProjectModal = ({
 }: CreateProjectModalProps) => {
   const { mutate: createProject, isPending } = useCreateProject()
   const [showPreReleaseWarning, setShowPreReleaseWarning] = useState(false)
+  const [creationMode, setCreationMode] = useState<"manual" | "basecamp">("manual")
+  const [selectedBasecampProjectId, setSelectedBasecampProjectId] = useState<string>("")
+
+  const { data: basecampProjects, isLoading: isLoadingBasecampProjects, error: basecampError } = useBasecampProjects()
+  const { mutate: fetchOrderDetails, isPending: isFetchingDetails } = useFetchBasecampOrderDetails()
 
   const {
     register,
     handleSubmit,
     reset,
+    setValue,
     formState: { errors },
   } = useForm<CreateProjectInput>({
     resolver: zodResolver(CreateProjectSchema),
@@ -32,11 +39,12 @@ export const CreateProjectModal = ({
 
   const toPascalCase = (str: string) => {
     return str
-      .replace(/[^a-zA-Z0-9\s_]/g, "")
-      .split(/[\s_]+/)
-      .filter(Boolean)
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join("")
+      .split(" ")
+      .map((word) => {
+        if (!word) return word
+        return word.toLowerCase().replace(/[a-z]/, (char) => char.toUpperCase())
+      })
+      .join(" ")
   }
 
   const onSubmit = (data: CreateProjectInput) => {
@@ -73,7 +81,83 @@ export const CreateProjectModal = ({
         </div>
 
         <form onSubmit={handleSubmit(onSubmit)} className="p-6 space-y-6">
+          <div className="flex p-1 bg-slate-100 dark:bg-[#1d2a31] rounded-lg">
+            <button
+              type="button"
+              onClick={() => setCreationMode("manual")}
+              className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-all ${
+                creationMode === "manual"
+                  ? "bg-white dark:bg-[#131d22] text-slate-900 dark:text-white shadow-sm border border-slate-200 dark:border-slate-700/50"
+                  : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
+              }`}
+            >
+              Add Manually
+            </button>
+            <button
+              type="button"
+              onClick={() => setCreationMode("basecamp")}
+              className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-all ${
+                creationMode === "basecamp"
+                  ? "bg-white dark:bg-[#131d22] text-slate-900 dark:text-white shadow-sm border border-slate-200 dark:border-slate-700/50"
+                  : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
+              }`}
+            >
+              Select from Basecamp
+            </button>
+          </div>
+
           <div className="space-y-4">
+            {creationMode === "basecamp" && (
+              <div className="p-4 bg-slate-50 dark:bg-[#1d2a31] rounded-md border border-slate-200 dark:border-slate-700">
+                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
+                  Select Basecamp Project <span className="text-accent">*</span>
+                </label>
+                {basecampError ? (
+                  <div className="text-sm text-red-500 p-2 bg-red-50 dark:bg-red-900/20 rounded">
+                    {(basecampError as any).response?.data?.error || "Failed to load Basecamp projects."}
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <Server className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500" />
+                    <select
+                      value={selectedBasecampProjectId}
+                      onChange={(e) => {
+                        const pid = e.target.value
+                        setSelectedBasecampProjectId(pid)
+                        if (pid) {
+                          fetchOrderDetails(pid, {
+                            onSuccess: (data) => {
+                              setValue("name", data.projectName)
+                              if (data.clientName) {
+                                setValue("client_name", data.clientName)
+                              }
+                            }
+                          })
+                        }
+                      }}
+                      disabled={isLoadingBasecampProjects || isFetchingDetails}
+                      className="w-full bg-white dark:bg-[#131d22] border border-slate-200 dark:border-slate-700 rounded-md pl-10 pr-4 py-2.5 text-slate-900 dark:text-white focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/20 appearance-none disabled:opacity-50"
+                    >
+                      <option value="">Select a project...</option>
+                      {basecampProjects?.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                    {isLoadingBasecampProjects && (
+                      <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 animate-spin" />
+                    )}
+                  </div>
+                )}
+                {isFetchingDetails && (
+                  <p className="mt-2 text-xs text-slate-500 dark:text-slate-400 flex items-center">
+                    <Loader2 className="w-3 h-3 mr-1.5 animate-spin" /> Fetching project order details...
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Project Name */}
             <div>
               <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">

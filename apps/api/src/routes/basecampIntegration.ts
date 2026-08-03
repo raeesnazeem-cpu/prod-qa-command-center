@@ -2447,4 +2447,133 @@ router.post(
   },
 )
 
+/**
+ * GET /api/basecamp/projects
+ * Fetch all Basecamp projects for the default account using the current user's token.
+ */
+router.get("/projects", clerkAuth, async (req: Request, res: Response) => {
+  try {
+    const { data: currentUser } = await supabase
+      .from("users")
+      .select("basecamp_access_token")
+      .eq("id", req.auth?.userId)
+      .single()
+
+    const token = currentUser?.basecamp_access_token
+    if (!token) {
+      return res.status(403).json({ error: "Please connect your Basecamp account in settings to fetch projects." })
+    }
+
+    const accountId = "4023059" // Default Growth99 account ID used across QACC
+    
+    let allProjects: any[] = []
+    let page = 1
+
+    while (true) {
+      const url = `https://3.basecampapi.com/${accountId}/projects.json?page=${page}`
+      const response = await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "User-Agent": "QACC (raees.nazeem@growth99.com)",
+        },
+      })
+
+      const pageProjects = response.data || []
+      if (pageProjects.length === 0) break
+      allProjects = allProjects.concat(pageProjects)
+      if (pageProjects.length < 15) break
+      page++
+    }
+
+    const projects = allProjects.map((p: any) => ({
+      id: p.id,
+      name: p.name,
+    }))
+
+    return res.json(projects)
+  } catch (error: any) {
+    console.error("[BasecampProjects] Error fetching projects:", error.message)
+    return res.status(500).json({ error: "Failed to fetch projects from Basecamp" })
+  }
+})
+
+/**
+ * GET /api/basecamp/projects/:projectId/order-details
+ * Fetch the "Project Order Details" to-do and extract the client name.
+ */
+router.get("/projects/:projectId/order-details", clerkAuth, async (req: Request, res: Response) => {
+  const { projectId } = req.params
+
+  try {
+    const { data: currentUser } = await supabase
+      .from("users")
+      .select("basecamp_access_token")
+      .eq("id", req.auth?.userId)
+      .single()
+
+    const token = currentUser?.basecamp_access_token
+    if (!token) {
+      return res.status(403).json({ error: "Basecamp account not connected." })
+    }
+
+    const accountId = "4023059"
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      "User-Agent": "QACC (raees.nazeem@growth99.com)",
+    }
+
+    // 1. Get project dock
+    const projectUrl = `https://3.basecampapi.com/${accountId}/projects/${projectId}.json`
+    const projectResponse = await axios.get(projectUrl, { headers })
+    
+    const projectName = projectResponse.data.name
+    let clientName = ""
+
+    const dock = projectResponse.data.dock || []
+    const todosetTool = dock.find((tool: any) => tool.title === "To-dos" || tool.url?.includes("/todosets/"))
+
+    if (todosetTool) {
+      // 2. Fetch todolists
+      const todosetResponse = await axios.get(todosetTool.url, { headers })
+      const listsResponse = await axios.get(todosetResponse.data.todolists_url, { headers })
+      
+      let foundTodo: any = null
+
+      // 3. Search lists for the specific to-do
+      for (const list of listsResponse.data) {
+        let page = 1
+        while (true) {
+          const todosResponse = await axios.get(`${list.todos_url}?page=${page}`, { headers })
+          const todos = todosResponse.data || []
+          if (todos.length === 0) break
+
+          foundTodo = todos.find((t: any) => t.content?.toLowerCase().includes("project order details"))
+          if (foundTodo) break
+          if (todos.length < 15) break
+          page++
+        }
+        if (foundTodo) break
+      }
+
+      if (foundTodo && foundTodo.description) {
+        // Look for "Customer Name" or "Contact Name"
+        const descHtml = foundTodo.description
+        const match = descHtml.match(/(?:Customer Name|Contact Name)[^a-zA-Z0-9]*([a-zA-Z0-9\s.,-]+)/i)
+        if (match && match[1]) {
+          clientName = match[1].replace(/<[^>]*>?/gm, '').trim()
+        }
+      }
+    }
+
+    return res.json({
+      projectName,
+      clientName,
+      basecampProjectId: projectId
+    })
+  } catch (error: any) {
+    console.error("[BasecampOrderDetails] Error:", error.message)
+    return res.status(500).json({ error: "Failed to fetch order details from Basecamp" })
+  }
+})
+
 export const basecampIntegrationRouter: Router = router
