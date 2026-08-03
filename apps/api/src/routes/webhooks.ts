@@ -174,15 +174,23 @@ webhookRouter.post('/ted', async (req: Request, res: Response) => {
 
     const payload = JSON.parse(payloadText);
 
-    // 2. We extract the secret password that TED sent inside the payload's headers block.
-    const secret = payload?.headers?.['X-TED-Webhook-Secret'];
+    // 2. We extract the secret password. TED might send it in the real HTTP headers, or inside the JSON body.
+    // We check both places just to be absolutely sure!
+    const secretFromHeader = req.headers['x-ted-webhook-secret'] || req.headers['x-webhook-secret'];
+    const secretFromBody = payload?.headers?.['X-TED-Webhook-Secret'];
+    const secret = secretFromHeader || secretFromBody;
     
     // 3. We define the exact password we expect
     const expectedSecret = process.env.TED_WEBHOOK_SECRET;
 
     // 4. We check if the password provided matches our expected password.
+    if (!expectedSecret) {
+      console.log('❌ SERVER ERROR: TED_WEBHOOK_SECRET is missing from your .env file!');
+      return res.status(500).json({ error: 'Server misconfigured' });
+    }
+
     if (secret !== expectedSecret) {
-      console.log('❌ Unauthorized TED webhook attempt: Invalid secret');
+      console.log(`❌ Unauthorized TED webhook attempt. Received secret: ${secret} | Expected: ${expectedSecret}`);
       return res.status(401).json({ error: 'Unauthorized: Invalid secret' });
     }
 
