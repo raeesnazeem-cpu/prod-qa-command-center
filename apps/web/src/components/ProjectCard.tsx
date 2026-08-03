@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useNavigate, Link } from "react-router-dom"
-import { Project, addProjectMember } from "../api/projects.api"
+import { Project, addProjectMember, deleteProject } from "../api/projects.api"
 import {
   Globe,
   Package,
@@ -13,11 +13,13 @@ import {
   Loader2,
   Check,
   Edit,
+  Trash2,
 } from "lucide-react"
 import { useAuthAxios } from "../lib/useAuthAxios"
 import { useRole } from "../hooks/useRole"
 import toast from "react-hot-toast"
 import { EditProjectModal } from "./EditProjectModal"
+import { useQueryClient } from "@tanstack/react-query"
 
 interface ProjectCardProps {
   project: Project
@@ -34,6 +36,9 @@ export const ProjectCard = ({ project }: ProjectCardProps) => {
   )
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isEditModalOpen, setIsEditModalOpen] = useState(false)
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const queryClient = useQueryClient()
 
   const canManage = ["super_admin", "admin", "sub_admin"].includes(
     userRole || "",
@@ -63,6 +68,22 @@ export const ProjectCard = ({ project }: ProjectCardProps) => {
       toast.error(error.response?.data?.error || "Failed to add member")
     } finally {
       setIsSubmitting(false)
+    }
+  }
+
+  const hasData = project.last_run_date || project.open_issues_count > 0 || project.ongoing_run
+
+  const handleDelete = async () => {
+    setIsDeleting(true)
+    try {
+      await deleteProject(axios, project.id)
+      toast.success("Project deleted successfully")
+      queryClient.invalidateQueries({ queryKey: ["projects"] })
+    } catch (error: any) {
+      toast.error(error.response?.data?.error || "Failed to delete project")
+    } finally {
+      setIsDeleting(false)
+      setIsDeleteDialogOpen(false)
     }
   }
 
@@ -155,6 +176,18 @@ export const ProjectCard = ({ project }: ProjectCardProps) => {
                 title="Edit Project"
               >
                 <Edit className="w-4 h-4" />
+              </button>
+            )}
+            {canEdit && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setIsDeleteDialogOpen(true)
+                }}
+                className="p-1.5 rounded-md transition-colors text-slate-400 dark:text-slate-500 hover:bg-slate-100 dark:hover:bg-[#1d2a31] hover:text-red-500 dark:hover:text-red-400"
+                title="Delete Project"
+              >
+                <Trash2 className="w-4 h-4" />
               </button>
             )}
 
@@ -298,6 +331,62 @@ export const ProjectCard = ({ project }: ProjectCardProps) => {
         isOpen={isEditModalOpen}
         onClose={() => setIsEditModalOpen(false)}
       />
+
+      {isDeleteDialogOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm"
+          onClick={(e) => {
+            e.stopPropagation()
+            if (!isDeleting) setIsDeleteDialogOpen(false)
+          }}
+        >
+          <div
+            className="bg-white dark:bg-[#131d22] rounded-xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 border border-slate-200 dark:border-slate-800"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2 bg-red-100 dark:bg-red-900/20 text-red-600 dark:text-red-500 rounded-lg">
+                  <AlertCircle className="w-6 h-6" />
+                </div>
+                <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">
+                  Delete Project
+                </h3>
+              </div>
+              <p className="text-sm text-slate-600 dark:text-slate-400 mb-6">
+                {hasData
+                  ? "Warning: all the project data including QA runs, comments, recordings, and all data will be permanently erased and cannot be retained."
+                  : "Are you sure you want to delete this project?"}
+              </p>
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setIsDeleteDialogOpen(false)
+                  }}
+                  disabled={isDeleting}
+                  className="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-md transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleDelete()
+                  }}
+                  disabled={isDeleting}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-md transition-colors flex items-center gap-2 disabled:opacity-50"
+                >
+                  {isDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
