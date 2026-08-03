@@ -150,44 +150,56 @@ webhookRouter.post('/clerk', async (req: Request, res: Response) => {
 // --- TED Webhook Receiver ---
 // This endpoint will be available at POST /webhooks/ted
 webhookRouter.post('/ted', async (req: Request, res: Response) => {
+  console.log('\n--- INCOMING TED WEBHOOK ---');
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+  
   try {
-    // 1. The body comes in as raw bytes (Buffer) because of how /webhooks is configured in index.ts.
-    // We convert those bytes into text, and then parse it into a standard JSON object.
-    const payload = JSON.parse(req.body.toString());
+    // 1. Handle the body safely depending on how Express parsed it
+    let payloadText = '';
+    
+    if (Buffer.isBuffer(req.body)) {
+      payloadText = req.body.toString();
+    } else if (typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+      payloadText = JSON.stringify(req.body);
+    } else {
+      payloadText = String(req.body || '');
+    }
+
+    if (!payloadText || payloadText.trim() === '' || payloadText === '{}') {
+      console.error('❌ Error: Received empty body from TED (payloadText is empty)');
+      return res.status(400).json({ error: 'Failed: No body received.' });
+    }
+
+    console.log('Raw Payload Received:', payloadText.substring(0, 300) + '...');
+
+    const payload = JSON.parse(payloadText);
 
     // 2. We extract the secret password that TED sent inside the payload's headers block.
     const secret = payload?.headers?.['X-TED-Webhook-Secret'];
     
-    // 3. We define the exact password we expect (we check the environment variables first, 
-    // and fallback to the hardcoded sample password you provided).
-    const expectedSecret = process.env.TED_WEBHOOK_SECRET || 'ted_tok_3ba0f5sdfsdfwefwevcefwf';
+    // 3. We define the exact password we expect
+    const expectedSecret = process.env.TED_WEBHOOK_SECRET;
 
     // 4. We check if the password provided matches our expected password.
-    // If it doesn't match, we immediately reject the request as Unauthorized (status 401).
     if (secret !== expectedSecret) {
-      logger.warn('Unauthorized TED webhook attempt: Invalid secret');
+      console.log('❌ Unauthorized TED webhook attempt: Invalid secret');
       return res.status(401).json({ error: 'Unauthorized: Invalid secret' });
     }
 
     // 5. If the password is correct, we check what kind of event happened.
     if (payload.event === 'TASK_UPDATED' || payload.event === 'TASK_STATUS_CHANGED') {
-      // Check if the project/task was just marked as ready to release
-      // (Adjust the exact status text if TED uses a slightly different wording like "Ready for Release")
       if (payload.data?.status === 'Ready to Release' || payload.data?.status === 'Ready for Release') {
-        console.log('Project is marked as Ready to Release! Triggering QACC pre-release workflow...');
+        console.log('✅ Project is marked as Ready to Release! Triggering QACC pre-release workflow...');
         console.log('Project Data:', payload.data);
-        
-        // Note: This is exactly where we will write the code to trigger QACC's pre-release.
-        // e.g., await triggerPreRelease(payload.data.id);
       }
     }
 
-    // 6. We send a successful 200 OK response back to TED so they know we got the message.
+    // 6. We send a successful 200 OK response back to TED
+    console.log('✅ Webhook successfully processed');
     return res.status(200).json({ success: true, message: 'Webhook securely verified' });
     
   } catch (error) {
-    // 7. If the JSON was completely broken, we catch the error so the server doesn't crash.
-    logger.error(error, 'Error processing TED webhook');
+    console.error('❌ Error parsing TED webhook payload:', error);
     return res.status(400).json({ error: 'Invalid payload format' });
   }
 });
