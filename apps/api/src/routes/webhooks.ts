@@ -233,9 +233,20 @@ webhookRouter.post('/ted', async (req: Request, res: Response) => {
       }
     }
 
-    // 6. We send a successful 200 OK response back to TED
+    // 6. We send a successful 200 OK response back to TED in their exact expected format
     console.log('✅ Webhook successfully processed');
-    return res.status(200).json({ success: true, message: 'Webhook securely verified' });
+    
+    return res.status(200).json({
+      status: 200,
+      statusText: "OK",
+      message: "Webhook payload received and processed successfully",
+      timestamp: new Date().toISOString(),
+      data: {
+        acknowledged: true,
+        workflowId: "qacc-ted-pre-release",
+        executionId: payload.data?.id || "unknown"
+      }
+    });
     
   } catch (error) {
     console.error('❌ Error parsing TED webhook payload:', error);
