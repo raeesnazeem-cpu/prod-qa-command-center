@@ -261,3 +261,6 @@ cloudbuild.recording.yaml
 **/.graphify_*.json
 graphify-out/
 **/graphify-out/
+
+# Supabase Blueprint
+supabase-blueprint/

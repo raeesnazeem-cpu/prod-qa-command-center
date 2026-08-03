@@ -118,15 +118,8 @@ export const DashboardPage = () => {
                 tasks assigned to you across projects.
               </p>
             </div>
-            <Link
-              to="/tasks"
-              className="btn-unified-primary flex items-center gap-2 group"
-            >
-              <CheckSquare
-                size={18}
-                className="group-hover:scale-110 transition-transform"
-              />
-              View All Tasks
+            <Link to="/tasks" className="btn-unified flex items-center gap-2">
+              View all tasks
             </Link>
           </header>
 
@@ -870,32 +863,35 @@ export const DashboardPage = () => {
                 Critical Assignments
               </h3>
               <div className="bg-slate-50 dark:bg-[#1D2A31] border border-slate-300 dark:border-slate-800 rounded-lg shadow-sm divide-y divide-slate-50 dark:divide-slate-800 overflow-hidden">
-                {data?.my_tasks?.filter((t) => t.status === "open").length === 0 ? (
+                {data?.my_tasks?.filter((t) => t.status === "open").length ===
+                0 ? (
                   <div className="p-12 text-center">
                     <p className="text-xs text-slate-400 font-medium italic">
                       No urgent tasks for you
                     </p>
                   </div>
                 ) : (
-                  data?.my_tasks?.filter((t) => t.status === "open").map((task) => (
-                    <Link
-                      key={task.id}
-                      to={`/projects/${task.project_id}?tab=tasks&taskId=${task.id}`}
-                      className="p-6 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors block group"
-                    >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="space-y-1">
-                          <p className="text-sm font-bold text-slate-900 dark:text-slate-200 group-hover:text-accent transition-colors leading-tight line-clamp-2">
-                            {task.title}
-                          </p>
-                          <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">
-                            {(task as any).projects?.name}
-                          </p>
+                  data?.my_tasks
+                    ?.filter((t) => t.status === "open")
+                    .map((task) => (
+                      <Link
+                        key={task.id}
+                        to={`/projects/${task.project_id}?tab=tasks&taskId=${task.id}`}
+                        className="p-6 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors block group"
+                      >
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="space-y-1">
+                            <p className="text-sm font-bold text-slate-900 dark:text-slate-200 group-hover:text-accent transition-colors leading-tight line-clamp-2">
+                              {task.title}
+                            </p>
+                            <p className="text-[9px] text-slate-400 font-bold uppercase tracking-widest">
+                              {(task as any).projects?.name}
+                            </p>
+                          </div>
+                          <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-accent transform group-hover:translate-x-1 transition-all shrink-0" />
                         </div>
-                        <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-accent transform group-hover:translate-x-1 transition-all shrink-0" />
-                      </div>
-                    </Link>
-                  ))
+                      </Link>
+                    ))
                 )}
               </div>
             </div>
