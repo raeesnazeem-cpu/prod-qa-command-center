@@ -2465,27 +2465,17 @@ router.get("/projects", clerkAuth, async (req: Request, res: Response) => {
     }
 
     const accountId = "4023059" // Default Growth99 account ID used across QACC
-    
-    let allProjects: any[] = []
-    let page = 1
+    const page = req.query.page ? parseInt(req.query.page as string, 10) : 1
+    const url = `https://3.basecampapi.com/${accountId}/projects.json?page=${page}`
 
-    while (true) {
-      const url = `https://3.basecampapi.com/${accountId}/projects.json?page=${page}`
-      const response = await axios.get(url, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "User-Agent": "QACC (raees.nazeem@growth99.com)",
-        },
-      })
+    const response = await axios.get(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "User-Agent": "QACC (raees.nazeem@growth99.com)",
+      },
+    })
 
-      const pageProjects = response.data || []
-      if (pageProjects.length === 0) break
-      allProjects = allProjects.concat(pageProjects)
-      if (pageProjects.length < 15) break
-      page++
-    }
-
-    const projects = allProjects.map((p: any) => ({
+    const projects = (response.data || []).map((p: any) => ({
       id: p.id,
       name: p.name,
     }))

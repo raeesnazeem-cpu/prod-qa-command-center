@@ -1,4 +1,4 @@
-import { useQuery, useMutation } from "@tanstack/react-query"
+import { useInfiniteQuery, useMutation } from "@tanstack/react-query"
 import { useAuthAxios } from "../lib/useAuthAxios"
 
 export interface BasecampProject {
@@ -15,14 +15,18 @@ export interface BasecampOrderDetails {
 export function useBasecampProjects() {
   const api = useAuthAxios()
 
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: ["basecamp-projects"],
-    queryFn: async () => {
-      const { data } = await api.get<BasecampProject[]>("/api/basecamp/projects")
+    queryFn: async ({ pageParam = 1 }) => {
+      const { data } = await api.get<BasecampProject[]>(`/api/basecamp/projects?page=${pageParam}`)
       return data
     },
+    getNextPageParam: (lastPage, allPages) => {
+      return lastPage.length > 0 ? allPages.length + 1 : undefined
+    },
+    initialPageParam: 1,
     staleTime: 5 * 60 * 1000, // 5 minutes
-    retry: false, // Do not retry on 403
+    retry: false,
   })
 }
 

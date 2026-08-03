@@ -1,5 +1,5 @@
 import { useForm } from "react-hook-form"
-import { useState } from "react"
+import React, { useState, useEffect } from "react"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { CreateProjectSchema, CreateProjectInput } from "@qacc/shared"
 import { useCreateProject } from "../hooks/useProjects"
@@ -20,8 +20,10 @@ export const CreateProjectModal = ({
   const [creationMode, setCreationMode] = useState<"manual" | "basecamp">("manual")
   const [selectedBasecampProjectId, setSelectedBasecampProjectId] = useState<string>("")
 
-  const { data: basecampProjects, isLoading: isLoadingBasecampProjects, error: basecampError } = useBasecampProjects()
+  const { data: basecampProjects, isLoading: isLoadingBasecampProjects, error: basecampError, fetchNextPage, hasNextPage, isFetchingNextPage } = useBasecampProjects()
   const { mutate: fetchOrderDetails, isPending: isFetchingDetails } = useFetchBasecampOrderDetails()
+
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false)
 
   const {
     register,
@@ -64,30 +66,29 @@ export const CreateProjectModal = ({
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-900/40 dark:bg-slate-950/80 backdrop-blur-sm transition-opacity duration-200">
-      <div className="absolute inset-0 bg-transparent" onClick={onClose} />
-
-      <div className="relative w-full max-w-lg bg-slate-50 dark:bg-[#131d22] border border-slate-200 dark:border-[#1d2a31] rounded-md shadow-sm overflow-hidden transition-all duration-200">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-[#1d2a31] bg-slate-50/50 dark:bg-[#1d2a31]/50">
-          <h2 className="text-xl font-bold text-slate-900 dark:text-white">
-            Create New Project
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+      <div className="bg-white dark:bg-[#1d2a31] w-full max-w-md rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between p-6 border-b border-slate-100 dark:border-slate-800">
+          <h2 className="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+            <Zap className="w-5 h-5 text-accent" />
+            New Project
           </h2>
           <button
             onClick={onClose}
-            className="p-1 rounded-md text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#1d2a31] transition-all"
+            className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
           >
-            <X className="w-6 h-6" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit(onSubmit)} className="p-6 space-y-6">
-          <div className="flex p-1 bg-slate-100 dark:bg-[#1d2a31] rounded-lg">
+        <form onSubmit={handleSubmit(onSubmit)} className="p-6 space-y-6 overflow-y-auto">
+          <div className="flex p-1 bg-slate-100 dark:bg-[#131d22] rounded-lg">
             <button
               type="button"
               onClick={() => setCreationMode("manual")}
               className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-all ${
                 creationMode === "manual"
-                  ? "bg-white dark:bg-[#131d22] text-slate-900 dark:text-white shadow-sm border border-slate-200 dark:border-slate-700/50"
+                  ? "bg-white dark:bg-[#1d2a31] text-slate-900 dark:text-white shadow-sm border border-slate-200 dark:border-slate-700/50"
                   : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
               }`}
             >
@@ -98,7 +99,7 @@ export const CreateProjectModal = ({
               onClick={() => setCreationMode("basecamp")}
               className={`flex-1 py-1.5 text-sm font-medium rounded-md transition-all ${
                 creationMode === "basecamp"
-                  ? "bg-white dark:bg-[#131d22] text-slate-900 dark:text-white shadow-sm border border-slate-200 dark:border-slate-700/50"
+                  ? "bg-white dark:bg-[#1d2a31] text-slate-900 dark:text-white shadow-sm border border-slate-200 dark:border-slate-700/50"
                   : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300"
               }`}
             >
@@ -108,7 +109,7 @@ export const CreateProjectModal = ({
 
           <div className="space-y-4">
             {creationMode === "basecamp" && (
-              <div className="p-4 bg-slate-50 dark:bg-[#1d2a31] rounded-md border border-slate-200 dark:border-slate-700">
+              <div className="p-4 bg-slate-50 dark:bg-[#131d22] rounded-md border border-slate-200 dark:border-slate-700">
                 <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
                   Select Basecamp Project <span className="text-accent">*</span>
                 </label>
@@ -119,35 +120,70 @@ export const CreateProjectModal = ({
                 ) : (
                   <div className="relative">
                     <Server className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500" />
-                    <select
-                      value={selectedBasecampProjectId}
-                      onChange={(e) => {
-                        const pid = e.target.value
-                        setSelectedBasecampProjectId(pid)
-                        if (pid) {
-                          fetchOrderDetails(pid, {
-                            onSuccess: (data) => {
-                              setValue("name", data.projectName)
-                              if (data.clientName) {
-                                setValue("client_name", data.clientName)
-                              }
-                            }
-                          })
-                        }
-                      }}
-                      disabled={isLoadingBasecampProjects || isFetchingDetails}
-                      className="w-full bg-white dark:bg-[#131d22] border border-slate-200 dark:border-slate-700 rounded-md pl-10 pr-4 py-2.5 text-slate-900 dark:text-white focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/20 appearance-none disabled:opacity-50"
+                    <div 
+                      className="w-full bg-white dark:bg-[#1d2a31] border border-slate-200 dark:border-slate-700 rounded-md pl-10 pr-10 py-2.5 text-slate-900 dark:text-white cursor-pointer"
+                      onClick={() => !isLoadingBasecampProjects && !isFetchingDetails && setIsDropdownOpen(!isDropdownOpen)}
                     >
-                      <option value="">Select a project...</option>
-                      {basecampProjects?.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
-                    {isLoadingBasecampProjects && (
-                      <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 animate-spin" />
+                      {selectedBasecampProjectId 
+                        ? basecampProjects?.pages.flatMap(p => p).find(p => p.id.toString() === selectedBasecampProjectId)?.name 
+                        : "Select a project..."}
+                    </div>
+                    
+                    {isDropdownOpen && (
+                      <ul 
+                        className="absolute z-10 w-full mt-1 bg-white dark:bg-[#1d2a31] border border-slate-200 dark:border-slate-700 rounded-md max-h-60 overflow-auto shadow-lg"
+                        onScroll={(e) => {
+                          const target = e.currentTarget;
+                          if (target.scrollHeight - target.scrollTop <= target.clientHeight + 10) {
+                            if (hasNextPage && !isFetchingNextPage) fetchNextPage();
+                          }
+                        }}
+                      >
+                        {basecampProjects?.pages.flatMap(p => p).map((p) => (
+                          <li 
+                            key={p.id} 
+                            className="px-4 py-2 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer text-sm text-slate-900 dark:text-white"
+                            onClick={() => {
+                              const pid = p.id.toString()
+                              setSelectedBasecampProjectId(pid)
+                              setIsDropdownOpen(false)
+                              if (pid) {
+                                fetchOrderDetails(pid, {
+                                  onSuccess: (data) => {
+                                    setValue("name", data.projectName)
+                                    if (data.clientName) {
+                                      setValue("client_name", data.clientName)
+                                    }
+                                    const urlMatch = data.projectName.match(/([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)$/)
+                                    if (urlMatch) {
+                                      const domain = urlMatch[1]
+                                      const domainParts = domain.split('.')
+                                      if (domainParts.length >= 2) {
+                                        const tld = domainParts.pop()
+                                        const namePart = domainParts.join('.')
+                                        setValue("site_url", `https://${namePart}.gogroth.${tld}`)
+                                      }
+                                    }
+                                  }
+                                })
+                              }
+                            }}
+                          >
+                            {p.name}
+                          </li>
+                        ))}
+                        {isFetchingNextPage && (
+                          <li className="px-4 py-3 text-center text-xs text-slate-500">
+                            Loading more...
+                          </li>
+                        )}
+                      </ul>
                     )}
+                    <Loader2 
+                      className={`absolute right-8 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 animate-spin transition-opacity duration-300 ${
+                        (isLoadingBasecampProjects || isFetchingNextPage) ? "opacity-100" : "opacity-0"
+                      }`} 
+                    />
                   </div>
                 )}
                 {isFetchingDetails && (
