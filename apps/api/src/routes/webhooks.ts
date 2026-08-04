@@ -200,6 +200,156 @@ webhookRouter.post('/ted', async (req: Request, res: Response) => {
         console.log('✅ Project is marked as Ready to Release! Triggering QACC pre-release workflow...');
         console.log('Project Data:', payload.data);
 
+        // --- MATCH PROJECT & START QA RUN ---
+        const clientName = payload.data?.clientName;
+        
+        if (clientName) {
+          console.log(`🔍 Looking up QACC project matching name: "${clientName}"`);
+          
+          // 1. Look for a project in QACC where the name exactly matches the TED clientName
+          let { data: project } = await supabase
+            .from("projects")
+            .select("*")
+            .ilike("name", clientName) // Case-insensitive match
+            .single();
+
+          if (!project) {
+            console.log(`⚠️ Could not find a QACC project named "${clientName}". Creating a new one automatically from TED details...`);
+            
+            // Since this is a company tool, the org_id is always QACC.
+            // We just grab the first valid org_id from the database to attach the project to.
+            const { data: orgData } = await supabase
+              .from("users")
+              .select("org_id")
+              .not("org_id", "is", null)
+              .limit(1)
+              .single();
+
+            if (!orgData?.org_id) {
+              console.log(`❌ Cannot auto-create project: Could not determine a default org_id in QACC.`);
+            } else {
+              const { data: newProject, error: createError } = await supabase
+                .from("projects")
+                .insert({
+                  name: clientName,
+                  client_name: clientName,
+                  org_id: orgData.org_id,
+                  status: "active"
+                })
+                .select()
+                .single();
+
+              if (createError) {
+                console.error("❌ Failed to auto-create project in database:", createError);
+              } else {
+                project = newProject;
+                console.log(`✅ Successfully auto-created new QACC project: ${project.name} (ID: ${project.id})`);
+              }
+            }
+          }
+
+          if (project) {
+            console.log(`✅ Proceeding with QACC project: ${project.name} (ID: ${project.id})`);
+            
+            // 2. Try to find the TED assignee in the users table, or auto-create a ghost user so their name appears on the QA Run
+            let runCreatorId = null;
+            const assigneeName = payload.data?.assignee || "TED System";
+
+            const { data: existingUser } = await supabase
+              .from("users")
+              .select("id")
+              .ilike("full_name", assigneeName)
+              .eq("org_id", project.org_id)
+              .limit(1)
+              .single();
+
+            if (existingUser?.id) {
+              runCreatorId = existingUser.id;
+            } else {
+              console.log(`👤 Assignee "${assigneeName}" not found in QACC. Auto-creating a ghost user...`);
+              const safeEmail = `${assigneeName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'ted'}-${Date.now()}@ted.internal`;
+              const { data: newUser, error: createError } = await supabase
+                .from("users")
+                .insert({
+                  id: randomUUID(), // Required by the users table schema
+                  clerk_user_id: `ghost_${Date.now()}`, // Required to bypass NOT NULL constraints
+                  clerk_id: `ghost_${Date.now()}`,
+                  full_name: assigneeName,
+                  email: safeEmail,
+                  org_id: project.org_id,
+                  role: "qa_engineer"
+                })
+                .select("id")
+                .single();
+              
+              if (createError) {
+                console.error("❌ Ghost user creation failed in Supabase:", createError);
+              } else if (newUser?.id) {
+                runCreatorId = newUser.id;
+              }
+            }
+
+            // Fallback to admin if ghost user creation failed for any reason
+            if (!runCreatorId) {
+              const { data: adminUser } = await supabase
+                .from("users")
+                .select("id")
+                .eq("org_id", project.org_id)
+                .limit(1)
+                .single();
+              runCreatorId = adminUser?.id || null;
+            }
+
+            // 3. Create the new QA Run in the database
+            const { data: run, error: runError } = await supabase
+              .from("qa_runs")
+              .insert({
+                project_id: project.id,
+                run_type: "pre_release",
+                site_url: project.site_url || "https://example.com", // Run needs a URL to crawl
+                enabled_checks: [
+                  "project_plan",
+                  "hero_media", 
+                  "dead_links", 
+                  "learn_more_buttons", 
+                  "paid_media", 
+                  "privacy_policy", 
+                  "footer_logo", 
+                  "single_script", 
+                  "url_tab_compare", 
+                  "top_bar_sticky",
+                  "favicon",
+                  "contact_form",
+                  "chatbot_consultation",
+                  "logo_chatbot",
+                  "callnow_links",
+                  "verify_plugin_updates",
+                  "social_share_heading"
+                ],
+                device_matrix: ["desktop", "mobile"],
+                status: "running",
+                created_by: runCreatorId, // Assigns to the actual person from TED, or the Ghost User
+                ted_task_id: payload.data?.id ? String(payload.data.id) : null,
+              })
+              .select()
+              .single();
+
+            if (runError) {
+              console.error("❌ Failed to create QA Run in database:", runError);
+            } else if (run) {
+              console.log(`🚀 Successfully created QA Run ${run.id}! Adding to worker queue...`);
+              try {
+                // 4. Add the run to BullMQ so the worker starts scanning the site immediately
+                const { addRunJob } = require('../lib/queue');
+                await addRunJob(run.id);
+                console.log(`✅ Automated QA Run for ${project.name} is now officially STARTING in the background!`);
+              } catch (queueErr) {
+                console.error("❌ Failed to add QA run to worker queue:", queueErr);
+              }
+            }
+          }
+        }
+
         // --- POST COMMENT BACK TO TED ---
         const taskId = payload.data?.id; 
         const apiToken = process.env.TED_API_TOKEN; 

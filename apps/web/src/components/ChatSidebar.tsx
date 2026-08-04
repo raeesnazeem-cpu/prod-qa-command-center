@@ -6,7 +6,6 @@ import { ChatInput } from "./ChatInput"
 import { QuickPromptChips } from "./QuickPromptChips"
 import { useChat } from "../hooks/useChat"
 import { useChatContext } from "../contexts/ChatContext"
-import { AdminRedisWidget } from "./AdminRedisWidget"
 
 export const ChatSidebar: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false)
@@ -37,10 +36,7 @@ export const ChatSidebar: React.FC = () => {
 
   return (
     <div className="absolute bottom-0 right-0 left-0 z-50 flex flex-col pointer-events-none">
-      {/* Redis Widget Moved Here */}
-      <div className="self-end mr-6 mb-4 pointer-events-auto">
-        <AdminRedisWidget />
-      </div>
+
 
       {/* Expanded Panel */}
       <div
