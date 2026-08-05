@@ -522,11 +522,54 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
           }
         }
 
-        // --- POST COMMENT BACK TO TED ---
-        // Talk back to the target QA task when TED provided one, otherwise the
-        // trigger task itself.
+        // Talk back to the target QA task (e.g. release.qa_pre / 9081) when TED
+        // provided one, otherwise the trigger task itself.
         const taskId = actionableTaskId
         const apiToken = process.env.TED_API_TOKEN
+
+        // --- MARK THE TARGET QA TASK "In Progress" ---
+        // Only when the scan actually started (createdRunId set). QACC never
+        // marks it Complete — a human closes it out after the remaining manual
+        // work, so it deliberately stays "In Progress" once the scan finishes.
+        if (createdRunId && taskId && apiToken) {
+          try {
+            console.log(
+              `🔄 Marking TED Task #${taskId} as "In Progress" (QACC scan started)...`,
+            )
+            const statusRes = await fetch(
+              `https://ted.growth99.com/api/tasks/${taskId}/status`,
+              {
+                method: "PUT",
+                headers: {
+                  Authorization: `Bearer ${apiToken}`,
+                  Accept: "application/json",
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ status: "In Progress" }),
+              },
+            )
+            // Same caveat as comments: TED's SSR returns app-shell HTML with a
+            // 200 when the task id can't be resolved. Only a JSON body means the
+            // status update actually reached the API.
+            const ct = statusRes.headers.get("content-type") || ""
+            if (statusRes.ok && ct.includes("application/json")) {
+              console.log(`✅ TED Task #${taskId} marked "In Progress".`)
+            } else {
+              const preview = (await statusRes.text().catch(() => "")).slice(
+                0,
+                200,
+              )
+              console.error(
+                `❌ Failed to set status on TED task #${taskId}: response was not JSON (HTTP ${statusRes.status}, content-type "${ct}"). The task id likely does not resolve on TED. Body preview: ${preview}`,
+              )
+            }
+          } catch (statusErr) {
+            console.error(
+              "❌ Error calling TED API to set task status:",
+              statusErr,
+            )
+          }
+        }
 
         if (taskId && apiToken) {
           try {
