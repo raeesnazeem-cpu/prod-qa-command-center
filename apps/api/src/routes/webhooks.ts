@@ -237,6 +237,22 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Unauthorized: Invalid secret" })
     }
 
+    // Health-check pings (TED's "Test Webhook" / preview test) carry no task —
+    // just a generic `data` blob and event PING_TEST. Acknowledge cleanly and
+    // skip task logging / auditing so they don't clutter the history.
+    if (eventType === "PING_TEST") {
+      console.log(
+        "🏓 Received TED PING_TEST — connection is healthy. Responding pong.",
+      )
+      return res.status(200).json({
+        status: 200,
+        statusText: "OK",
+        message: "pong: QACC webhook endpoint is alive",
+        timestamp: new Date().toISOString(),
+        data: { acknowledged: true, event: "PING_TEST" },
+      })
+    }
+
     console.log(
       `📥 Received TED Event: ${eventType} | Task: ${task.title || "?"} (#${task.id}) | TemplateKey: ${task.templateKey || "?"} | Status: ${task.previousStatus || "?"} -> ${task.status} | Target: #${targetTask?.id || "none"}`,
     )
