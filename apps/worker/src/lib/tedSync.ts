@@ -13,7 +13,34 @@ export async function postFinalReportToTED(runId: string, tedTaskId: string) {
   try {
     const apiToken = process.env.TED_API_TOKEN
     if (!apiToken) {
-      logger.warn("TED_API_TOKEN is not configured in worker environment. Skipping TED report.")
+      logger.warn(
+        "TED_API_TOKEN is not configured in worker environment. Skipping TED report.",
+      )
+      return
+    }
+
+    // Idempotency claim: a run can be finalized by several completion paths
+    // (runChecksJob / crawlPageJob, RPC + fallback). Atomically stamp
+    // ted_report_posted_at so exactly ONE caller proceeds to post the report.
+    const { data: claim, error: claimErr } = await supabase
+      .from("qa_runs")
+      .update({ ted_report_posted_at: new Date().toISOString() })
+      .eq("id", runId)
+      .is("ted_report_posted_at", null)
+      .select("id")
+
+    if (claimErr) {
+      logger.error(
+        { runId, error: claimErr.message },
+        "Failed to claim TED report; skipping to avoid duplicates",
+      )
+      return
+    }
+    if (!claim || claim.length === 0) {
+      logger.info(
+        { runId },
+        "TED final report already posted by another completion path; skipping.",
+      )
       return
     }
 
@@ -24,7 +51,10 @@ export async function postFinalReportToTED(runId: string, tedTaskId: string) {
       .eq("run_id", runId)
 
     if (findingsError) {
-      logger.error({ error: findingsError.message }, "Error fetching findings for TED sync")
+      logger.error(
+        { error: findingsError.message },
+        "Error fetching findings for TED sync",
+      )
       return
     }
 
@@ -35,52 +65,60 @@ export async function postFinalReportToTED(runId: string, tedTaskId: string) {
       .eq("id", runId)
       .single()
 
-    const qaccDomain = process.env.PUBLIC_SITE_URL || "https://qacc.growth99.com"
-    const runLink = `${qaccDomain}/projects/${run?.project_id || 'unknown'}/runs/${runId}`
+    const qaccDomain =
+      process.env.PUBLIC_SITE_URL || "https://qacc.growth99.com"
+    const runLink = `${qaccDomain}/projects/${run?.project_id || "unknown"}/runs/${runId}`
 
     let reportText = `<strong>QACC Automated QA Run Completed</strong><br><br>`
 
     if (!findings || findings.length === 0) {
-      logger.info({ runId }, "No findings for run, reporting perfect score to TED.")
+      logger.info(
+        { runId },
+        "No findings for run, reporting perfect score to TED.",
+      )
       reportText += `🎉 All checks passed successfully! 0 issues found.<br><br>QACC Link: <a href="${runLink}">${runLink}</a>`
     } else {
       // Build the report text paragraph by paragraph for each finding
 
-    for (const finding of findings) {
-      reportText += `<strong>${finding.title || finding.check_factor}</strong><br>`
-      
-      let statusText = "Failed"
-      if (finding.status === "passed") statusText = "Passed"
-      else if (finding.status === "open") statusText = "Failed"
-      else statusText = finding.status
-      
-      reportText += `Status: ${statusText}<br>`
-      
-      if (finding.description) {
-        // Convert any newlines in the description to <br> for HTML rendering
-        const htmlDesc = finding.description.replace(/\n/g, '<br>')
-        reportText += `Details: ${htmlDesc}<br>`
+      for (const finding of findings) {
+        reportText += `<strong>${finding.title || finding.check_factor}</strong><br>`
+
+        let statusText = "Failed"
+        if (finding.status === "passed") statusText = "Passed"
+        else if (finding.status === "open") statusText = "Failed"
+        else statusText = finding.status
+
+        reportText += `Status: ${statusText}<br>`
+
+        if (finding.description) {
+          // Convert any newlines in the description to <br> for HTML rendering
+          const htmlDesc = finding.description.replace(/\n/g, "<br>")
+          reportText += `Details: ${htmlDesc}<br>`
+        }
+
+        const qaccDomain =
+          process.env.PUBLIC_SITE_URL || "https://qacc.growth99.com"
+        const link = `${qaccDomain}/projects/${run?.project_id || "unknown"}/runs/${runId}`
+        reportText += `QACC Link: <a href="${link}">${link}</a><br><br>`
       }
-      
-      const qaccDomain = process.env.PUBLIC_SITE_URL || "https://qacc.growth99.com"
-      const link = `${qaccDomain}/projects/${run?.project_id || 'unknown'}/runs/${runId}`
-      reportText += `QACC Link: <a href="${link}">${link}</a><br><br>`
-    }
     } // End of findings loop else block
 
     logger.info({ tedTaskId }, "Sending final report to TED")
 
-    const tedResponse = await fetch(`https://ted.growth99.com/api/tasks/${tedTaskId}/comments`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiToken}`,
-        "Accept": "application/json",
-        "Content-Type": "application/json"
+    const tedResponse = await fetch(
+      `https://ted.growth99.com/api/tasks/${tedTaskId}/comments`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          text: reportText.trim(),
+        }),
       },
-      body: JSON.stringify({
-        text: reportText.trim()
-      })
-    })
+    )
 
     // A 2xx is NOT sufficient proof of success: TED's Angular SSR serves the
     // app-shell HTML with HTTP 200 when the task id cannot be resolved (deleted
@@ -88,15 +126,35 @@ export async function postFinalReportToTED(runId: string, tedTaskId: string) {
     // actually reached the API and was created.
     const contentType = tedResponse.headers.get("content-type") || ""
     if (tedResponse.ok && contentType.includes("application/json")) {
-      logger.info({ tedTaskId }, "Successfully posted final report back to TED!")
+      logger.info(
+        { tedTaskId },
+        "Successfully posted final report back to TED!",
+      )
     } else {
-      const bodyPreview = (await tedResponse.text().catch(() => "")).slice(0, 200)
+      const bodyPreview = (await tedResponse.text().catch(() => "")).slice(
+        0,
+        200,
+      )
       logger.error(
         { tedTaskId, status: tedResponse.status, contentType, bodyPreview },
-        "Failed to post report to TED: response was not JSON (task id likely unresolvable on TED, request fell through to the SPA)."
+        "Failed to post report to TED: response was not JSON (task id likely unresolvable on TED, request fell through to the SPA).",
       )
+      // Release the claim so a retry / another completion path can post it later.
+      await supabase
+        .from("qa_runs")
+        .update({ ted_report_posted_at: null })
+        .eq("id", runId)
     }
   } catch (error: any) {
-    logger.error({ error: error.message }, "Exception while syncing report to TED")
+    logger.error(
+      { error: error.message },
+      "Exception while syncing report to TED",
+    )
+    // Release the claim on unexpected failure so the report isn't lost forever.
+    await supabase
+      .from("qa_runs")
+      .update({ ted_report_posted_at: null })
+      .eq("id", runId)
+      .then(undefined, () => {})
   }
 }

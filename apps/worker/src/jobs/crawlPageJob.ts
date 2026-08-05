@@ -3,6 +3,7 @@ import { checkLearnMoreButtons } from "../checks/learnMoreButtonsCheck"
 import { chromium } from "playwright"
 import { supabase } from "../lib/supabase"
 import { qaQueue } from "../lib/queue"
+import { postFinalReportToTED } from "../lib/tedSync"
 import { checkBrokenLinks } from "../checks/brokenLinksCheck"
 import { checkExternalLinks } from "../checks/externalLinkCheck"
 import { checkMeta } from "../checks/metaCheck"
@@ -897,7 +898,7 @@ export async function processCrawlPageJob(job: Job) {
         // Fallback: check completion separately
         const { data: runCheck } = await supabase
           .from("qa_runs")
-          .select("pages_processed, pages_total, status")
+          .select("pages_processed, pages_total, status, ted_task_id")
           .eq("id", runId)
           .single()
 
@@ -922,6 +923,13 @@ export async function processCrawlPageJob(job: Job) {
             .catch((e) =>
               logger.error("Failed to queue generate_embeddings:", e),
             )
+
+          // Post the final QA report back to TED (idempotent — see tedSync).
+          if (runCheck.ted_task_id) {
+            postFinalReportToTED(runId, runCheck.ted_task_id).catch((e) =>
+              logger.error("TED Sync failed:", e),
+            )
+          }
         }
       } else if (isComplete) {
         logger.info({ runId }, "Run marked as completed")
@@ -929,6 +937,18 @@ export async function processCrawlPageJob(job: Job) {
         qaQueue
           .add("generate_embeddings", { runId })
           .catch((e) => logger.error("Failed to queue generate_embeddings:", e))
+
+        // Post the final QA report back to TED (idempotent — see tedSync).
+        const { data: finalRun } = await supabase
+          .from("qa_runs")
+          .select("ted_task_id")
+          .eq("id", runId)
+          .single()
+        if (finalRun?.ted_task_id) {
+          postFinalReportToTED(runId, finalRun.ted_task_id).catch((e) =>
+            logger.error("TED Sync failed:", e),
+          )
+        }
       }
 
       // Step 8: Broadcast progress update
