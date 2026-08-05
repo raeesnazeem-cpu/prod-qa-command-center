@@ -457,14 +457,21 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
               },
             )
 
-            if (tedResponse.ok) {
+            // A 2xx alone is NOT proof of success. TED's Angular SSR returns the
+            // app-shell HTML with HTTP 200 when the task id can't be resolved
+            // (deleted task, subtask, or a test/clone id). Only a JSON body means
+            // the comment actually reached the API and was created.
+            const contentType = tedResponse.headers.get("content-type") || ""
+            if (tedResponse.ok && contentType.includes("application/json")) {
               console.log(
                 "✅ Successfully posted confirmation comment back to TED!",
               )
             } else {
+              const bodyPreview = (
+                await tedResponse.text().catch(() => "")
+              ).slice(0, 200)
               console.error(
-                "❌ Failed to post comment back to TED. HTTP Status:",
-                tedResponse.status,
+                `❌ Failed to post comment to TED task #${taskId}: response was not JSON (HTTP ${tedResponse.status}, content-type "${contentType}"). The task id likely does not resolve on TED and the request fell through to the SPA. Body preview: ${bodyPreview}`,
               )
             }
           } catch (fetchErr) {
