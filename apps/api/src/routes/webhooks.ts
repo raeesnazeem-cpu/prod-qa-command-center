@@ -206,6 +206,8 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Unauthorized: Invalid secret" })
     }
 
+    console.log(`📥 Received TED Event: ${payload.event} | Status: ${payload.data?.status}`);
+
     // 5. If the password is correct, we check what kind of event happened.
     if (
       payload.event === "TASK_UPDATED" ||
@@ -213,10 +215,11 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
     ) {
       if (
         payload.data?.status === "Ready to Release" ||
-        payload.data?.status === "Ready for Release"
+        payload.data?.status === "Ready for Release" ||
+        payload.data?.status === "In Progress"
       ) {
         console.log(
-          "✅ Project is marked as Ready to Release! Triggering QACC pre-release workflow...",
+          "✅ Project is marked as Ready to Release (or In Progress)! Triggering QACC pre-release workflow...",
         )
         console.log("Project Data:", payload.data)
 
