@@ -8,6 +8,99 @@ export const webhookRouter: Router = Router()
 
 const CLERK_WEBHOOK_SECRET = process.env.CLERK_WEBHOOK_SECRET || ""
 
+// Placeholder used only when we cannot determine a client's real site URL.
+const TED_FALLBACK_SITE_URL = "http://qacctest.gogroth.com"
+
+// Resolve the beta site URL that QACC should scan, from TED.
+//
+// The URL lives on the client's `beta_site.env` task, in `automation.payload`
+// as a "betaSiteUrl=<url>" token (NOT in the webhook payload, the client notes,
+// or automation.siteUrl). We find that task client-agnostically:
+//   1. GET /api/clients/{clientId}/timeline  -> lists the client's tasks (with ids)
+//   2. pick the beta_site.env task (by automation.templateKey when present,
+//      else by the "Create beta site environment" title)
+//   3. GET /api/tasks/{id} -> verify automation.templateKey === "beta_site.env"
+//      and parse betaSiteUrl out of automation.payload
+// clientId comes from the webhook payload, so no task IDs are hardcoded.
+// Returns the URL string, or null if it can't be resolved.
+async function resolveBetaSiteUrlFromTED(
+  clientId?: string | number | null,
+): Promise<string | null> {
+  const apiToken = process.env.TED_API_TOKEN
+  if (!apiToken) {
+    console.log("⚠️ TED_API_TOKEN missing — cannot resolve beta site URL.")
+    return null
+  }
+  if (clientId == null) {
+    console.log("⚠️ No clientId in payload — cannot resolve beta site URL.")
+    return null
+  }
+
+  const getJson = async (url: string): Promise<any | null> => {
+    const r = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+        Accept: "application/json",
+      },
+    })
+    const ct = r.headers.get("content-type") || ""
+    if (!r.ok || !ct.includes("application/json")) {
+      console.error(
+        `❌ TED ${url} did not return JSON (HTTP ${r.status}, content-type "${ct}").`,
+      )
+      return null
+    }
+    return r.json().catch(() => null)
+  }
+
+  try {
+    const tl = await getJson(
+      `https://ted.growth99.com/api/clients/${clientId}/timeline`,
+    )
+    if (!tl) return null
+
+    // Collect candidate task ids for the beta_site.env task.
+    const ids = new Set<string>()
+    for (const t of tl.activeTasks || []) {
+      if (String(t?.automation?.templateKey || "") === "beta_site.env" && t?.id)
+        ids.add(String(t.id))
+    }
+    // Completed tasks appear in `timeline` without templateKey — match by title.
+    for (const t of tl.timeline || []) {
+      if (/beta site environment/i.test(t?.title || "") && t?.id)
+        ids.add(String(t.id))
+    }
+
+    if (ids.size === 0) {
+      console.log(
+        `⚠️ No beta_site.env task found in client ${clientId}'s timeline.`,
+      )
+      return null
+    }
+
+    for (const id of ids) {
+      const task = await getJson(`https://ted.growth99.com/api/tasks/${id}`)
+      // Authoritative check: the task must actually be the beta_site.env template.
+      if (String(task?.automation?.templateKey || "") !== "beta_site.env")
+        continue
+      const payload: string = task?.automation?.payload || ""
+      const m = payload.match(/betaSiteUrl=(\S+)/i)
+      if (m && m[1]) {
+        const url = m[1].replace(/[.,;)]+$/, "")
+        console.log(`✅ Resolved beta site URL from TED (task #${id}): ${url}`)
+        return url
+      }
+      console.log(
+        `⚠️ beta_site.env task #${id} has no betaSiteUrl in automation.payload yet.`,
+      )
+    }
+    return null
+  } catch (err) {
+    console.error("❌ Error resolving beta site URL from TED:", err)
+    return null
+  }
+}
+
 webhookRouter.post("/clerk", async (req: Request, res: Response) => {
   console.log("=== WEBHOOK DEBUG ===")
   console.log("Headers:", req.headers)
@@ -316,6 +409,10 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             `🔍 Looking up QACC project matching name: "${clientName}"`,
           )
 
+          // Resolve the beta site URL to scan from TED once — used both to
+          // auto-create a new project and to backfill an existing one.
+          const tedSiteUrl = await resolveBetaSiteUrlFromTED(task.clientId)
+
           // 1. Look for a project in QACC where the name exactly matches the TED clientName
           let { data: project } = await supabase
             .from("projects")
@@ -342,47 +439,12 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 `❌ Cannot auto-create project: Could not determine a default org_id in QACC.`,
               )
             } else {
-              let extractedUrl = null
-
-              if (task.id && process.env.TED_API_TOKEN) {
-                try {
-                  console.log(
-                    `🔍 Fetching task metadata from TED API to extract site URL...`,
-                  )
-                  const tedTaskRes = await fetch(
-                    `https://ted.growth99.com/api/tasks/${task.id}`,
-                    {
-                      headers: {
-                        Authorization: `Bearer ${process.env.TED_API_TOKEN}`,
-                      },
-                    },
-                  )
-                  if (tedTaskRes.ok) {
-                    const tedTaskData = (await tedTaskRes.json()) as any
-                    const notesStr =
-                      tedTaskData?.client?.clientDetails?.notes || ""
-                    const urlMatch = notesStr.match(/href="([^"]+)"/)
-                    if (urlMatch && urlMatch[1]) {
-                      extractedUrl = urlMatch[1]
-                      console.log(
-                        `✅ Extracted site URL from TED: ${extractedUrl}`,
-                      )
-                    }
-                  }
-                } catch (err) {
-                  console.error(
-                    "❌ Failed to fetch task metadata from TED API:",
-                    err,
-                  )
-                }
-              }
-
               const insertPayload: any = {
                 name: clientName,
                 client_name: clientName,
                 org_id: orgData.org_id,
                 status: "active",
-                site_url: extractedUrl || "http://qacctest.gogroth.com",
+                site_url: tedSiteUrl || TED_FALLBACK_SITE_URL,
               }
 
               const { data: newProject, error: createError } = await supabase
@@ -409,6 +471,34 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             console.log(
               `✅ Proceeding with QACC project: ${project.name} (ID: ${project.id})`,
             )
+
+            // 1b. Backfill the project's site URL from TED when it's still on
+            // the placeholder (or empty). We only overwrite the fallback so a
+            // URL a human set intentionally in QACC is never clobbered.
+            if (tedSiteUrl) {
+              const current = (project.site_url || "").trim()
+              const isPlaceholder =
+                !current || /qacctest\.gogroth\.com/i.test(current)
+              if (isPlaceholder && current !== tedSiteUrl) {
+                const { data: upd, error: updErr } = await supabase
+                  .from("projects")
+                  .update({ site_url: tedSiteUrl })
+                  .eq("id", project.id)
+                  .select()
+                  .single()
+                if (updErr) {
+                  console.error(
+                    "❌ Failed to backfill project site_url:",
+                    updErr,
+                  )
+                } else if (upd) {
+                  project = upd
+                  console.log(
+                    `✅ Backfilled project site_url: "${current || "(empty)"}" -> "${tedSiteUrl}"`,
+                  )
+                }
+              }
+            }
 
             // 2. Try to find the TED assignee in the users table, or auto-create a ghost user so their name appears on the QA Run
             let runCreatorId = null
@@ -470,7 +560,8 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
               .insert({
                 project_id: project.id,
                 run_type: "pre_release",
-                site_url: project.site_url || "http://qacctest.gogroth.com", // Run needs a URL to crawl
+                site_url:
+                  project.site_url || tedSiteUrl || TED_FALLBACK_SITE_URL, // Run needs a URL to crawl
                 enabled_checks: [
                   "project_plan",
                   "hero_media",
