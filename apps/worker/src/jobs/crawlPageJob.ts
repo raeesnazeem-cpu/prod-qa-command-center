@@ -971,6 +971,7 @@ export async function processCrawlPageJob(job: Job) {
       })
     }
 
+    //logger info
     logger.info({ pageId, runId }, "Page crawl lifecycle finished")
   }
 }
