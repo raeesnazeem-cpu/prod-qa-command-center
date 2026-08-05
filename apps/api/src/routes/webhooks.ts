@@ -155,6 +155,10 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
   console.log("\n--- INCOMING TED WEBHOOK ---")
   console.log("Headers:", JSON.stringify(req.headers, null, 2))
 
+  // Hoisted so the catch block can record the outcome/error on the audit row.
+  let webhookEventId: string | null = null
+  let createdRunId: string | null = null
+
   try {
     // 1. Handle the body safely depending on how Express parsed it
     let payloadText = ""
@@ -181,6 +185,33 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
 
     const payload = JSON.parse(payloadText)
 
+    // 1b. Normalize the TED payload shape.
+    // Newer TED webhooks (Task Automation Routing / template-key routing) send:
+    //   - payload.trigger          -> the task whose status changed (the source task)
+    //   - payload.target           -> optional sibling task details (id & status)
+    //   - payload.targetTemplateKey/payload.source/payload.event at the top level
+    // Older TED webhooks sent the task directly under payload.data.
+    // We accept BOTH so nothing breaks. Everything downstream reads from `task`.
+    const task = payload.trigger || payload.data || {}
+    const targetTask = payload.target || null
+    const eventType = payload.event
+
+    // TED sends `target` (the sibling QA task, e.g. "Complete QA pre-release
+    // testing") specifically so QACC can operate on / talk back to it directly.
+    // Prefer the target task for talk-back; fall back to the trigger task
+    // (and to the old `data.id` for backward compatibility).
+    const actionableTaskId = targetTask?.id || task.id || null
+
+    // Client name can live in a few places depending on TED's payload variant.
+    const clientName =
+      task.clientName ||
+      task.client_name ||
+      task.client?.name ||
+      payload.clientName ||
+      payload.client?.name ||
+      payload.client_name ||
+      null
+
     // 2. We extract the secret password. TED might send it in the real HTTP headers, or inside the JSON body.
     // We check both places just to be absolutely sure!
     const secretFromHeader =
@@ -206,26 +237,62 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Unauthorized: Invalid secret" })
     }
 
-    console.log(`📥 Received TED Event: ${payload.event} | Status: ${payload.data?.status}`);
+    console.log(
+      `📥 Received TED Event: ${eventType} | Task: ${task.title || "?"} (#${task.id}) | TemplateKey: ${task.templateKey || "?"} | Status: ${task.previousStatus || "?"} -> ${task.status} | Target: #${targetTask?.id || "none"}`,
+    )
+
+    // 4b. Persist an audit record of this event (full raw payload + parsed
+    // context) so QACC keeps a permanent, queryable history of what TED sent.
+    // Wrapped so a logging failure can never break webhook processing.
+    // `createdRunId` is filled in later if this event starts a QA run.
+    try {
+      const { data: logRow, error: logErr } = await supabase
+        .from("ted_webhook_events")
+        .insert({
+          event_type: eventType || null,
+          source: payload.source || null,
+          ted_task_id: task.id ? String(task.id) : null,
+          template_key: task.templateKey || null,
+          task_title: task.title || null,
+          assignee: task.assignee || null,
+          status: task.status || null,
+          previous_status: task.previousStatus || null,
+          target_task_id: targetTask?.id ? String(targetTask.id) : null,
+          target_template_key: payload.targetTemplateKey || null,
+          client_name: clientName,
+          raw_payload: payload,
+        })
+        .select("id")
+        .single()
+
+      if (logErr) {
+        console.error(
+          "⚠️ Failed to persist TED webhook event (continuing):",
+          logErr,
+        )
+      } else {
+        webhookEventId = logRow?.id || null
+      }
+    } catch (logErr) {
+      console.error(
+        "⚠️ Failed to persist TED webhook event (continuing):",
+        logErr,
+      )
+    }
 
     // 5. If the password is correct, we check what kind of event happened.
-    if (
-      payload.event === "TASK_UPDATED" ||
-      payload.event === "TASK_STATUS_CHANGED"
-    ) {
+    if (eventType === "TASK_UPDATED" || eventType === "TASK_STATUS_CHANGED") {
       if (
-        payload.data?.status === "Ready to Release" ||
-        payload.data?.status === "Ready for Release" ||
-        payload.data?.status === "In Progress"
+        task.status === "Ready to Release" ||
+        task.status === "Ready for Release" ||
+        task.status === "In Progress"
       ) {
         console.log(
           "✅ Project is marked as Ready to Release (or In Progress)! Triggering QACC pre-release workflow...",
         )
-        console.log("Project Data:", payload.data)
+        console.log("Task Data:", task)
 
         // --- MATCH PROJECT & START QA RUN ---
-        const clientName = payload.data?.clientName
-
         if (clientName) {
           console.log(
             `🔍 Looking up QACC project matching name: "${clientName}"`,
@@ -259,13 +326,13 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             } else {
               let extractedUrl = null
 
-              if (payload.data?.id && process.env.TED_API_TOKEN) {
+              if (task.id && process.env.TED_API_TOKEN) {
                 try {
                   console.log(
                     `🔍 Fetching task metadata from TED API to extract site URL...`,
                   )
                   const tedTaskRes = await fetch(
-                    `https://ted.growth99.com/api/tasks/${payload.data.id}`,
+                    `https://ted.growth99.com/api/tasks/${task.id}`,
                     {
                       headers: {
                         Authorization: `Bearer ${process.env.TED_API_TOKEN}`,
@@ -327,7 +394,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
 
             // 2. Try to find the TED assignee in the users table, or auto-create a ghost user so their name appears on the QA Run
             let runCreatorId = null
-            const assigneeName = payload.data?.assignee || "TED System"
+            const assigneeName = task.assignee || "TED System"
 
             const { data: existingUser } = await supabase
               .from("users")
@@ -408,7 +475,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 device_matrix: ["desktop", "mobile"],
                 status: "running",
                 created_by: runCreatorId, // Assigns to the actual person from TED, or the Ghost User
-                ted_task_id: payload.data?.id ? String(payload.data.id) : null,
+                ted_task_id: actionableTaskId ? String(actionableTaskId) : null,
               })
               .select()
               .single()
@@ -416,6 +483,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             if (runError) {
               console.error("❌ Failed to create QA Run in database:", runError)
             } else if (run) {
+              createdRunId = run.id
               console.log(
                 `🚀 Successfully created QA Run ${run.id}! Adding to worker queue...`,
               )
@@ -437,7 +505,9 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
         }
 
         // --- POST COMMENT BACK TO TED ---
-        const taskId = payload.data?.id
+        // Talk back to the target QA task when TED provided one, otherwise the
+        // trigger task itself.
+        const taskId = actionableTaskId
         const apiToken = process.env.TED_API_TOKEN
 
         if (taskId && apiToken) {
@@ -488,6 +558,24 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
       }
     }
 
+    // 6b. Record the outcome on the audit row (whether a QA run started).
+    if (webhookEventId) {
+      try {
+        await supabase
+          .from("ted_webhook_events")
+          .update({
+            triggered_run: !!createdRunId,
+            qa_run_id: createdRunId,
+          })
+          .eq("id", webhookEventId)
+      } catch (updErr) {
+        console.error(
+          "⚠️ Failed to update TED webhook event outcome (continuing):",
+          updErr,
+        )
+      }
+    }
+
     // 6. We send a successful 200 OK response back to TED in their exact expected format
     console.log("✅ Webhook successfully processed")
 
@@ -499,11 +587,24 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
       data: {
         acknowledged: true,
         workflowId: "qacc-ted-pre-release",
-        executionId: payload.data?.id || "unknown",
+        executionId: actionableTaskId || "unknown",
       },
     })
   } catch (error) {
     console.error("❌ Error parsing TED webhook payload:", error)
+
+    // Record the failure on the audit row if we managed to create one.
+    if (webhookEventId) {
+      try {
+        await supabase
+          .from("ted_webhook_events")
+          .update({ error: String((error as Error)?.message || error) })
+          .eq("id", webhookEventId)
+      } catch {
+        /* never let audit logging mask the original error */
+      }
+    }
+
     return res.status(400).json({ error: "Invalid payload format" })
   }
 })
