@@ -285,10 +285,12 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
       if (
         task.status === "Ready to Release" ||
         task.status === "Ready for Release" ||
-        task.status === "In Progress"
+        task.status === "In Progress" ||
+        task.status === "Complete" ||
+        task.status === "Completed"
       ) {
         console.log(
-          "✅ Project is marked as Ready to Release (or In Progress)! Triggering QACC pre-release workflow...",
+          "✅ Trigger task is Complete / Ready to Release / In Progress! Triggering QACC pre-release workflow...",
         )
         console.log("Task Data:", task)
 
