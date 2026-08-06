@@ -105,38 +105,41 @@ export async function postFinalReportToTED(runId: string, tedTaskId: string) {
 
     logger.info({ tedTaskId }, "Sending final report to TED")
 
-    const tedResponse = await fetch(
-      `https://ted.growth99.com/api/tasks/${tedTaskId}/comments`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiToken}`,
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          text: reportText.trim(),
-        }),
-      },
-    )
+    //SENDING FINAL REPORT TO TED
+    const tedResponse: any = ""
+
+    // const tedResponse = await fetch(
+    //   `https://ted.growth99.com/api/tasks/${tedTaskId}/comments`,
+    //   {
+    //     method: "POST",
+    //     headers: {
+    //       Authorization: `Bearer ${apiToken}`,
+    //       Accept: "application/json",
+    //       "Content-Type": "application/json",
+    //     },
+    //     body: JSON.stringify({
+    //       text: reportText.trim(),
+    //     }),
+    //   },
+    // )
 
     // A 2xx is NOT sufficient proof of success: TED's Angular SSR serves the
     // app-shell HTML with HTTP 200 when the task id cannot be resolved (deleted
     // task, subtask, or a test/clone id). Only a JSON response means the comment
     // actually reached the API and was created.
-    const contentType = tedResponse.headers.get("content-type") || ""
-    if (tedResponse.ok && contentType.includes("application/json")) {
+    const contentType = tedResponse?.headers.get("content-type") || ""
+    if (tedResponse?.ok && contentType.includes("application/json")) {
       logger.info(
         { tedTaskId },
         "Successfully posted final report back to TED!",
       )
     } else {
-      const bodyPreview = (await tedResponse.text().catch(() => "")).slice(
+      const bodyPreview = (await tedResponse?.text().catch(() => "")).slice(
         0,
         200,
       )
       logger.error(
-        { tedTaskId, status: tedResponse.status, contentType, bodyPreview },
+        { tedTaskId, status: tedResponse?.status, contentType, bodyPreview },
         "Failed to post report to TED: response was not JSON (task id likely unresolvable on TED, request fell through to the SPA).",
       )
       // Release the claim so a retry / another completion path can post it later.

@@ -264,3 +264,7 @@ graphify-out/
 
 # Supabase Blueprint
 supabase-blueprint/
+
+# Trigger Scripts
+trigger-pre-release.sh
+trigger-post-release.sh
