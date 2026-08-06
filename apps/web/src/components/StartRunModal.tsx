@@ -61,7 +61,9 @@ export const StartRunModal = ({
     defaultValues: {
       project_id: project.id,
       run_type: project.is_pre_release ? "pre_release" : "post_release",
-      site_url: project.is_pre_release ? project.site_url : (project.live_site_url || project.site_url),
+      site_url: project.is_pre_release
+        ? project.site_url
+        : project.live_site_url || project.site_url,
       figma_url: "",
       enabled_checks: [],
       is_woocommerce: project.is_woocommerce,
@@ -98,8 +100,16 @@ export const StartRunModal = ({
 
   useEffect(() => {
     if (isOpen) {
-      setValue("run_type", project.is_pre_release ? "pre_release" : "post_release");
-      setValue("site_url", project.is_pre_release ? project.site_url : (project.live_site_url || project.site_url));
+      setValue(
+        "run_type",
+        project.is_pre_release ? "pre_release" : "post_release",
+      )
+      setValue(
+        "site_url",
+        project.is_pre_release
+          ? project.site_url
+          : project.live_site_url || project.site_url,
+      )
     }
   }, [isOpen, project, setValue])
 
@@ -326,6 +336,13 @@ export const StartRunModal = ({
       label: "Social Share Heading Check",
       description:
         "Scan the homepage for social sharing previews on Facebook, X, and LinkedIn.",
+      category: "general",
+    },
+    {
+      id: "false_breakpoint",
+      label: "False Breaking Point Check",
+      description:
+        "Sweep viewport widths to detect false breaking points — unintended horizontal overflow (scrollbar) at widths that aren't designed breakpoints. Pinpoints the exact break pixel and culprit elements.",
       category: "general",
     },
   ]

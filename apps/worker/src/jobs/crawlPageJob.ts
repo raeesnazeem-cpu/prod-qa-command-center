@@ -17,6 +17,7 @@ import { checkResponsiveVisual } from "../checks/responsiveVisualCheck"
 import { checkHeroMedia } from "../checks/heroMediaCheck"
 import { checkOptimizedLinks } from "../checks/optimizedLinksCheck"
 import { wpPasswordCache } from "../lib/credentialsCache"
+import { checkFalseBreakpoints } from "../checks/falseBreakpointCheck"
 import {
   checkPrivacyPolicy,
   checkFooterLogo,
@@ -473,6 +474,17 @@ export async function processCrawlPageJob(job: Job) {
               return []
             }
           })(),
+        )
+      }
+
+      if (enabledChecks.includes("false_breakpoint")) {
+        checkPromises.push(
+          checkFalseBreakpoints(pageUrl, browser, async (p, m) => {
+            await updateCheckProgress("false_breakpoint", p, m)
+          }).catch((e) => {
+            logger.error("False breakpoint check failed:", e)
+            return []
+          }),
         )
       }
 
@@ -971,7 +983,6 @@ export async function processCrawlPageJob(job: Job) {
       })
     }
 
-    //logger info this comment is just for testing
     logger.info({ pageId, runId }, "Page crawl lifecycle finished")
   }
 }
