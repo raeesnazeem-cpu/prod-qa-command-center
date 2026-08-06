@@ -193,6 +193,91 @@ async function resolveClientNotesSiteUrlFromTED(
   }
 }
 
+// Post a comment to a TED task, preferring the newer /comments/ai endpoint
+// (X-Api-Key + idempotent eventKey). If that endpoint is unavailable/errors,
+// fall back to the proven /comments endpoint (Bearer). Returns true on success.
+async function postTedComment(
+  taskId: string | number,
+  text: string,
+  eventKey: string,
+): Promise<boolean> {
+  const xApiKey = process.env.X_API_KEY
+  const bearer = process.env.TED_API_TOKEN
+
+  const isJsonOk = (r: globalThis.Response) =>
+    r.ok && (r.headers.get("content-type") || "").includes("application/json")
+
+  // 1. Preferred: /comments/ai with X-Api-Key + eventKey (idempotent).
+  if (xApiKey) {
+    try {
+      const r = await fetch(
+        `https://ted.growth99.com/api/tasks/${taskId}/comments/ai`,
+        {
+          method: "POST",
+          headers: {
+            "X-Api-Key": xApiKey,
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text, eventKey }),
+        },
+      )
+      if (isJsonOk(r)) {
+        console.log(`✅ Posted comment to TED #${taskId} via /comments/ai.`)
+        return true
+      }
+      const preview = (await r.text().catch(() => "")).slice(0, 200)
+      console.warn(
+        `⚠️ /comments/ai unavailable for #${taskId} (HTTP ${r.status}, content-type "${r.headers.get("content-type") || ""}"). Falling back to /comments. Body: ${preview}`,
+      )
+    } catch (err) {
+      console.warn(
+        `⚠️ /comments/ai threw for #${taskId}; falling back to /comments:`,
+        err,
+      )
+    }
+  } else {
+    console.log("ℹ️ X_API_KEY not set; using /comments (Bearer) directly.")
+  }
+
+  // 2. Fallback: /comments with Bearer (the currently-working endpoint).
+  if (!bearer) {
+    console.error(
+      `❌ Cannot post comment to #${taskId}: neither X_API_KEY succeeded nor TED_API_TOKEN is set.`,
+    )
+    return false
+  }
+  try {
+    const r = await fetch(
+      `https://ted.growth99.com/api/tasks/${taskId}/comments`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${bearer}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text }),
+      },
+    )
+    if (isJsonOk(r)) {
+      console.log(`✅ Posted comment to TED #${taskId} via /comments (Bearer).`)
+      return true
+    }
+    const preview = (await r.text().catch(() => "")).slice(0, 200)
+    console.error(
+      `❌ Failed to post comment to TED #${taskId} via /comments (HTTP ${r.status}, content-type "${r.headers.get("content-type") || ""}"). Body: ${preview}`,
+    )
+    return false
+  } catch (err) {
+    console.error(
+      `❌ Error posting comment to TED #${taskId} via /comments:`,
+      err,
+    )
+    return false
+  }
+}
+
 webhookRouter.post("/clerk", async (req: Request, res: Response) => {
   console.log("=== WEBHOOK DEBUG ===")
   console.log("Headers:", req.headers)
@@ -780,49 +865,18 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
           }
         }
 
-        if (taskId && apiToken) {
-          try {
-            console.log(
-              `💬 Sending confirmation comment back to TED Task #${taskId}...`,
-            )
-            const tedResponse = await fetch(
-              `https://ted.growth99.com/api/tasks/${taskId}/comments`,
-              {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${apiToken}`,
-                  Accept: "application/json",
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  text: "QACC successfully received the release request and the automated connection is active! 🚀",
-                }),
-              },
-            )
-
-            // A 2xx alone is NOT proof of success. TED's Angular SSR returns the
-            // app-shell HTML with HTTP 200 when the task id can't be resolved
-            // (deleted task, subtask, or a test/clone id). Only a JSON body means
-            // the comment actually reached the API and was created.
-            const contentType = tedResponse.headers.get("content-type") || ""
-            if (tedResponse.ok && contentType.includes("application/json")) {
-              console.log(
-                "✅ Successfully posted confirmation comment back to TED!",
-              )
-            } else {
-              const bodyPreview = (
-                await tedResponse.text().catch(() => "")
-              ).slice(0, 200)
-              console.error(
-                `❌ Failed to post comment to TED task #${taskId}: response was not JSON (HTTP ${tedResponse.status}, content-type "${contentType}"). The task id likely does not resolve on TED and the request fell through to the SPA. Body preview: ${bodyPreview}`,
-              )
-            }
-          } catch (fetchErr) {
-            console.error("❌ Error calling TED API for comment:", fetchErr)
-          }
+        if (taskId) {
+          console.log(
+            `💬 Sending confirmation comment back to TED Task #${taskId}...`,
+          )
+          await postTedComment(
+            taskId,
+            "QACC successfully received the release request and the automated connection is active! 🚀",
+            `ext:qacc-prerelease-received-${taskId}`,
+          )
         } else {
           console.log(
-            "⚠️ Could not post comment to TED: Either taskId is missing from payload, or TED_API_TOKEN is missing in your .env file!",
+            "⚠️ Could not post comment to TED: taskId is missing from payload.",
           )
         }
       }
@@ -1188,39 +1242,15 @@ webhookRouter.post("/ted/post-release", async (req: Request, res: Response) => {
         }
       }
 
-      if (taskId && apiToken) {
-        try {
-          console.log(
-            `💬 Sending post-release confirmation comment to TED Task #${taskId}...`,
-          )
-          const tedResponse = await fetch(
-            `https://ted.growth99.com/api/tasks/${taskId}/comments`,
-            {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${apiToken}`,
-                Accept: "application/json",
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                text: "QACC received the post-release signal and started the General Checks. ✅",
-              }),
-            },
-          )
-          const contentType = tedResponse.headers.get("content-type") || ""
-          if (tedResponse.ok && contentType.includes("application/json")) {
-            console.log("✅ Posted post-release confirmation comment to TED!")
-          } else {
-            const bodyPreview = (
-              await tedResponse.text().catch(() => "")
-            ).slice(0, 200)
-            console.error(
-              `❌ Failed to post comment to TED task #${taskId} (HTTP ${tedResponse.status}, content-type "${contentType}"). Body: ${bodyPreview}`,
-            )
-          }
-        } catch (fetchErr) {
-          console.error("❌ Error calling TED API for comment:", fetchErr)
-        }
+      if (taskId) {
+        console.log(
+          `💬 Sending post-release confirmation comment to TED Task #${taskId}...`,
+        )
+        await postTedComment(
+          taskId,
+          "QACC received the post-release signal and started the General Checks. ✅",
+          `ext:qacc-postrelease-received-${taskId}`,
+        )
       }
     } else {
       console.log(

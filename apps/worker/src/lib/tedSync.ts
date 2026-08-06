@@ -9,6 +9,93 @@ const logger = pino({
   },
 })
 
+// Post a comment to a TED task, preferring the newer /comments/ai endpoint
+// (X-Api-Key + idempotent eventKey); fall back to the proven /comments (Bearer).
+// Returns true on success.
+async function postTedComment(
+  tedTaskId: string,
+  text: string,
+  eventKey: string,
+): Promise<boolean> {
+  const xApiKey = process.env.X_API_KEY
+  const bearer = process.env.TED_API_TOKEN
+  const isJsonOk = (r: Response) =>
+    r.ok && (r.headers.get("content-type") || "").includes("application/json")
+
+  // 1. Preferred: /comments/ai with X-Api-Key + eventKey.
+  if (xApiKey) {
+    try {
+      const r = await fetch(
+        `https://ted.growth99.com/api/tasks/${tedTaskId}/comments/ai`,
+        {
+          method: "POST",
+          headers: {
+            "X-Api-Key": xApiKey,
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text, eventKey }),
+        },
+      )
+      if (isJsonOk(r)) {
+        logger.info({ tedTaskId }, "Posted TED comment via /comments/ai.")
+        return true
+      }
+      const preview = (await r.text().catch(() => "")).slice(0, 200)
+      logger.warn(
+        { tedTaskId, status: r.status, preview },
+        "/comments/ai unavailable; falling back to /comments (Bearer).",
+      )
+    } catch (err: any) {
+      logger.warn(
+        { tedTaskId, error: err?.message },
+        "/comments/ai threw; falling back to /comments (Bearer).",
+      )
+    }
+  } else {
+    logger.info(
+      { tedTaskId },
+      "X_API_KEY not set in worker; using /comments (Bearer) directly.",
+    )
+  }
+
+  // 2. Fallback: /comments with Bearer (the currently-working endpoint).
+  if (!bearer) {
+    logger.error({ tedTaskId }, "No TED_API_TOKEN for /comments fallback.")
+    return false
+  }
+  try {
+    const r = await fetch(
+      `https://ted.growth99.com/api/tasks/${tedTaskId}/comments`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${bearer}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text }),
+      },
+    )
+    if (isJsonOk(r)) {
+      logger.info({ tedTaskId }, "Posted TED comment via /comments (Bearer).")
+      return true
+    }
+    const preview = (await r.text().catch(() => "")).slice(0, 200)
+    logger.error(
+      { tedTaskId, status: r.status, preview },
+      "Failed to post TED comment via /comments (response not JSON).",
+    )
+    return false
+  } catch (err: any) {
+    logger.error(
+      { tedTaskId, error: err?.message },
+      "Error posting TED comment via /comments.",
+    )
+    return false
+  }
+}
+
 export async function postFinalReportToTED(runId: string, tedTaskId: string) {
   try {
     const apiToken = process.env.TED_API_TOKEN
@@ -105,42 +192,22 @@ export async function postFinalReportToTED(runId: string, tedTaskId: string) {
 
     logger.info({ tedTaskId }, "Sending final report to TED")
 
-    //SENDING FINAL REPORT TO TED
-    const tedResponse: any = ""
+    // Try /comments/ai (X-Api-Key + idempotent eventKey) first, else /comments.
+    const posted = await postTedComment(
+      tedTaskId,
+      reportText.trim(),
+      `ext:qacc-report-${runId}`,
+    )
 
-    // const tedResponse = await fetch(
-    //   `https://ted.growth99.com/api/tasks/${tedTaskId}/comments`,
-    //   {
-    //     method: "POST",
-    //     headers: {
-    //       Authorization: `Bearer ${apiToken}`,
-    //       Accept: "application/json",
-    //       "Content-Type": "application/json",
-    //     },
-    //     body: JSON.stringify({
-    //       text: reportText.trim(),
-    //     }),
-    //   },
-    // )
-
-    // A 2xx is NOT sufficient proof of success: TED's Angular SSR serves the
-    // app-shell HTML with HTTP 200 when the task id cannot be resolved (deleted
-    // task, subtask, or a test/clone id). Only a JSON response means the comment
-    // actually reached the API and was created.
-    const contentType = tedResponse?.headers.get("content-type") || ""
-    if (tedResponse?.ok && contentType.includes("application/json")) {
+    if (posted) {
       logger.info(
         { tedTaskId },
         "Successfully posted final report back to TED!",
       )
     } else {
-      const bodyPreview = (await tedResponse?.text().catch(() => "")).slice(
-        0,
-        200,
-      )
       logger.error(
-        { tedTaskId, status: tedResponse?.status, contentType, bodyPreview },
-        "Failed to post report to TED: response was not JSON (task id likely unresolvable on TED, request fell through to the SPA).",
+        { tedTaskId },
+        "Failed to post final report to TED via both /comments/ai and /comments.",
       )
       // Release the claim so a retry / another completion path can post it later.
       await supabase
