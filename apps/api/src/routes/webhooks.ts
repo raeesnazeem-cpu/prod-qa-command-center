@@ -193,6 +193,68 @@ async function resolveClientNotesSiteUrlFromTED(
   }
 }
 
+// Resolve a client's task id for a given template key from TED, client-agnostic.
+// TED webhook payloads don't reliably carry sibling task ids, so we look the
+// client's tasks up via GET /api/clients/{clientId}/timeline and pick the task
+// matching `templateKey` (verified via GET /api/tasks/{id}.automation.templateKey;
+// completed tasks in the timeline lack templateKey, so `titleRegex` seeds candidates).
+// Returns the task id string, or null.
+async function resolveTaskIdByTemplateKeyFromTED(
+  clientId: string | number | null | undefined,
+  templateKey: string,
+  titleRegex: RegExp,
+): Promise<string | null> {
+  const apiToken = process.env.TED_API_TOKEN
+  if (!apiToken || clientId == null) return null
+
+  const getJson = async (url: string): Promise<any | null> => {
+    const r = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+        Accept: "application/json",
+      },
+    })
+    const ct = r.headers.get("content-type") || ""
+    if (!r.ok || !ct.includes("application/json")) return null
+    return r.json().catch(() => null)
+  }
+
+  try {
+    const tl = await getJson(
+      `https://ted.growth99.com/api/clients/${clientId}/timeline`,
+    )
+    if (!tl) return null
+
+    const ids = new Set<string>()
+    for (const t of tl.activeTasks || []) {
+      if (String(t?.automation?.templateKey || "") === templateKey && t?.id)
+        ids.add(String(t.id))
+    }
+    for (const t of tl.timeline || []) {
+      if (titleRegex.test(t?.title || "") && t?.id) ids.add(String(t.id))
+    }
+
+    if (ids.size === 0) {
+      console.log(
+        `⚠️ No task matching templateKey "${templateKey}" found in client ${clientId}'s timeline.`,
+      )
+      return null
+    }
+
+    for (const id of ids) {
+      const task = await getJson(`https://ted.growth99.com/api/tasks/${id}`)
+      if (String(task?.automation?.templateKey || "") === templateKey) {
+        console.log(`✅ Resolved "${templateKey}" task from TED: #${id}`)
+        return id
+      }
+    }
+    return null
+  } catch (err) {
+    console.error(`❌ Error resolving "${templateKey}" task from TED:`, err)
+    return null
+  }
+}
+
 // Post a comment to a TED task, preferring the newer /comments/ai endpoint
 // (X-Api-Key + idempotent eventKey). If that endpoint is unavailable/errors,
 // fall back to the proven /comments endpoint (Bearer). Returns true on success.
@@ -946,6 +1008,9 @@ webhookRouter.post("/ted/post-release", async (req: Request, res: Response) => {
   // Hoisted so the catch block can record the outcome/error on the audit row.
   let webhookEventId: string | null = null
   let createdRunId: string | null = null
+  // The scan task QACC operates on for post-release = release.qa_post (NOT the
+  // release.security trigger). Resolved from the client's tasks below.
+  let scanTaskId: string | null = null
 
   try {
     // 1. Read the body safely (Express may hand us a Buffer, object, or string)
@@ -1073,6 +1138,16 @@ webhookRouter.post("/ted/post-release", async (req: Request, res: Response) => {
           clientName,
         )
 
+        // Resolve the release.qa_post ("Complete QA post-release testing")
+        // task — this is the scan task QACC talks back to, NOT the
+        // release.security trigger. Fall back to the payload target if given.
+        scanTaskId =
+          (await resolveTaskIdByTemplateKeyFromTED(
+            task.clientId,
+            "release.qa_post",
+            /post-?release testing/i,
+          )) || (targetTask?.id ? String(targetTask.id) : null)
+
         // The project must already exist in QACC (per requirement).
         const { data: project } = await supabase
           .from("projects")
@@ -1172,7 +1247,7 @@ webhookRouter.post("/ted/post-release", async (req: Request, res: Response) => {
               device_matrix: ["desktop"],
               status: "running",
               created_by: runCreatorId,
-              ted_task_id: actionableTaskId ? String(actionableTaskId) : null,
+              ted_task_id: scanTaskId ? String(scanTaskId) : null,
             })
             .select()
             .single()
@@ -1201,9 +1276,16 @@ webhookRouter.post("/ted/post-release", async (req: Request, res: Response) => {
         )
       }
 
-      // Talk back to the target task: mark In Progress + confirmation comment.
-      const taskId = actionableTaskId
+      // Talk back to the release.qa_post scan task (NOT the release.security
+      // trigger): mark In Progress + confirmation comment.
+      const taskId = scanTaskId
       const apiToken = process.env.TED_API_TOKEN
+
+      if (!taskId) {
+        console.log(
+          "⚠️ Could not resolve the release.qa_post task — skipping TED talk-back (won't post to the trigger task).",
+        )
+      }
 
       if (createdRunId && taskId && apiToken) {
         try {
