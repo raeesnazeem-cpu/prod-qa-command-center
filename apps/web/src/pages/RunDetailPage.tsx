@@ -318,6 +318,9 @@ export const RunDetailPage = () => {
       "social_share_heading",
       "logo_chatbot",
       "gsr_check",
+      "backend_check",
+      "review_reputation_check",
+      "gbp_check",
     ]
 
     const isRunCompleted =
@@ -476,7 +479,7 @@ export const RunDetailPage = () => {
 
   const lastKnownFindingRef = useRef<QAFinding | null>(null)
   const currentFindingId = searchParams.get("findingId")
-
+  
   useEffect(() => {
     if (findings && currentFindingId) {
       const selected = findings.find((f) => f.id === currentFindingId)
@@ -487,8 +490,7 @@ export const RunDetailPage = () => {
   }, [findings, currentFindingId])
 
   useEffect(() => {
-    if (!findings || findings.length === 0 || !lastKnownFindingRef.current)
-      return
+    if (!findings || findings.length === 0 || !lastKnownFindingRef.current) return
     if (!currentFindingId) return
 
     const stillExists = findings.find((f) => f.id === currentFindingId)
@@ -496,7 +498,7 @@ export const RunDetailPage = () => {
       const replacement = findings.find(
         (f) =>
           f.check_factor === lastKnownFindingRef.current!.check_factor &&
-          f.page_id === lastKnownFindingRef.current!.page_id,
+          f.page_id === lastKnownFindingRef.current!.page_id
       )
       if (replacement) {
         setSearchParams((prev) => {
@@ -533,9 +535,7 @@ export const RunDetailPage = () => {
   // Clear retry spinners when backend broadcasts that it finished processing
   useEffect(() => {
     const handleProgressDone = () => {
-      console.log(
-        "CUSTOM EVENT RECEIVED: CLEARING RETRY SPINNERS AND REFETCHING FINDINGS",
-      )
+      console.log("CUSTOM EVENT RECEIVED: CLEARING RETRY SPINNERS AND REFETCHING FINDINGS")
       setRetryingChecks([])
       refetchFindings()
       refetchRunFindings()
@@ -781,6 +781,11 @@ export const RunDetailPage = () => {
     "plugin_number_check",
     "plugin_update_check",
     "false_breakpoint",
+    "backend_check",
+    "review_reputation_check",
+    "functionality_check",
+    "gbp_check",
+    "image_quality",
   ]
 
   // 1. Extract any general run-level findings (null page_id OR project plan factor OR hero_media matching selected page)
@@ -1055,6 +1060,11 @@ export const RunDetailPage = () => {
         "text_share",
         "logo_chatbot",
         "false_breakpoint",
+        "backend_check",
+        "review_reputation_check",
+        "functionality_check",
+        "image_quality",
+        "gbp_check",
       ].includes(c),
     )
 
@@ -1310,11 +1320,9 @@ export const RunDetailPage = () => {
       ? runTasks.every((t: any) => t.status === "closed")
       : true
 
-  const isSignOffVisible =
-    role === "super_admin" &&
-    (isPreRelease
-      ? allRunTasksClosed && safeDisplayProgress === 100
-      : safeDisplayProgress === 100)
+  const isSignOffVisible = role === "super_admin" && (isPreRelease
+    ? allRunTasksClosed && safeDisplayProgress === 100
+    : safeDisplayProgress === 100)
 
   return (
     <div className="max-w-7xl mx-auto p-6 space-y-8 animate-in fade-in duration-200">
@@ -1467,10 +1475,7 @@ export const RunDetailPage = () => {
             <div className="flex flex-col">
               <div className="flex items-center gap-2">
                 <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-200">
-                  <Link
-                    to={`/projects/${projectId}`}
-                    className="hover:text-accent transition-colors"
-                  >
+                  <Link to={`/projects/${projectId}`} className="hover:text-accent transition-colors">
                     {project.name}
                   </Link>
                 </h1>
@@ -1843,6 +1848,11 @@ export const RunDetailPage = () => {
                     learn_more_buttons: "Learn More Buttons Check",
                     logo_chatbot: "Logo on Chatbot Check",
                     false_breakpoint: "False Breakpoint Check",
+                    backend_check: "Backend Check",
+                    review_reputation_check: "Review & Reputation Check",
+                    functionality_check: "Website Functionality Testing",
+                    gbp_check: "GBP Optimization Check",
+                    image_quality: "Image Quality (Watermark & Blur)",
                   }
                   const checkName =
                     checkNameMap[checkKey] ||
@@ -1868,7 +1878,10 @@ export const RunDetailPage = () => {
                     checkKey === "verify_plugin_updates" ||
                     checkKey === "social_share_heading" ||
                     checkKey === "logo_chatbot" ||
-                    checkKey === "gsr_check"
+                    checkKey === "gsr_check" ||
+                    checkKey === "backend_check" ||
+                    checkKey === "review_reputation_check" ||
+                    checkKey === "gbp_check"
                   ) {
                     relevantPages = relevantPages.filter((p) => {
                       const normalize = (u: string) =>

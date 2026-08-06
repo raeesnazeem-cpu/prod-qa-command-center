@@ -57,9 +57,12 @@ interface Measurement {
 
 export async function checkFalseBreakpoints(
   pageUrl: string,
+  runId: string,
   browser: Browser,
   onProgress?: (progress: number, message: string) => Promise<void>,
 ): Promise<Finding[]> {
+  const sharp = require("sharp")
+  const { uploadScreenshot } = require("../lib/supabaseStorage")
   const findings: Finding[] = []
   let context: any = null
   let page: any = null
@@ -68,10 +71,7 @@ export async function checkFalseBreakpoints(
     if (onProgress) await onProgress(5, "Opening isolated viewport sweep...")
 
     context = await browser.newContext({
-      viewport: {
-        width: COARSE_WIDTHS[COARSE_WIDTHS.length - 1],
-        height: VIEWPORT_HEIGHT,
-      },
+      viewport: { width: COARSE_WIDTHS[COARSE_WIDTHS.length - 1], height: VIEWPORT_HEIGHT },
     })
     page = await context.newPage()
 
@@ -107,8 +107,7 @@ export async function checkFalseBreakpoints(
           const all = document.body ? document.body.querySelectorAll("*") : []
           for (const el of Array.from(all)) {
             const style = getComputedStyle(el)
-            if (style.display === "none" || style.visibility === "hidden")
-              continue
+            if (style.display === "none" || style.visibility === "hidden") continue
             const r = el.getBoundingClientRect()
             if (r.width === 0 && r.height === 0) continue
             if (r.right > vw + tol) offenders.push(el)
@@ -123,9 +122,7 @@ export async function checkFalseBreakpoints(
           for (const el of leaves) {
             const r = el.getBoundingClientRect()
             const tag = el.tagName.toLowerCase()
-            const id = (el as HTMLElement).id
-              ? "#" + (el as HTMLElement).id
-              : ""
+            const id = (el as HTMLElement).id ? "#" + (el as HTMLElement).id : ""
             const cls =
               typeof el.className === "string" && el.className.trim()
                 ? "." + el.className.trim().split(/\s+/).slice(0, 2).join(".")
@@ -151,19 +148,12 @@ export async function checkFalseBreakpoints(
       samples.push({ width, m })
       if (onProgress) {
         const pct = 20 + Math.round((60 * (i + 1)) / COARSE_WIDTHS.length)
-        await onProgress(
-          pct,
-          `Checked ${width}px (${m.overflow > TOLERANCE ? "broken" : "ok"})`,
-        )
+        await onProgress(pct, `Checked ${width}px (${m.overflow > TOLERANCE ? "broken" : "ok"})`)
       }
     }
 
     // --- 2. GROUP CONTIGUOUS BROKEN SAMPLES INTO BANDS ---
-    const bands: {
-      fromWidth: number
-      toWidth: number
-      prevCleanWidth: number | null
-    }[] = []
+    const bands: { fromWidth: number; toWidth: number; prevCleanWidth: number | null }[] = []
     for (let i = 0; i < samples.length; i++) {
       const broken = samples[i].m.overflow > TOLERANCE
       if (!broken) continue
@@ -203,6 +193,20 @@ export async function checkFalseBreakpoints(
       const worst = await measure(band.fromWidth)
       const culprits = worst.culprits.slice(0, MAX_CULPRITS_PER_FINDING)
 
+      // Capture the overflowing viewport as evidence (page is at the broken width).
+      let shotUrl = ""
+      try {
+        const buf = await page.screenshot()
+        if (buf) {
+          const jpg = await sharp(buf).jpeg({ quality: 85 }).toBuffer()
+          shotUrl = await uploadScreenshot(
+            jpg,
+            `${runId}/false_breakpoint_${band.fromWidth}_${Date.now()}.jpg`,
+            { bucket: "evidence", isPublic: true },
+          ).catch(() => "")
+        }
+      } catch {}
+
       const severity: Finding["severity"] =
         worst.overflow > 200 ? "high" : worst.overflow > 60 ? "medium" : "low"
 
@@ -226,6 +230,7 @@ export async function checkFalseBreakpoints(
         title: `False breaking point at ${onsetWidth}px (${bandLabel})`,
         description: `The layout develops a horizontal scrollbar starting at a viewport width of <strong>${onsetWidth}px</strong> and remains broken ${bandLabel}. Content overflows the viewport by up to <strong>${worst.overflow}px</strong>, which is not a designed responsive breakpoint. Likely culprits:\n\n${culpritList}`,
         context_text: `URL: ${pageUrl}\nOnset width: ${onsetWidth}px\nBroken band: ${band.fromWidth}px–${band.toWidth}px\nMax overflow: ${worst.overflow}px`,
+        screenshot_url: shotUrl || null,
         status: "open",
         ai_generated: false,
       } as Finding)

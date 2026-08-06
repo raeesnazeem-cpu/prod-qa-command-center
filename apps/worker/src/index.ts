@@ -13,6 +13,7 @@ import { processRunAiChecksJob } from "./jobs/runAiChecksJob"
 import { processCrawlBatchJob } from "./jobs/crawlBatchJob"
 import { processCheckProjectPlanJob } from "./jobs/checkProjectPlanJob"
 import { processCheckPaidMediaJob } from "./jobs/checkPaidMediaJob"
+import { processAiFixRunJob } from "./jobs/aiFixRunJob"
 import { qaQueue, connection } from "./lib/queue"
 import { processCaptureMultiviewScreenshotsJob } from "./jobs/captureMultiviewScreenshotsJob"
 
@@ -55,6 +56,9 @@ const worker = new Worker(
           break
         case "check_paid_media":
           await processCheckPaidMediaJob(job)
+          break
+        case "ai_fix_run":
+          await processAiFixRunJob(job)
           break
         case "run_checks":
           await processRunChecksJob(job)

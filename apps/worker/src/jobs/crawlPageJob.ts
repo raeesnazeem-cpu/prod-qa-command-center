@@ -18,6 +18,11 @@ import { checkHeroMedia } from "../checks/heroMediaCheck"
 import { checkOptimizedLinks } from "../checks/optimizedLinksCheck"
 import { wpPasswordCache } from "../lib/credentialsCache"
 import { checkFalseBreakpoints } from "../checks/falseBreakpointCheck"
+import { checkBackend } from "../checks/backendCheck"
+import { checkReviewReputation } from "../checks/reviewReputationCheck"
+import { checkFunctionality } from "../checks/functionalityCheck"
+import { checkImageQuality } from "../checks/imageQualityCheck"
+import { checkGbp } from "../checks/gbpCheck"
 import {
   checkPrivacyPolicy,
   checkFooterLogo,
@@ -340,7 +345,7 @@ export async function processCrawlPageJob(job: Job) {
 
         if (isHomepage) {
           checkPromises.push(
-            checkHeroMedia(page, screenshots, async (p, m) => {
+            checkHeroMedia(page, screenshots, runId, async (p, m) => {
               await updateCheckProgress("hero_media", p, m)
               await new Promise((resolve) => setTimeout(resolve, 1500))
             }).catch((e) => {
@@ -393,7 +398,7 @@ export async function processCrawlPageJob(job: Job) {
         )
         if (hasForms) {
           checkPromises.push(
-            checkForms(page, screenshots).catch((e) => {
+            checkForms(page, screenshots, runId).catch((e) => {
               logger.error("Forms check failed:", e)
               return []
             }),
@@ -477,9 +482,10 @@ export async function processCrawlPageJob(job: Job) {
         )
       }
 
+
       if (enabledChecks.includes("false_breakpoint")) {
         checkPromises.push(
-          checkFalseBreakpoints(pageUrl, browser, async (p, m) => {
+          checkFalseBreakpoints(pageUrl, runId, browser, async (p, m) => {
             await updateCheckProgress("false_breakpoint", p, m)
           }).catch((e) => {
             logger.error("False breakpoint check failed:", e)
@@ -487,6 +493,29 @@ export async function processCrawlPageJob(job: Job) {
           }),
         )
       }
+
+      if (enabledChecks.includes("functionality_check")) {
+        checkPromises.push(
+          checkFunctionality(pageUrl, runId, browser, async (p, m) => {
+            await updateCheckProgress("functionality_check", p, m)
+          }).catch((e) => {
+            logger.error("Functionality check failed:", e)
+            return []
+          }),
+        )
+      }
+
+      if (enabledChecks.includes("image_quality")) {
+        checkPromises.push(
+          checkImageQuality(pageUrl, runId, browser, async (p, m) => {
+            await updateCheckProgress("image_quality", p, m)
+          }).catch((e) => {
+            logger.error("Image quality check failed:", e)
+            return []
+          }),
+        )
+      }
+
 
       if (run?.is_woocommerce && enabledChecks.includes("woocommerce")) {
         checkPromises.push(
@@ -590,7 +619,7 @@ export async function processCrawlPageJob(job: Job) {
         await Promise.all(checkPromises)
         if (enabledChecks.includes("chatbot_consultation")) {
           checkPromises.push(
-            checkChatbotAndConsultation(page).catch((e) => {
+            checkChatbotAndConsultation(page, runId).catch((e) => {
               logger.error("Chatbot consultation check failed:", e)
               return []
             }),
@@ -677,6 +706,59 @@ export async function processCrawlPageJob(job: Job) {
               },
             ).catch((e) => {
               logger.error("Plugin updates check failed:", e)
+              return []
+            }),
+          )
+        }
+
+        await Promise.all(checkPromises)
+        if (enabledChecks.includes("backend_check")) {
+          checkPromises.push(
+            checkBackend(
+              pageUrl,
+              runId,
+              pageId,
+              wpPassword,
+              browser,
+              async (p, m) => {
+                await updateCheckProgress("backend_check", p, m)
+              },
+            ).catch((e) => {
+              logger.error("Backend check failed:", e)
+              return []
+            }),
+          )
+        }
+
+        await Promise.all(checkPromises)
+        if (enabledChecks.includes("review_reputation_check")) {
+          checkPromises.push(
+            checkReviewReputation(
+              pageUrl,
+              runId,
+              pageId,
+              browser,
+              async (p, m) => {
+                await updateCheckProgress("review_reputation_check", p, m)
+              },
+            ).catch((e) => {
+              logger.error("Review & reputation check failed:", e)
+              return []
+            }),
+          )
+        }
+
+        await Promise.all(checkPromises)
+        if (enabledChecks.includes("gbp_check")) {
+          checkPromises.push(
+            checkGbp(
+              run.project_id,
+              run.live_site_url || run.site_url,
+              async (p, m) => {
+                await updateCheckProgress("gbp_check", p, m)
+              },
+            ).catch((e) => {
+              logger.error("GBP check failed:", e)
               return []
             }),
           )
@@ -941,6 +1023,10 @@ export async function processCrawlPageJob(job: Job) {
             postFinalReportToTED(runId, runCheck.ted_task_id).catch((e) =>
               logger.error("TED Sync failed:", e),
             )
+            // AI Fix module (gated by AI_FIX_MODULE_ENABLED; no-op otherwise).
+            qaQueue
+              .add("ai_fix_run", { runId, tedTaskId: runCheck.ted_task_id })
+              .catch((e) => logger.error("Failed to queue ai_fix_run:", e))
           }
         }
       } else if (isComplete) {
@@ -960,6 +1046,10 @@ export async function processCrawlPageJob(job: Job) {
           postFinalReportToTED(runId, finalRun.ted_task_id).catch((e) =>
             logger.error("TED Sync failed:", e),
           )
+          // AI Fix module (gated by AI_FIX_MODULE_ENABLED; no-op otherwise).
+          qaQueue
+            .add("ai_fix_run", { runId, tedTaskId: finalRun.ted_task_id })
+            .catch((e) => logger.error("Failed to queue ai_fix_run:", e))
         }
       }
 

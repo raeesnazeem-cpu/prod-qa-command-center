@@ -61,9 +61,7 @@ export const StartRunModal = ({
     defaultValues: {
       project_id: project.id,
       run_type: project.is_pre_release ? "pre_release" : "post_release",
-      site_url: project.is_pre_release
-        ? project.site_url
-        : project.live_site_url || project.site_url,
+      site_url: project.is_pre_release ? project.site_url : (project.live_site_url || project.site_url),
       figma_url: "",
       enabled_checks: [],
       is_woocommerce: project.is_woocommerce,
@@ -74,7 +72,7 @@ export const StartRunModal = ({
   })
 
   const enabledChecks = useWatch({ control, name: "enabled_checks" }) || []
-  const PASSWORD_REQUIRED_CHECKS = ["callnow_links", "verify_plugin_updates"]
+  const PASSWORD_REQUIRED_CHECKS = ["callnow_links", "verify_plugin_updates", "backend_check"]
   const requiresPassword = enabledChecks.some((c) =>
     PASSWORD_REQUIRED_CHECKS.includes(c),
   )
@@ -100,16 +98,8 @@ export const StartRunModal = ({
 
   useEffect(() => {
     if (isOpen) {
-      setValue(
-        "run_type",
-        project.is_pre_release ? "pre_release" : "post_release",
-      )
-      setValue(
-        "site_url",
-        project.is_pre_release
-          ? project.site_url
-          : project.live_site_url || project.site_url,
-      )
+      setValue("run_type", project.is_pre_release ? "pre_release" : "post_release");
+      setValue("site_url", project.is_pre_release ? project.site_url : (project.live_site_url || project.site_url));
     }
   }, [isOpen, project, setValue])
 
@@ -338,11 +328,46 @@ export const StartRunModal = ({
         "Scan the homepage for social sharing previews on Facebook, X, and LinkedIn.",
       category: "general",
     },
-    {
+{
       id: "false_breakpoint",
       label: "False Breaking Point Check",
       description:
         "Sweep viewport widths to detect false breaking points — unintended horizontal overflow (scrollbar) at widths that aren't designed breakpoints. Pinpoints the exact break pixel and culprit elements.",
+      category: "general",
+    },
+    {
+      id: "backend_check",
+      label: "Backend Check",
+      description:
+        "Log into wp-admin and verify no default/placeholder content remains (Twenty* themes, Hello world! post, Sample Page, default tagline) and that a 404 plugin + styled custom 404 page render on all views. Requires the WP password.",
+      category: "general",
+    },
+    {
+      id: "review_reputation_check",
+      label: "Review & Reputation Check",
+      description:
+        "Open the /reviews page, trigger the review popup, and verify the contact number, email, social links and Google (My Business) reference are present — with screenshots for confirming the address & GMB match.",
+      category: "general",
+    },
+    {
+      id: "functionality_check",
+      label: "Website Functionality Testing",
+      description:
+        "Click a bounded set of interactive controls (buttons, dropdowns, accordions, nav toggles) on each page and catch JavaScript errors and interaction-triggered layout breaks.",
+      category: "general",
+    },
+    {
+      id: "gbp_check",
+      label: "GBP Optimization Check",
+      description:
+        "If the Google Business Profile add-on is active (per client notes), verify each location's profile via Google Places — phone, website (matches site), hours, photos, reviews. Requires GOOGLE_PLACES_API_KEY.",
+      category: "general",
+    },
+    {
+      id: "image_quality",
+      label: "Image Quality (Watermark & Blur)",
+      description:
+        "Download each real content image and flag watermarks (AI vision) and blurry images (deterministic sharpness metric). Attaches the offending image to each finding.",
       category: "general",
     },
   ]

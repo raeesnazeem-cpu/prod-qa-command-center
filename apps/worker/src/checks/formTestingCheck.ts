@@ -1,7 +1,9 @@
 import { Page as PlaywrightPage, BrowserContext } from 'playwright';
 import { Finding } from '@qacc/shared';
 
-export async function checkForms(page: PlaywrightPage, pageRecord: any): Promise<Finding[]> {
+export async function checkForms(page: PlaywrightPage, pageRecord: any, runId?: string): Promise<Finding[]> {
+  const sharp = require('sharp');
+  const { uploadScreenshot } = require('../lib/supabaseStorage');
   const findings: Finding[] = [];
   const pageUrl = page.url();
 
@@ -95,13 +97,28 @@ export async function checkForms(page: PlaywrightPage, pageRecord: any): Promise
       ]).catch(() => false);
 
       if (!confirmationFound) {
+        // Capture the actual post-submit state of THIS form's page (real evidence).
+        let shotUrl = '';
+        if (runId) {
+          try {
+            const buf = await formPage.screenshot().catch(() => null);
+            if (buf) {
+              const jpg = await sharp(buf).jpeg({ quality: 85 }).toBuffer();
+              shotUrl = await uploadScreenshot(
+                jpg,
+                `${runId}/forms_${formInfo.index}_${Date.now()}.jpg`,
+                { bucket: 'evidence', isPublic: true }
+              ).catch(() => '');
+            }
+          } catch {}
+        }
         findings.push({
           check_factor: 'forms',
           severity: 'high',
           title: 'Form submission unconfirmed',
           description: `A form on the page was submitted but no confirmation message or redirect was detected within 5 seconds.`,
           context_text: `Form ID: ${formInfo.id}\nAction: ${formInfo.action}\nPreview: ${formInfo.html}`,
-          screenshot_url: pageRecord.desktopUrl,
+          screenshot_url: shotUrl || pageRecord?.desktopUrl || null,
           status: 'open',
           ai_generated: false
         } as Finding);

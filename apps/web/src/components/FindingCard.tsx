@@ -19,6 +19,7 @@ import { FaviconFindingCard } from "./FaviconFindingCard"
 import { ContactFormFindingCard } from "./ContactFormFindingCard"
 import { LogoOnChatbotFindingCard } from "./LogoOnChatbotFindingCard"
 import { GsrCheckFindingCard } from "./GsrCheckFindingCard"
+import { ImageQualityFindingCard } from "./ImageQualityFindingCard"
 
 interface FindingCardProps {
   finding: QAFinding
@@ -70,6 +71,10 @@ export const FindingCard: React.FC<FindingCardProps> = (props) => {
 
   if (finding.check_factor === "dead_links") {
     return <DeadLinksFindingCard {...props} />
+  }
+
+  if (finding.check_factor === "image_quality") {
+    return <ImageQualityFindingCard {...props} />
   }
 
   if (finding.check_factor === "footer_logo") {

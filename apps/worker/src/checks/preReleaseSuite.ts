@@ -1192,8 +1192,11 @@ export async function checkGrowth99ContactForm(
  */
 export async function checkChatbotAndConsultation(
   page: PlaywrightPage,
+  runId?: string,
   pageRecord?: any,
 ): Promise<Finding[]> {
+  const sharp = require("sharp")
+  const { uploadScreenshot } = require("../lib/supabaseStorage")
   const findings: Finding[] = []
 
   const chatbotLauncher = page.locator(
@@ -1220,12 +1223,27 @@ export async function checkChatbotAndConsultation(
         .first()
         .isVisible()
       if (!isWindowOpen) {
+        let shotUrl = ""
+        if (runId) {
+          try {
+            const buf = await page.screenshot().catch(() => null)
+            if (buf) {
+              const jpg = await sharp(buf).jpeg({ quality: 85 }).toBuffer()
+              shotUrl = await uploadScreenshot(
+                jpg,
+                `${runId}/chatbot_consultation_${Date.now()}.jpg`,
+                { bucket: "evidence", isPublic: true },
+              ).catch(() => "")
+            }
+          } catch {}
+        }
         findings.push({
           check_factor: "chatbot_consultation",
           severity: "medium",
           title: "Chatbot Widget Unresponsive",
           description:
             "Clicked the chatbot launcher button, but the chatbot conversation window failed to open.",
+          screenshot_url: shotUrl || null,
           status: "open",
           ai_generated: false,
         } as Finding)

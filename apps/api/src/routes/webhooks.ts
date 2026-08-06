@@ -38,10 +38,7 @@ async function resolveBetaSiteUrlFromTED(
 
   const getJson = async (url: string): Promise<any | null> => {
     const r = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        Accept: "application/json",
-      },
+      headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
     })
     const ct = r.headers.get("content-type") || ""
     if (!r.ok || !ct.includes("application/json")) {
@@ -81,13 +78,14 @@ async function resolveBetaSiteUrlFromTED(
     for (const id of ids) {
       const task = await getJson(`https://ted.growth99.com/api/tasks/${id}`)
       // Authoritative check: the task must actually be the beta_site.env template.
-      if (String(task?.automation?.templateKey || "") !== "beta_site.env")
-        continue
+      if (String(task?.automation?.templateKey || "") !== "beta_site.env") continue
       const payload: string = task?.automation?.payload || ""
       const m = payload.match(/betaSiteUrl=(\S+)/i)
       if (m && m[1]) {
         const url = m[1].replace(/[.,;)]+$/, "")
-        console.log(`✅ Resolved beta site URL from TED (task #${id}): ${url}`)
+        console.log(
+          `✅ Resolved beta site URL from TED (task #${id}): ${url}`,
+        )
         return url
       }
       console.log(
@@ -121,10 +119,7 @@ async function resolveClientNotesSiteUrlFromTED(
 
   try {
     const res = await fetch("https://ted.growth99.com/api/clients", {
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        Accept: "application/json",
-      },
+      headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
     })
     const ct = res.headers.get("content-type") || ""
     if (!res.ok || !ct.includes("application/json")) {
@@ -145,10 +140,7 @@ async function resolveClientNotesSiteUrlFromTED(
       (wantId && clients.find((c) => String(c?.id) === wantId)) ||
       (wantName &&
         clients.find(
-          (c) =>
-            String(c?.name || "")
-              .trim()
-              .toLowerCase() === wantName,
+          (c) => String(c?.name || "").trim().toLowerCase() === wantName,
         )) ||
       null
 
@@ -209,10 +201,7 @@ async function resolveTaskIdByTemplateKeyFromTED(
 
   const getJson = async (url: string): Promise<any | null> => {
     const r = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        Accept: "application/json",
-      },
+      headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
     })
     const ct = r.headers.get("content-type") || ""
     if (!r.ok || !ct.includes("application/json")) return null
@@ -244,13 +233,18 @@ async function resolveTaskIdByTemplateKeyFromTED(
     for (const id of ids) {
       const task = await getJson(`https://ted.growth99.com/api/tasks/${id}`)
       if (String(task?.automation?.templateKey || "") === templateKey) {
-        console.log(`✅ Resolved "${templateKey}" task from TED: #${id}`)
+        console.log(
+          `✅ Resolved "${templateKey}" task from TED: #${id}`,
+        )
         return id
       }
     }
     return null
   } catch (err) {
-    console.error(`❌ Error resolving "${templateKey}" task from TED:`, err)
+    console.error(
+      `❌ Error resolving "${templateKey}" task from TED:`,
+      err,
+    )
     return null
   }
 }
@@ -332,10 +326,7 @@ async function postTedComment(
     )
     return false
   } catch (err) {
-    console.error(
-      `❌ Error posting comment to TED #${taskId} via /comments:`,
-      err,
-    )
+    console.error(`❌ Error posting comment to TED #${taskId} via /comments:`, err)
     return false
   }
 }
@@ -573,9 +564,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
     // just a generic `data` blob and event PING_TEST. Acknowledge cleanly and
     // skip task logging / auditing so they don't clutter the history.
     if (eventType === "PING_TEST") {
-      console.log(
-        "🏓 Received TED PING_TEST — connection is healthy. Responding pong.",
-      )
+      console.log("🏓 Received TED PING_TEST — connection is healthy. Responding pong.")
       return res.status(200).json({
         status: 200,
         statusText: "OK",
@@ -845,6 +834,13 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                   "callnow_links",
                   "verify_plugin_updates",
                   "social_share_heading",
+                  // New QACC checks (added to the automated pre-release suite)
+                  "false_breakpoint",
+                  "backend_check",
+                  "review_reputation_check",
+                  "functionality_check",
+                  "gbp_check",
+                  "image_quality",
                 ],
                 device_matrix: ["desktop", "mobile"],
                 status: "running",
@@ -909,7 +905,9 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             // status update actually reached the API.
             const ct = statusRes.headers.get("content-type") || ""
             if (statusRes.ok && ct.includes("application/json")) {
-              console.log(`✅ TED Task #${taskId} marked "In Progress".`)
+              console.log(
+                `✅ TED Task #${taskId} marked "In Progress".`,
+              )
             } else {
               const preview = (await statusRes.text().catch(() => "")).slice(
                 0,
@@ -1001,388 +999,395 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
 // the (already-existing) QACC project into the post-release stage and starts a
 // post-release run of the automated General Checks. The scan URL is the client's
 // LIVE site (from client notes), not the beta site.
-webhookRouter.post("/ted/post-release", async (req: Request, res: Response) => {
-  console.log("\n--- INCOMING TED WEBHOOK (POST-RELEASE) ---")
-  console.log("Headers:", JSON.stringify(req.headers, null, 2))
+webhookRouter.post(
+  "/ted/post-release",
+  async (req: Request, res: Response) => {
+    console.log("\n--- INCOMING TED WEBHOOK (POST-RELEASE) ---")
+    console.log("Headers:", JSON.stringify(req.headers, null, 2))
 
-  // Hoisted so the catch block can record the outcome/error on the audit row.
-  let webhookEventId: string | null = null
-  let createdRunId: string | null = null
-  // The scan task QACC operates on for post-release = release.qa_post (NOT the
-  // release.security trigger). Resolved from the client's tasks below.
-  let scanTaskId: string | null = null
+    // Hoisted so the catch block can record the outcome/error on the audit row.
+    let webhookEventId: string | null = null
+    let createdRunId: string | null = null
+    // The scan task QACC operates on for post-release = release.qa_post (NOT the
+    // release.security trigger). Resolved from the client's tasks below.
+    let scanTaskId: string | null = null
 
-  try {
-    // 1. Read the body safely (Express may hand us a Buffer, object, or string)
-    let payloadText = ""
-    if (Buffer.isBuffer(req.body)) {
-      payloadText = req.body.toString()
-    } else if (
-      typeof req.body === "object" &&
-      Object.keys(req.body).length > 0
-    ) {
-      payloadText = JSON.stringify(req.body)
-    } else {
-      payloadText = String(req.body || "")
-    }
-
-    if (!payloadText || payloadText.trim() === "" || payloadText === "{}") {
-      console.error("❌ Post-release webhook: empty body from TED")
-      return res.status(400).json({ error: "Failed: No body received." })
-    }
-
-    console.log("Raw Payload Received:", payloadText.substring(0, 300) + "...")
-
-    const payload = JSON.parse(payloadText)
-
-    // Normalize (same shape as the pre-release endpoint).
-    const task = payload.trigger || payload.data || {}
-    const targetTask = payload.target || null
-    const eventType = payload.event
-    const actionableTaskId = targetTask?.id || task.id || null
-    const clientName =
-      task.clientName ||
-      task.client_name ||
-      task.client?.name ||
-      payload.clientName ||
-      payload.client?.name ||
-      payload.client_name ||
-      null
-
-    // 2. Validate the shared secret (header or body).
-    const secretFromHeader =
-      req.headers["x-ted-webhook-secret"] || req.headers["x-webhook-secret"]
-    const secretFromBody = payload?.headers?.["X-TED-Webhook-Secret"]
-    const secret = secretFromHeader || secretFromBody
-    const expectedSecret = process.env.TED_WEBHOOK_SECRET
-
-    if (!expectedSecret) {
-      console.log("❌ SERVER ERROR: TED_WEBHOOK_SECRET is missing!")
-      return res.status(500).json({ error: "Server misconfigured" })
-    }
-    if (secret !== expectedSecret) {
-      console.log("❌ Unauthorized post-release TED webhook attempt.")
-      return res.status(401).json({ error: "Unauthorized: Invalid secret" })
-    }
-
-    // Health-check ping.
-    if (eventType === "PING_TEST") {
-      console.log(
-        "🏓 Received TED PING_TEST (post-release) — connection healthy. Responding pong.",
-      )
-      return res.status(200).json({
-        status: 200,
-        statusText: "OK",
-        message: "pong: QACC post-release webhook endpoint is alive",
-        timestamp: new Date().toISOString(),
-        data: { acknowledged: true, event: "PING_TEST" },
-      })
-    }
-
-    console.log(
-      `📥 Post-release event: ${eventType} | Task: ${task.title || "?"} (#${task.id}) | TemplateKey: ${task.templateKey || "?"} | Status: ${task.previousStatus || "?"} -> ${task.status} | Target: #${targetTask?.id || "none"}`,
-    )
-
-    // Audit the event (best-effort; never breaks processing).
     try {
-      const { data: logRow, error: logErr } = await supabase
-        .from("ted_webhook_events")
-        .insert({
-          event_type: eventType || null,
-          source: payload.source || null,
-          ted_task_id: task.id ? String(task.id) : null,
-          template_key: task.templateKey || null,
-          task_title: task.title || null,
-          assignee: task.assignee || null,
-          status: task.status || null,
-          previous_status: task.previousStatus || null,
-          target_task_id: targetTask?.id ? String(targetTask.id) : null,
-          target_template_key: payload.targetTemplateKey || null,
-          client_name: clientName,
-          raw_payload: payload,
+      // 1. Read the body safely (Express may hand us a Buffer, object, or string)
+      let payloadText = ""
+      if (Buffer.isBuffer(req.body)) {
+        payloadText = req.body.toString()
+      } else if (
+        typeof req.body === "object" &&
+        Object.keys(req.body).length > 0
+      ) {
+        payloadText = JSON.stringify(req.body)
+      } else {
+        payloadText = String(req.body || "")
+      }
+
+      if (!payloadText || payloadText.trim() === "" || payloadText === "{}") {
+        console.error("❌ Post-release webhook: empty body from TED")
+        return res.status(400).json({ error: "Failed: No body received." })
+      }
+
+      console.log(
+        "Raw Payload Received:",
+        payloadText.substring(0, 300) + "...",
+      )
+
+      const payload = JSON.parse(payloadText)
+
+      // Normalize (same shape as the pre-release endpoint).
+      const task = payload.trigger || payload.data || {}
+      const targetTask = payload.target || null
+      const eventType = payload.event
+      const actionableTaskId = targetTask?.id || task.id || null
+      const clientName =
+        task.clientName ||
+        task.client_name ||
+        task.client?.name ||
+        payload.clientName ||
+        payload.client?.name ||
+        payload.client_name ||
+        null
+
+      // 2. Validate the shared secret (header or body).
+      const secretFromHeader =
+        req.headers["x-ted-webhook-secret"] || req.headers["x-webhook-secret"]
+      const secretFromBody = payload?.headers?.["X-TED-Webhook-Secret"]
+      const secret = secretFromHeader || secretFromBody
+      const expectedSecret = process.env.TED_WEBHOOK_SECRET
+
+      if (!expectedSecret) {
+        console.log("❌ SERVER ERROR: TED_WEBHOOK_SECRET is missing!")
+        return res.status(500).json({ error: "Server misconfigured" })
+      }
+      if (secret !== expectedSecret) {
+        console.log("❌ Unauthorized post-release TED webhook attempt.")
+        return res.status(401).json({ error: "Unauthorized: Invalid secret" })
+      }
+
+      // Health-check ping.
+      if (eventType === "PING_TEST") {
+        console.log(
+          "🏓 Received TED PING_TEST (post-release) — connection healthy. Responding pong.",
+        )
+        return res.status(200).json({
+          status: 200,
+          statusText: "OK",
+          message: "pong: QACC post-release webhook endpoint is alive",
+          timestamp: new Date().toISOString(),
+          data: { acknowledged: true, event: "PING_TEST" },
         })
-        .select("id")
-        .single()
-      if (logErr) {
+      }
+
+      console.log(
+        `📥 Post-release event: ${eventType} | Task: ${task.title || "?"} (#${task.id}) | TemplateKey: ${task.templateKey || "?"} | Status: ${task.previousStatus || "?"} -> ${task.status} | Target: #${targetTask?.id || "none"}`,
+      )
+
+      // Audit the event (best-effort; never breaks processing).
+      try {
+        const { data: logRow, error: logErr } = await supabase
+          .from("ted_webhook_events")
+          .insert({
+            event_type: eventType || null,
+            source: payload.source || null,
+            ted_task_id: task.id ? String(task.id) : null,
+            template_key: task.templateKey || null,
+            task_title: task.title || null,
+            assignee: task.assignee || null,
+            status: task.status || null,
+            previous_status: task.previousStatus || null,
+            target_task_id: targetTask?.id ? String(targetTask.id) : null,
+            target_template_key: payload.targetTemplateKey || null,
+            client_name: clientName,
+            raw_payload: payload,
+          })
+          .select("id")
+          .single()
+        if (logErr) {
+          console.error(
+            "⚠️ Failed to persist post-release webhook event (continuing):",
+            logErr,
+          )
+        } else {
+          webhookEventId = logRow?.id || null
+        }
+      } catch (logErr) {
         console.error(
           "⚠️ Failed to persist post-release webhook event (continuing):",
           logErr,
         )
-      } else {
-        webhookEventId = logRow?.id || null
       }
-    } catch (logErr) {
-      console.error(
-        "⚠️ Failed to persist post-release webhook event (continuing):",
-        logErr,
-      )
-    }
 
-    // 3. Gate: only act on release.security transitioning to Complete/Completed.
-    const isSecurityTemplate = task.templateKey === "release.security"
-    const isComplete = task.status === "Complete" || task.status === "Completed"
+      // 3. Gate: only act on release.security transitioning to Complete/Completed.
+      const isSecurityTemplate = task.templateKey === "release.security"
+      const isComplete =
+        task.status === "Complete" || task.status === "Completed"
 
-    if (
-      (eventType === "TASK_UPDATED" || eventType === "TASK_STATUS_CHANGED") &&
-      isSecurityTemplate &&
-      isComplete
-    ) {
-      console.log(
-        "✅ release.security is Complete! Shifting project to post-release and starting General Checks...",
-      )
-
-      if (clientName) {
-        // Resolve the LIVE site URL from client notes.
-        const liveSiteUrl = await resolveClientNotesSiteUrlFromTED(
-          task.clientId,
-          clientName,
+      if (
+        (eventType === "TASK_UPDATED" ||
+          eventType === "TASK_STATUS_CHANGED") &&
+        isSecurityTemplate &&
+        isComplete
+      ) {
+        console.log(
+          "✅ release.security is Complete! Shifting project to post-release and starting General Checks...",
         )
 
-        // Resolve the release.qa_post ("Complete QA post-release testing")
-        // task — this is the scan task QACC talks back to, NOT the
-        // release.security trigger. Fall back to the payload target if given.
-        scanTaskId =
-          (await resolveTaskIdByTemplateKeyFromTED(
+        if (clientName) {
+          // Resolve the LIVE site URL from client notes.
+          const liveSiteUrl = await resolveClientNotesSiteUrlFromTED(
             task.clientId,
-            "release.qa_post",
-            /post-?release testing/i,
-          )) || (targetTask?.id ? String(targetTask.id) : null)
-
-        // The project must already exist in QACC (per requirement).
-        const { data: project } = await supabase
-          .from("projects")
-          .select("*")
-          .ilike("name", clientName)
-          .single()
-
-        if (!project) {
-          console.log(
-            `⚠️ No existing QACC project named "${clientName}" — skipping post-release run (project must already exist).`,
-          )
-        } else {
-          console.log(
-            `✅ Found QACC project: ${project.name} (ID: ${project.id})`,
+            clientName,
           )
 
-          // Shift the project into the post-release stage (+ live URL).
-          const projectUpdate: any = {
-            is_pre_release: false,
-            is_post_release: true,
-          }
-          if (liveSiteUrl) projectUpdate.live_site_url = liveSiteUrl
-          const { error: shiftErr } = await supabase
+          // Resolve the release.qa_post ("Complete QA post-release testing")
+          // task — this is the scan task QACC talks back to, NOT the
+          // release.security trigger. Fall back to the payload target if given.
+          scanTaskId =
+            (await resolveTaskIdByTemplateKeyFromTED(
+              task.clientId,
+              "release.qa_post",
+              /post-?release testing/i,
+            )) ||
+            (targetTask?.id ? String(targetTask.id) : null)
+
+          // The project must already exist in QACC (per requirement).
+          const { data: project } = await supabase
             .from("projects")
-            .update(projectUpdate)
-            .eq("id", project.id)
-          if (shiftErr) {
-            console.error(
-              "❌ Failed to shift project to post-release:",
-              shiftErr,
+            .select("*")
+            .ilike("name", clientName)
+            .single()
+
+          if (!project) {
+            console.log(
+              `⚠️ No existing QACC project named "${clientName}" — skipping post-release run (project must already exist).`,
             )
           } else {
             console.log(
-              `✅ Project "${project.name}" shifted to post-release${liveSiteUrl ? ` (live URL: ${liveSiteUrl})` : ""}.`,
+              `✅ Found QACC project: ${project.name} (ID: ${project.id})`,
             )
-          }
 
-          // Resolve the run creator: real TED assignee, else a ghost user,
-          // else any user in the org.
-          let runCreatorId: string | null = null
-          const assigneeName = task.assignee || "TED System"
-          const { data: existingUser } = await supabase
-            .from("users")
-            .select("id")
-            .ilike("full_name", assigneeName)
-            .eq("org_id", project.org_id)
-            .limit(1)
-            .single()
-          if (existingUser?.id) {
-            runCreatorId = existingUser.id
-          } else {
-            const safeEmail = `${assigneeName.replace(/[^a-zA-Z0-9]/g, "").toLowerCase() || "ted"}-${Date.now()}@ted.internal`
-            const { data: newUser, error: ghostErr } = await supabase
-              .from("users")
-              .insert({
-                id: randomUUID(),
-                clerk_user_id: `ghost_${Date.now()}`,
-                clerk_id: `ghost_${Date.now()}`,
-                full_name: assigneeName,
-                email: safeEmail,
-                org_id: project.org_id,
-                role: "qa_engineer",
-              })
-              .select("id")
-              .single()
-            if (ghostErr) {
-              console.error("❌ Ghost user creation failed:", ghostErr)
-            } else if (newUser?.id) {
-              runCreatorId = newUser.id
+            // Shift the project into the post-release stage (+ live URL).
+            const projectUpdate: any = {
+              is_pre_release: false,
+              is_post_release: true,
             }
-          }
-          if (!runCreatorId) {
-            const { data: adminUser } = await supabase
+            if (liveSiteUrl) projectUpdate.live_site_url = liveSiteUrl
+            const { error: shiftErr } = await supabase
+              .from("projects")
+              .update(projectUpdate)
+              .eq("id", project.id)
+            if (shiftErr) {
+              console.error(
+                "❌ Failed to shift project to post-release:",
+                shiftErr,
+              )
+            } else {
+              console.log(
+                `✅ Project "${project.name}" shifted to post-release${liveSiteUrl ? ` (live URL: ${liveSiteUrl})` : ""}.`,
+              )
+            }
+
+            // Resolve the run creator: real TED assignee, else a ghost user,
+            // else any user in the org.
+            let runCreatorId: string | null = null
+            const assigneeName = task.assignee || "TED System"
+            const { data: existingUser } = await supabase
               .from("users")
               .select("id")
+              .ilike("full_name", assigneeName)
               .eq("org_id", project.org_id)
               .limit(1)
               .single()
-            runCreatorId = adminUser?.id || null
-          }
+            if (existingUser?.id) {
+              runCreatorId = existingUser.id
+            } else {
+              const safeEmail = `${assigneeName.replace(/[^a-zA-Z0-9]/g, "").toLowerCase() || "ted"}-${Date.now()}@ted.internal`
+              const { data: newUser, error: ghostErr } = await supabase
+                .from("users")
+                .insert({
+                  id: randomUUID(),
+                  clerk_user_id: `ghost_${Date.now()}`,
+                  clerk_id: `ghost_${Date.now()}`,
+                  full_name: assigneeName,
+                  email: safeEmail,
+                  org_id: project.org_id,
+                  role: "qa_engineer",
+                })
+                .select("id")
+                .single()
+              if (ghostErr) {
+                console.error("❌ Ghost user creation failed:", ghostErr)
+              } else if (newUser?.id) {
+                runCreatorId = newUser.id
+              }
+            }
+            if (!runCreatorId) {
+              const { data: adminUser } = await supabase
+                .from("users")
+                .select("id")
+                .eq("org_id", project.org_id)
+                .limit(1)
+                .single()
+              runCreatorId = adminUser?.id || null
+            }
 
-          // Create the post-release run of the automated General Checks.
-          // (Only gsr_check runs automatically today; the manual General
-          // Checks are added later.)
-          const runSiteUrl =
-            liveSiteUrl ||
-            project.live_site_url ||
-            project.site_url ||
-            TED_FALLBACK_SITE_URL
-          const { data: run, error: runError } = await supabase
-            .from("qa_runs")
-            .insert({
-              project_id: project.id,
-              run_type: "post_release",
-              site_url: runSiteUrl,
-              enabled_checks: ["gsr_check"],
-              device_matrix: ["desktop"],
-              status: "running",
-              created_by: runCreatorId,
-              ted_task_id: scanTaskId ? String(scanTaskId) : null,
-            })
-            .select()
-            .single()
+            // Create the post-release run of the automated General Checks.
+            // (Only gsr_check runs automatically today; the manual General
+            // Checks are added later.)
+            const runSiteUrl =
+              liveSiteUrl ||
+              project.live_site_url ||
+              project.site_url ||
+              TED_FALLBACK_SITE_URL
+            const { data: run, error: runError } = await supabase
+              .from("qa_runs")
+              .insert({
+                project_id: project.id,
+                run_type: "post_release",
+                site_url: runSiteUrl,
+                enabled_checks: ["gsr_check"],
+                device_matrix: ["desktop"],
+                status: "running",
+                created_by: runCreatorId,
+                ted_task_id: scanTaskId ? String(scanTaskId) : null,
+              })
+              .select()
+              .single()
 
-          if (runError) {
-            console.error("❌ Failed to create post-release QA Run:", runError)
-          } else if (run) {
-            createdRunId = run.id
-            console.log(
-              `🚀 Created post-release QA Run ${run.id}! Adding to worker queue...`,
-            )
-            try {
-              const { addRunJob } = require("../lib/queue")
-              await addRunJob(run.id)
-              console.log(
-                `✅ Post-release General Checks run for ${project.name} is now STARTING.`,
+            if (runError) {
+              console.error(
+                "❌ Failed to create post-release QA Run:",
+                runError,
               )
-            } catch (queueErr) {
-              console.error("❌ Failed to add run to worker queue:", queueErr)
+            } else if (run) {
+              createdRunId = run.id
+              console.log(
+                `🚀 Created post-release QA Run ${run.id}! Adding to worker queue...`,
+              )
+              try {
+                const { addRunJob } = require("../lib/queue")
+                await addRunJob(run.id)
+                console.log(
+                  `✅ Post-release General Checks run for ${project.name} is now STARTING.`,
+                )
+              } catch (queueErr) {
+                console.error("❌ Failed to add run to worker queue:", queueErr)
+              }
             }
           }
+        } else {
+          console.log(
+            "⚠️ No clientName in payload — cannot match a QACC project.",
+          )
+        }
+
+        // Talk back to the release.qa_post scan task (NOT the release.security
+        // trigger): mark In Progress + confirmation comment.
+        const taskId = scanTaskId
+        const apiToken = process.env.TED_API_TOKEN
+
+        if (!taskId) {
+          console.log(
+            "⚠️ Could not resolve the release.qa_post task — skipping TED talk-back (won't post to the trigger task).",
+          )
+        }
+
+        if (createdRunId && taskId && apiToken) {
+          try {
+            console.log(
+              `🔄 Marking TED Task #${taskId} as "In Progress" (post-release scan started)...`,
+            )
+            const statusRes = await fetch(
+              `https://ted.growth99.com/api/tasks/${taskId}/status`,
+              {
+                method: "PUT",
+                headers: {
+                  Authorization: `Bearer ${apiToken}`,
+                  Accept: "application/json",
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ status: "In Progress" }),
+              },
+            )
+            const ct = statusRes.headers.get("content-type") || ""
+            if (statusRes.ok && ct.includes("application/json")) {
+              console.log(`✅ TED Task #${taskId} marked "In Progress".`)
+            } else {
+              const preview = (
+                await statusRes.text().catch(() => "")
+              ).slice(0, 200)
+              console.error(
+                `❌ Failed to set status on TED task #${taskId} (HTTP ${statusRes.status}, content-type "${ct}"). Body: ${preview}`,
+              )
+            }
+          } catch (statusErr) {
+            console.error("❌ Error calling TED API to set task status:", statusErr)
+          }
+        }
+
+        if (taskId) {
+          console.log(
+            `💬 Sending post-release confirmation comment to TED Task #${taskId}...`,
+          )
+          await postTedComment(
+            taskId,
+            "QACC received the post-release signal and started the General Checks. ✅",
+            `ext:qacc-postrelease-received-${taskId}`,
+          )
         }
       } else {
         console.log(
-          "⚠️ No clientName in payload — cannot match a QACC project.",
+          `ℹ️ Post-release endpoint ignored event (templateKey="${task.templateKey}", status="${task.status}"). Only release.security → Complete/Completed acts.`,
         )
       }
 
-      // Talk back to the release.qa_post scan task (NOT the release.security
-      // trigger): mark In Progress + confirmation comment.
-      const taskId = scanTaskId
-      const apiToken = process.env.TED_API_TOKEN
-
-      if (!taskId) {
-        console.log(
-          "⚠️ Could not resolve the release.qa_post task — skipping TED talk-back (won't post to the trigger task).",
-        )
-      }
-
-      if (createdRunId && taskId && apiToken) {
+      // Record outcome on the audit row.
+      if (webhookEventId) {
         try {
-          console.log(
-            `🔄 Marking TED Task #${taskId} as "In Progress" (post-release scan started)...`,
-          )
-          const statusRes = await fetch(
-            `https://ted.growth99.com/api/tasks/${taskId}/status`,
-            {
-              method: "PUT",
-              headers: {
-                Authorization: `Bearer ${apiToken}`,
-                Accept: "application/json",
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({ status: "In Progress" }),
-            },
-          )
-          const ct = statusRes.headers.get("content-type") || ""
-          if (statusRes.ok && ct.includes("application/json")) {
-            console.log(`✅ TED Task #${taskId} marked "In Progress".`)
-          } else {
-            const preview = (await statusRes.text().catch(() => "")).slice(
-              0,
-              200,
-            )
-            console.error(
-              `❌ Failed to set status on TED task #${taskId} (HTTP ${statusRes.status}, content-type "${ct}"). Body: ${preview}`,
-            )
-          }
-        } catch (statusErr) {
+          await supabase
+            .from("ted_webhook_events")
+            .update({
+              triggered_run: !!createdRunId,
+              qa_run_id: createdRunId,
+            })
+            .eq("id", webhookEventId)
+        } catch (updErr) {
           console.error(
-            "❌ Error calling TED API to set task status:",
-            statusErr,
+            "⚠️ Failed to update post-release webhook event outcome:",
+            updErr,
           )
         }
       }
 
-      if (taskId) {
-        console.log(
-          `💬 Sending post-release confirmation comment to TED Task #${taskId}...`,
-        )
-        await postTedComment(
-          taskId,
-          "QACC received the post-release signal and started the General Checks. ✅",
-          `ext:qacc-postrelease-received-${taskId}`,
-        )
+      console.log("✅ Post-release webhook successfully processed")
+      return res.status(200).json({
+        status: 200,
+        statusText: "OK",
+        message: "Post-release webhook payload received and processed successfully",
+        timestamp: new Date().toISOString(),
+        data: {
+          acknowledged: true,
+          workflowId: "qacc-ted-post-release",
+          executionId: actionableTaskId || "unknown",
+        },
+      })
+    } catch (error) {
+      console.error("❌ Error processing post-release TED webhook:", error)
+      if (webhookEventId) {
+        try {
+          await supabase
+            .from("ted_webhook_events")
+            .update({ error: String((error as Error)?.message || error) })
+            .eq("id", webhookEventId)
+        } catch {
+          /* never let audit logging mask the original error */
+        }
       }
-    } else {
-      console.log(
-        `ℹ️ Post-release endpoint ignored event (templateKey="${task.templateKey}", status="${task.status}"). Only release.security → Complete/Completed acts.`,
-      )
+      return res.status(400).json({ error: "Invalid payload format" })
     }
-
-    // Record outcome on the audit row.
-    if (webhookEventId) {
-      try {
-        await supabase
-          .from("ted_webhook_events")
-          .update({
-            triggered_run: !!createdRunId,
-            qa_run_id: createdRunId,
-          })
-          .eq("id", webhookEventId)
-      } catch (updErr) {
-        console.error(
-          "⚠️ Failed to update post-release webhook event outcome:",
-          updErr,
-        )
-      }
-    }
-
-    console.log("✅ Post-release webhook successfully processed")
-    return res.status(200).json({
-      status: 200,
-      statusText: "OK",
-      message:
-        "Post-release webhook payload received and processed successfully",
-      timestamp: new Date().toISOString(),
-      data: {
-        acknowledged: true,
-        workflowId: "qacc-ted-post-release",
-        executionId: actionableTaskId || "unknown",
-      },
-    })
-  } catch (error) {
-    console.error("❌ Error processing post-release TED webhook:", error)
-    if (webhookEventId) {
-      try {
-        await supabase
-          .from("ted_webhook_events")
-          .update({ error: String((error as Error)?.message || error) })
-          .eq("id", webhookEventId)
-      } catch {
-        /* never let audit logging mask the original error */
-      }
-    }
-    return res.status(400).json({ error: "Invalid payload format" })
-  }
-})
+  },
+)

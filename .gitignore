@@ -270,3 +270,4 @@ trigger-pre-release.sh
 trigger-post-release.sh
 push-last-prerelease-report-old.cjs
 push-last-prerelease-report.cjs
+push-image.cjs

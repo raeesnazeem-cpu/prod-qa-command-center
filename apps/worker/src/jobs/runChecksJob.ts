@@ -151,7 +151,7 @@ export async function processRunChecksJob(job: Job) {
 
       if (checksToRun.includes("hero_media")) {
         checkPromises.push(
-          checkHeroMedia(playwrightPage, page, async (p, m) => {
+          checkHeroMedia(playwrightPage, page, runId, async (p, m) => {
             await updateProgress(p, m)
           }),
         )

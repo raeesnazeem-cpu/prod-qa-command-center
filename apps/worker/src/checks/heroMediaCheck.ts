@@ -4,13 +4,37 @@ import { Finding } from "@qacc/shared"
 export async function checkHeroMedia(
   page: PlaywrightPage,
   pageRecord: any,
+  runId?: string,
   onProgress?: (progress: number, message: string) => Promise<void>,
 ): Promise<Finding[]> {
+  const sharp = require("sharp")
+  const { uploadScreenshot } = require("../lib/supabaseStorage")
   const findings: Finding[] = []
 
   try {
     if (onProgress)
       await onProgress(10, "Opened browser, checking for hero media...")
+
+    // Capture the hero area once as evidence; assign to pageRecord.desktopUrl
+    // so every finding below (which references it) carries a real screenshot.
+    if (runId) {
+      try {
+        const heroEl = page
+          .locator('[class*="hero" i], [id*="hero" i], header, .elementor-section')
+          .first()
+        const target = (await heroEl.count()) > 0 ? heroEl : page
+        const buf = await target.screenshot().catch(() => null)
+        if (buf) {
+          const jpg = await sharp(buf).jpeg({ quality: 85 }).toBuffer()
+          const url = await uploadScreenshot(
+            jpg,
+            `${runId}/hero_media_${Date.now()}.jpg`,
+            { bucket: "evidence", isPublic: true },
+          ).catch(() => "")
+          if (url) pageRecord.desktopUrl = url
+        }
+      } catch {}
+    }
 
     // --- 1. DETECT ELEMENTOR OR STANDARD HERO VIDEO ---
 

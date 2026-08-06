@@ -80,6 +80,8 @@ export async function processStartRunJob(job: Job) {
       "url_tab_compare",
       "contact_form",
       "false_breakpoint",
+      "functionality_check",
+      "image_quality",
     ]
 
     const HOMEPAGE_ONLY_CHECKS = [
@@ -96,6 +98,9 @@ export async function processStartRunJob(job: Job) {
       "social_share_heading",
       "logo_chatbot",
       "gsr_check",
+      "backend_check",
+      "review_reputation_check",
+      "gbp_check",
     ]
 
     const PAGE_CHECKS = [...ALL_PAGES_CHECKS, ...HOMEPAGE_ONLY_CHECKS]
