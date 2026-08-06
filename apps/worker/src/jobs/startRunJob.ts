@@ -79,6 +79,7 @@ export async function processStartRunJob(job: Job) {
       "url_matching",
       "url_tab_compare",
       "contact_form",
+      "false_breakpoint",
     ]
 
     const HOMEPAGE_ONLY_CHECKS = [
