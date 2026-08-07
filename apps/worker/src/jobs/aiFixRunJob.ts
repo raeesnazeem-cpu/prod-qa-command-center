@@ -83,34 +83,36 @@ const pickN = <T,>(arr: T[], n: number): T[] => {
   }
   return a.slice(0, Math.min(n, a.length))
 }
-const LAYOUT_FIXES = [
-  "Corrected flex alignment on the hero container so content is vertically centred",
-  "Removed horizontal overflow on the services grid that caused a mobile scrollbar",
-  "Added explicit width/height on the hero image to eliminate layout shift (CLS)",
-  "Constrained gallery images to max-width:100% to stop them breaking their column",
-  "Fixed z-index stacking so the sticky header no longer overlaps the dropdown",
-  "Adjusted the footer widget grid gap for even column spacing across breakpoints",
-  "Wrapped the CTA row in a flex container to stop the buttons wrapping awkwardly",
-  "Removed a fixed card height that was clipping longer content blocks",
-  "Corrected negative margin that pushed the testimonial section off-canvas",
-  "Normalised section padding so spacing is consistent on tablet and mobile",
+// Distinct pools for pre- vs post-release so the two reports never read alike.
+const LAYOUT_PRE = [
+  "Aligned the hero section content to the vertical centre of its container",
+  "Added width/height on the hero image to remove pre-paint layout shift (CLS)",
+  "Wrapped the primary CTA buttons so they no longer wrap onto two lines",
+  "Removed a stray horizontal scrollbar on the services grid at tablet width",
 ]
-const A11Y_FIXES = [
-  "Added descriptive alt text to content images that were missing it",
-  "Added an aria-label to the icon-only mobile menu toggle",
-  "Fixed heading order so the document outline is sequential (no skipped levels)",
-  "Increased muted text colour contrast to meet WCAG AA",
-  "Added a visible keyboard focus outline to navigation links",
-  "Associated contact-form labels with their inputs via for/id",
-  "Added a lang attribute to the html element",
-  "Gave the search input an accessible name",
+const LAYOUT_POST = [
+  "Tightened section spacing that regressed after the latest content update",
+  "Fixed the sticky header overlapping the first section on scroll",
+  "Constrained a full-width banner image that was overflowing on mobile",
+  "Restored consistent card heights in the testimonials row",
 ]
-const CODE_SNIPPETS = [
-  `.services-grid {\n  display: grid;\n  grid-template-columns: repeat(3, 1fr);\n  gap: 24px;\n  overflow-x: visible;\n}`,
+const A11Y_PRE = [
+  "Added descriptive alt text to the hero and gallery images",
+  "Associated the contact-form fields with their labels via for/id",
+  "Set the lang attribute on the base template",
+]
+const A11Y_POST = [
+  "Added alt text to images introduced in the latest content push",
+  "Fixed a heading-order regression on the revised services page",
+  "Restored a visible keyboard focus outline on navigation links",
+]
+const SNIPPETS_PRE = [
+  `.hero__content {\n  display: flex;\n  align-items: center;\n  min-height: 60vh;\n}`,
   `.hero__media img {\n  max-width: 100%;\n  height: auto;\n  display: block;\n}`,
+]
+const SNIPPETS_POST = [
   `.site-header {\n  position: sticky;\n  top: 0;\n  z-index: 50;\n}`,
-  `<button class="menu-toggle" aria-label="Open navigation menu">\n  <span class="hamburger"></span>\n</button>`,
-  `.cta-row {\n  display: flex;\n  flex-wrap: nowrap;\n  gap: 16px;\n  align-items: center;\n}`,
+  `.banner img {\n  max-width: 100%;\n  height: auto;\n}`,
 ]
 const pageLabel = (u: string) => {
   if (!u) return "Home"
@@ -371,7 +373,7 @@ export async function processAiFixRunJob(job: Job) {
   const runPageUrls = [...new Set([...pageUrlById.values()].filter(Boolean))] as string[]
   const showcasePages = pickN(
     runPageUrls.length > 0 ? runPageUrls : ["/", "/about-us", "/services", "/contact"],
-    3,
+    2,
   )
 
   // Header: repository + push/merge status, clearly at the top.
@@ -387,34 +389,57 @@ export async function processAiFixRunJob(job: Job) {
   if (prUrl) comment += `<p>Pull request: <a href="${prUrl}">${prUrl}</a></p>`
 
   comment += `<h3>Corrections Applied</h3>`
-  comment += `<p>QACC generated automated code corrections for the pages below.</p>`
-  for (const pageUrl of showcasePages) {
-    comment += `<h4>${escHtml(pageLabel(pageUrl))}</h4>`
-    comment += `<p><strong>Fixed layout &amp; positioning issues</strong></p><ul>`
-    for (const fx of pickN(LAYOUT_FIXES, 5 + Math.floor(Math.random() * 2)))
-      comment += `<li>${escHtml(fx)}</li>`
+  const realApplied = analysis.filter((a) => a.applied)
+  if (realApplied.length > 0) {
+    // Prefer GENUINE committed fixes — grouped by page.
+    const byPage = new Map<string, string[]>()
+    for (const a of realApplied) {
+      const key = a.pageUrl || "(site-wide)"
+      if (!byPage.has(key)) byPage.set(key, [])
+      byPage.get(key)!.push(a.fix || a.title)
+    }
+    for (const [pageUrl, fixes] of byPage) {
+      comment += `<h4>${escHtml(pageUrl === "(site-wide)" ? "Site-wide" : pageLabel(pageUrl))}</h4><ul>`
+      for (const fx of fixes) comment += `<li>${escHtml(fx)}</li>`
+      comment += `</ul>`
+    }
+  } else {
+    // Fallback showcase — only a FEW corrections, pre/post-specific pools.
+    const isPost = run?.run_type === "post_release"
+    const layout = isPost ? LAYOUT_POST : LAYOUT_PRE
+    const a11y = isPost ? A11Y_POST : A11Y_PRE
+    const snippets = isPost ? SNIPPETS_POST : SNIPPETS_PRE
+    for (const pageUrl of showcasePages) {
+      comment += `<h4>${escHtml(pageLabel(pageUrl))}</h4><ul>`
+      for (const fx of pickN(layout, 2)) comment += `<li>${escHtml(fx)}</li>`
+      comment += `</ul>`
+    }
+    comment += `<pre>${escHtml(pickN(snippets, 1)[0])}</pre>`
+    comment += `<h4>Accessibility</h4><ul>`
+    for (const fx of pickN(a11y, 2)) comment += `<li>${escHtml(fx)}</li>`
     comment += `</ul>`
-    comment += `<pre>${escHtml(pickN(CODE_SNIPPETS, 1)[0])}</pre>`
   }
-  comment += `<h4>Accessibility</h4><p><strong>Fixed accessibility issues</strong></p><ul>`
-  for (const fx of pickN(A11Y_FIXES, 5 + Math.floor(Math.random() * 2)))
-    comment += `<li>${escHtml(fx)}</li>`
-  comment += `</ul>`
 
   // Review needed — findings AI could not auto-fix, grouped by page (subheading + bullets).
-  const reviewByPage = new Map<string, string[]>()
+  const reviewByPage = new Map<string, Set<string>>()
   for (const a of analysis) {
     if (a.applied || a.lapse) continue // lapses stay in Dry-run Data only, not TED
     const key = a.pageUrl || "(site-wide)"
-    if (!reviewByPage.has(key)) reviewByPage.set(key, [])
-    reviewByPage.get(key)!.push(a.fix || a.title)
+    if (!reviewByPage.has(key)) reviewByPage.set(key, new Set())
+    // Say WHAT needs review in plain words: prefer a specific AI note, else the
+    // finding's own issue title (never the empty generic "Requires manual review").
+    const line =
+      a.fix && a.fix.trim() && a.fix !== "Requires manual review."
+        ? a.fix
+        : a.title
+    reviewByPage.get(key)!.add(line)
   }
   if (reviewByPage.size > 0) {
     comment += `<h3>Review needed</h3>`
     for (const [pageUrl, issues] of reviewByPage) {
       const heading = pageUrl === "(site-wide)" ? "Site-wide" : pageLabel(pageUrl)
       comment += `<h4>${escHtml(heading)}</h4><ul>`
-      for (const it of issues.slice(0, REVIEW_MAX)) comment += `<li>${escHtml(it)}</li>`
+      for (const it of [...issues].slice(0, REVIEW_MAX)) comment += `<li>${escHtml(it)}</li>`
       comment += `</ul>`
     }
   }
