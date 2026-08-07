@@ -20,13 +20,14 @@ const logger = pino({
  * AI Fix module — runs AFTER the QA report is posted to TED.
  *
  * DELIVERY (Git-only, never touches WP/live site): resolve betaSiteRepo →
- * clone → apply AI corrections → commit each `fix: <finding>` → PUSH DIRECTLY
- * TO `main`. FlyWP (GitHub Action on the repo) auto-deploys `main`. (Direct-to-
- * main is a deliberate choice to demonstrate the tool fixing code end-to-end.)
+ * clone → branch → apply AI corrections → commit each `fix: <finding>` → push
+ * the branch → open ONE pull request to `main`. A human reviews + merges; FlyWP
+ * (GitHub Action) then auto-deploys. The module never merges.
  *
  * TWO OUTPUTS:
- *  1) TED comment = FIXED-ERRORS REPORT ONLY, grouped: one heading per check →
- *     page URL → what was fixed. No suggestions, no manual/not-possible noise.
+ *  1) TED comment = FIXED-errors report (grouped check → page → fix) + the
+ *     single Pull request link + a "Review needed" bullet list of the findings
+ *     AI could not auto-fix (human decision).
  *  2) Full categorized analysis (every finding: category + proposal + applied)
  *     is saved to the `ai_fix_runs` table for the QACC "Dry-run Data" tab.
  *
@@ -58,6 +59,18 @@ const FRIENDLY: Record<string, string> = {
 }
 const labelFor = (f: string) =>
   FRIENDLY[f] || (f || "other").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+
+// Short page label for the "Review needed" bullets (last path segment, else scope).
+const shortPage = (u: string) => {
+  if (!u) return "(site-wide)"
+  try {
+    const p = new URL(u).pathname.replace(/\/$/, "")
+    return p.split("/").filter(Boolean).pop() || "home"
+  } catch {
+    return "(site-wide)"
+  }
+}
+const REVIEW_MAX = 12
 
 const VALID = new Set(["fully_ai", "partial_ai", "manual", "not_possible"])
 const MAX_FINDINGS = 20
@@ -135,6 +148,7 @@ export async function processAiFixRunJob(job: Job) {
   let workDir = ""
   let fileList: string[] = []
   let committed = 0
+  const branch = `qacc-ai-fix/${runId}`
   const git = (args: string[]) => execFileAsync("git", ["-C", workDir, ...args], { maxBuffer: 1024 * 1024 * 16 })
 
   if (willPush) {
@@ -143,10 +157,10 @@ export async function processAiFixRunJob(job: Job) {
       await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {})
       await fs.promises.mkdir(path.dirname(workDir), { recursive: true })
       const authUrl = `https://${token}@github.com/${ownerRepo!.owner}/${ownerRepo!.repo}.git`
-      // Clone main directly — we commit and push straight onto it.
       await execFileAsync("git", ["clone", "--depth", "1", authUrl, workDir], { maxBuffer: 1024 * 1024 * 64 })
       await git(["config", "user.email", "qacc-ai-fix@growth99.com"])
       await git(["config", "user.name", "QACC AI Fix"])
+      await git(["checkout", "-b", branch]) // all fixes go on one branch → one PR
       const { stdout } = await git(["ls-files"])
       fileList = stdout
         .split("\n")
@@ -243,14 +257,30 @@ export async function processAiFixRunJob(job: Job) {
     analysis.push({ check_factor: f.check_factor, title: f.title || f.check_factor, pageUrl, category, fix, applied })
   }
 
-  // --- Push directly to main ---
-  let commitUrl = ""
+  // --- Push the branch + open ONE pull request ---
+  let prUrl = ""
   if (workDir && committed > 0 && ownerRepo) {
     try {
-      await git(["push", "origin", "HEAD:main"])
-      commitUrl = `https://github.com/${ownerRepo.owner}/${ownerRepo.repo}/commits/main`
+      await git(["push", "origin", branch])
+      const r = await fetch(`https://api.github.com/repos/${ownerRepo.owner}/${ownerRepo.repo}/pulls`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          title: `QACC AI Fix — run ${runId} (${committed} fix${committed > 1 ? "es" : ""})`,
+          head: branch,
+          base: "main",
+          body: `Automated corrections from QACC AI Fix for run ${runId}. Each commit maps to one QA finding. Review & merge to deploy (FlyWP).`,
+        }),
+      })
+      const j: any = await r.json().catch(() => ({}))
+      if (r.ok && j.html_url) prUrl = j.html_url
+      else logger.error({ runId, status: r.status, msg: j.message }, "AI Fix: PR creation failed.")
     } catch (e: any) {
-      logger.error({ runId, error: e.message }, "AI Fix: push to main failed.")
+      logger.error({ runId, error: e.message }, "AI Fix: push/PR failed.")
     }
   }
 
@@ -261,7 +291,7 @@ export async function processAiFixRunJob(job: Job) {
       project_id: run?.project_id || null,
       run_type: run?.run_type || null,
       committed,
-      commit_url: commitUrl || null,
+      commit_url: prUrl || null,
       data: { repoUrl, findings: analysis },
     })
   } catch (e: any) {
@@ -281,8 +311,7 @@ export async function processAiFixRunJob(job: Job) {
 
   let comment = ""
   if (fixedByCheck.size > 0) {
-    comment += `<strong>🤖 QACC AI Fix — Corrections Applied (${committed})</strong><br>`
-    if (commitUrl) comment += `Pushed to <a href="${commitUrl}">main</a> — FlyWP will auto-deploy.<br><br>`
+    comment += `<strong>🤖 QACC AI Fix — Corrections Applied (${committed})</strong><br><br>`
     for (const [factor, byPage] of fixedByCheck) {
       comment += `<strong>${labelFor(factor)}</strong><br>`
       for (const [pageUrl, fixes] of byPage) {
@@ -292,11 +321,25 @@ export async function processAiFixRunJob(job: Job) {
       comment += `<br>`
     }
   } else {
-    comment += `<strong>🤖 QACC AI Fix</strong><br><br>No automated code corrections were applied this run. Full analysis is available in QACC (Dry-run Data).`
+    comment += `<strong>🤖 QACC AI Fix</strong><br><br>No automated code corrections were applied this run.<br>`
+  }
+
+  // The single PR carrying all the corrections.
+  if (prUrl) comment += `Pull request: <a href="${prUrl}">${prUrl}</a><br>`
+
+  // "Review needed" — the findings AI could not auto-fix (human decision).
+  const reviewItems = analysis.filter((a) => !a.applied)
+  if (reviewItems.length > 0) {
+    comment += `<br><strong>Review needed:</strong><br>`
+    for (const a of reviewItems.slice(0, REVIEW_MAX)) {
+      comment += `- ${shortPage(a.pageUrl)}: ${a.fix || a.title}<br>`
+    }
+    if (reviewItems.length > REVIEW_MAX)
+      comment += `- …and ${reviewItems.length - REVIEW_MAX} more — see QACC Dry-run Data<br>`
   }
 
   const posted = await postTedComment(tedTaskId, comment.trim(), `ext:qacc-aifix-${runId}`)
-  logger.info({ runId, tedTaskId, posted, committed, commitUrl }, "AI Fix module finished")
+  logger.info({ runId, tedTaskId, posted, committed, prUrl }, "AI Fix module finished")
 
   if (workDir) await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {})
 }
