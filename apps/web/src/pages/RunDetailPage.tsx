@@ -786,6 +786,8 @@ export const RunDetailPage = () => {
     "functionality_check",
     "gbp_check",
     "image_quality",
+    "grammar",
+    "accessibility_check",
   ]
 
   // 1. Extract any general run-level findings (null page_id OR project plan factor OR hero_media matching selected page)
@@ -1065,6 +1067,8 @@ export const RunDetailPage = () => {
         "functionality_check",
         "image_quality",
         "gbp_check",
+        "grammar",
+        "accessibility_check",
       ].includes(c),
     )
 
@@ -1853,6 +1857,8 @@ export const RunDetailPage = () => {
                     functionality_check: "Website Functionality Testing",
                     gbp_check: "GBP Optimization Check",
                     image_quality: "Image Quality (Watermark & Blur)",
+                    grammar: "Grammar Check",
+                    accessibility_check: "Accessibility Check",
                   }
                   const checkName =
                     checkNameMap[checkKey] ||

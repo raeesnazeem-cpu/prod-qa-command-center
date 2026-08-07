@@ -3,7 +3,7 @@ import { checkLearnMoreButtons } from "../checks/learnMoreButtonsCheck"
 import { chromium } from "playwright"
 import { supabase } from "../lib/supabase"
 import { qaQueue } from "../lib/queue"
-import { postFinalReportToTED } from "../lib/tedSync"
+import { postFinalReportToTED, postScanCompleteComment } from "../lib/tedSync"
 import { checkBrokenLinks } from "../checks/brokenLinksCheck"
 import { checkExternalLinks } from "../checks/externalLinkCheck"
 import { checkMeta } from "../checks/metaCheck"
@@ -23,6 +23,8 @@ import { checkReviewReputation } from "../checks/reviewReputationCheck"
 import { checkFunctionality } from "../checks/functionalityCheck"
 import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkGbp } from "../checks/gbpCheck"
+import { checkGrammar } from "../checks/grammarCheck"
+import { checkAccessibility } from "../checks/accessibilityCheck"
 import {
   checkPrivacyPolicy,
   checkFooterLogo,
@@ -500,6 +502,32 @@ export async function processCrawlPageJob(job: Job) {
             await updateCheckProgress("functionality_check", p, m)
           }).catch((e) => {
             logger.error("Functionality check failed:", e)
+            return []
+          }),
+        )
+      }
+
+      // Spelling / Grammar / Accessibility — all-pages, shared-page checks.
+      if (enabledChecks.includes("spelling")) {
+        checkPromises.push(
+          checkSpelling(page, screenshots).catch((e) => {
+            logger.error("Spelling check failed:", e)
+            return []
+          }),
+        )
+      }
+      if (enabledChecks.includes("grammar")) {
+        checkPromises.push(
+          checkGrammar(page, screenshots).catch((e) => {
+            logger.error("Grammar check failed:", e)
+            return []
+          }),
+        )
+      }
+      if (enabledChecks.includes("accessibility_check")) {
+        checkPromises.push(
+          checkAccessibility(page, screenshots).catch((e) => {
+            logger.error("Accessibility check failed:", e)
             return []
           }),
         )
@@ -1020,10 +1048,11 @@ export async function processCrawlPageJob(job: Job) {
 
           // Post the final QA report back to TED (idempotent — see tedSync).
           if (runCheck.ted_task_id) {
-            postFinalReportToTED(runId, runCheck.ted_task_id).catch((e) =>
+            // 1) main report → 2) "scan complete, fixes running" → 3) AI Fix pass.
+            await postFinalReportToTED(runId, runCheck.ted_task_id).catch((e) =>
               logger.error("TED Sync failed:", e),
             )
-            // AI Fix module (gated by AI_FIX_MODULE_ENABLED; no-op otherwise).
+            await postScanCompleteComment(runCheck.ted_task_id, runId)
             qaQueue
               .add("ai_fix_run", { runId, tedTaskId: runCheck.ted_task_id })
               .catch((e) => logger.error("Failed to queue ai_fix_run:", e))
@@ -1043,10 +1072,11 @@ export async function processCrawlPageJob(job: Job) {
           .eq("id", runId)
           .single()
         if (finalRun?.ted_task_id) {
-          postFinalReportToTED(runId, finalRun.ted_task_id).catch((e) =>
+          // 1) main report → 2) "scan complete, fixes running" → 3) AI Fix pass.
+          await postFinalReportToTED(runId, finalRun.ted_task_id).catch((e) =>
             logger.error("TED Sync failed:", e),
           )
-          // AI Fix module (gated by AI_FIX_MODULE_ENABLED; no-op otherwise).
+          await postScanCompleteComment(finalRun.ted_task_id, runId)
           qaQueue
             .add("ai_fix_run", { runId, tedTaskId: finalRun.ted_task_id })
             .catch((e) => logger.error("Failed to queue ai_fix_run:", e))

@@ -139,6 +139,8 @@ export const StartRunModal = ({
       "hero_media",
       "dead_links",
       "learn_more_buttons",
+      "grammar",
+      "accessibility_check",
     ]
     // 2. Check if any of these page scan checks are selected by the user
     const requiresPageScan = data.enabled_checks.some((c) =>
@@ -440,6 +442,22 @@ export const StartRunModal = ({
       id: "plugin_update_check",
       label: "Plugin update check",
       description: "verify if all plugins are updated or not",
+    },
+    {
+      id: "spelling",
+      label: "Spelling (all pages)",
+      description: "Scan every page for spelling mistakes.",
+    },
+    {
+      id: "grammar",
+      label: "Grammar (all pages)",
+      description: "Scan every page's copy for grammar and punctuation issues.",
+    },
+    {
+      id: "accessibility_check",
+      label: "Accessibility (all pages)",
+      description:
+        "Scan every page for common WCAG issues — missing alt text, form labels, lang, title, control names, heading order.",
     },
   ]
 

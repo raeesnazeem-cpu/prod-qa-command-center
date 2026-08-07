@@ -1249,7 +1249,12 @@ webhookRouter.post(
                 project_id: project.id,
                 run_type: "post_release",
                 site_url: runSiteUrl,
-                enabled_checks: ["gsr_check"],
+                enabled_checks: [
+                  "gsr_check",
+                  "spelling",
+                  "grammar",
+                  "accessibility_check",
+                ],
                 device_matrix: ["desktop"],
                 status: "running",
                 created_by: runCreatorId,

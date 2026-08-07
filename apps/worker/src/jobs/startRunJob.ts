@@ -82,6 +82,8 @@ export async function processStartRunJob(job: Job) {
       "false_breakpoint",
       "functionality_check",
       "image_quality",
+      "grammar",
+      "accessibility_check",
     ]
 
     const HOMEPAGE_ONLY_CHECKS = [

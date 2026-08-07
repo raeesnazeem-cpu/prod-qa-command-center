@@ -197,6 +197,29 @@ const titleCase = (s: string) =>
 const esc = (s: any) =>
   String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
+// A "tool lapse" is a QACC-internal failure/skip (an errored or skipped check,
+// missing credentials, timeouts, AI errors) — NOT a real site defect. These are
+// kept OUT of every TED report so QACC's own hiccups never appear unprofessional.
+// Matches only phrases QACC itself emits; real site findings (e.g. "Hero video
+// failed to load") are left untouched.
+export function isToolLapseFinding(f: any): boolean {
+  const t = String(f?.title || "").toLowerCase()
+  const d = String(f?.description || "").toLowerCase()
+  const s = `${t} ${d}`
+  return (
+    /check (failed|error)\b/.test(t) ||
+    /failed or timed out/.test(t) ||
+    /(check )?skipped/.test(t) ||
+    /not configured|no password|was not provided/.test(s) ||
+    /process aborted gracefully/.test(d) ||
+    /encountered an (unexpected )?error/.test(d) ||
+    /encountered a timeout/.test(d) ||
+    /request failed with status code/.test(d) ||
+    /google_places_api_key/.test(s) ||
+    /could not obtain|ai triage failed/.test(s)
+  )
+}
+
 // Dead-links descriptions are a JSON array, a markdown table, or bullets.
 function parseLinks(desc?: string | null): any[] {
   if (!desc) return []
@@ -320,6 +343,15 @@ async function renderGroup(
   return html
 }
 
+// Interim comment posted AFTER the QA report and BEFORE the AI-fix pass, so the
+// TED task shows a clear hand-off. Only posts when the AI Fix module is enabled
+// (otherwise there is no fix pass to announce).
+export async function postScanCompleteComment(tedTaskId: string, runId: string) {
+  if (process.env.AI_FIX_MODULE_ENABLED !== "true") return
+  const text = `<p>✅ <strong>QA scan complete.</strong> QACC AI Fix is now generating and applying corrections in the background — the fix report will follow shortly.</p>`
+  await postTedComment(tedTaskId, text, `ext:qacc-scan-complete-${runId}`).catch(() => {})
+}
+
 export async function postFinalReportToTED(runId: string, tedTaskId: string) {
   try {
     const apiToken = process.env.TED_API_TOKEN
@@ -358,17 +390,20 @@ export async function postFinalReportToTED(runId: string, tedTaskId: string) {
       return
     }
 
+    // Hide QACC-internal lapses (errored/skipped checks) — keep only real findings.
+    const shown = (findings || []).filter((f) => !isToolLapseFinding(f))
+
     let reportText = `<strong>QACC Automated QA Run Completed</strong><br><br>`
 
-    if (!findings || findings.length === 0) {
-      logger.info({ runId }, "No findings for run, reporting perfect score to TED.")
+    if (shown.length === 0) {
+      logger.info({ runId }, "No reportable findings for run; reporting clean pass to TED.")
       reportText += `🎉 All checks passed successfully! 0 issues found.`
     } else {
       // Group findings by check type → ONE heading per check, all its findings
       // merged into a single deduped table, screenshots once per group.
       const imgBudget = { remaining: IMG_BUDGET_BYTES }
       const groups = new Map<string, any[]>()
-      for (const f of findings) {
+      for (const f of shown) {
         const k = f.check_factor || "other"
         if (!groups.has(k)) groups.set(k, [])
         groups.get(k)!.push(f)

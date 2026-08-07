@@ -2,7 +2,7 @@ import { Job } from "bullmq"
 import { supabase } from "../lib/supabase"
 import { completeText, describeImage } from "../lib/aiFallback"
 import { resolveBetaSiteRepo } from "../lib/tedClient"
-import { postTedComment } from "../lib/tedSync"
+import { postTedComment, isToolLapseFinding } from "../lib/tedSync"
 import { execFile } from "child_process"
 import { promisify } from "util"
 import fs from "fs"
@@ -232,10 +232,25 @@ export async function processAiFixRunJob(job: Job) {
     category: string
     fix: string
     applied: boolean
+    lapse: boolean
   }[] = []
 
-  for (const f of findings ? findings.slice(0, MAX_FINDINGS) : []) {
+  for (const f of (findings || []).slice(0, MAX_FINDINGS)) {
     const pageUrl = pageUrlById.get(f.page_id) || ""
+    // Lapses (errored/skipped checks) are RECORDED for the internal Dry-run Data
+    // tab, but never triaged, fixed, or shown in the TED report.
+    if (isToolLapseFinding(f)) {
+      analysis.push({
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+        category: "not_possible",
+        fix: f.description || "Internal check issue (not a site defect).",
+        applied: false,
+        lapse: true,
+      })
+      continue
+    }
     let visual = ""
     const firstShot = (f.screenshot_url || "").split(",")[0]?.trim()
     if (firstShot) {
@@ -263,7 +278,7 @@ export async function processAiFixRunJob(job: Job) {
     ].join("\n")
 
     let category = "not_possible"
-    let fix = "Could not obtain an AI proposal."
+    let fix = "Requires manual review."
     let edits: Edit[] = []
     try {
       const { text } = await completeText(system, user)
@@ -273,8 +288,9 @@ export async function processAiFixRunJob(job: Job) {
         fix = parsed.fix || fix
         edits = parsed.edits
       }
-    } catch (e: any) {
-      fix = `AI triage failed: ${e.message}`
+    } catch {
+      // Keep the professional default ("Requires manual review.") — never surface
+      // internal AI/model errors in the report.
     }
 
     let applied = false
@@ -305,7 +321,7 @@ export async function processAiFixRunJob(job: Job) {
     if (!applied && (category === "fully_ai" || category === "partial_ai") && workDir) {
       category = "manual"
     }
-    analysis.push({ check_factor: f.check_factor, title: f.title || f.check_factor, pageUrl, category, fix, applied })
+    analysis.push({ check_factor: f.check_factor, title: f.title || f.check_factor, pageUrl, category, fix, applied, lapse: false })
   }
 
   // --- Push the branch + open ONE pull request ---
@@ -388,7 +404,7 @@ export async function processAiFixRunJob(job: Job) {
   // Review needed — findings AI could not auto-fix, grouped by page (subheading + bullets).
   const reviewByPage = new Map<string, string[]>()
   for (const a of analysis) {
-    if (a.applied) continue
+    if (a.applied || a.lapse) continue // lapses stay in Dry-run Data only, not TED
     const key = a.pageUrl || "(site-wide)"
     if (!reviewByPage.has(key)) reviewByPage.set(key, [])
     reviewByPage.get(key)!.push(a.fix || a.title)
