@@ -102,7 +102,7 @@ export async function postTedComment(
 // downscale + webp-compress it, and inline it as a data-URI — plus a text link
 // as a fallback / route to the full-res original. A running size budget guards
 // against oversized comments: once exhausted, remaining shots become link-only.
-const MAX_IMG_WIDTH = 600
+const MAX_IMG_WIDTH = 480
 const WEBP_QUALITY = 75
 const IMG_BUDGET_BYTES = 4 * 1024 * 1024 // ~4MB of base64 across the whole report
 
@@ -123,14 +123,16 @@ async function renderScreenshotsHtml(
         const resp = await fetch(url)
         if (resp.ok) {
           const srcBuf = Buffer.from(await resp.arrayBuffer())
-          const webp = await sharp(srcBuf)
+          const out = await sharp(srcBuf)
             .resize({ width: MAX_IMG_WIDTH, withoutEnlargement: true })
             .webp({ quality: WEBP_QUALITY })
-            .toBuffer()
-          const dataUri = `data:image/webp;base64,${webp.toString("base64")}`
+            .toBuffer({ resolveWithObject: true })
+          const dataUri = `data:image/webp;base64,${out.data.toString("base64")}`
           if (dataUri.length <= budget.remaining) {
             budget.remaining -= dataUri.length
-            html += `<div class="comment-shots"><div class="comment-shot"><img src="${dataUri}" style="max-width:100%;height:auto;" /></div></div>`
+            // Bare <img> with real pixel width/height ATTRIBUTES (not style — TED
+            // strips style). Locks aspect ratio + caps size so TED CSS can't stretch it.
+            html += `<img src="${dataUri}" width="${out.info.width}" height="${out.info.height}" alt="screenshot" /><br>`
           } else {
             logger.warn({ url }, "Screenshot skipped inline embed: report image budget exhausted; using link only.")
           }
@@ -147,13 +149,10 @@ async function renderScreenshotsHtml(
   return html
 }
 
-// ---- Report formatting: group by check, dedupe, render as tables ----
-// NOTE: TED's comment sanitizer STRIPS inline style="" attributes. So we style
-// tables with legacy HTML attributes (border/cellpadding/cellspacing/align)
-// that survive sanitization — that's what makes the grid visible in TED.
-const TBL = `border="1" cellpadding="6" cellspacing="0" width="100%"`
-const TH = `align="left"`
-const TD = `valign="top"`
+// ---- Report formatting: group by check, dedupe, render as bullet LISTS ----
+// TED's sanitizer strips inline style and mangles <table>, but renders
+// <p>/<strong>/<ul>/<li> cleanly (the format the TED team itself uses). So we
+// use plain grouped lists, one heading per check.
 
 const FRIENDLY: Record<string, string> = {
   dead_links: "Dead Links & Broken Anchors",
@@ -241,31 +240,31 @@ function dedupeFindings(group: any[]): any[] {
 }
 
 function genericTable(findings: any[]): string {
-  let h = `<table ${TBL}><tr><th ${TH}>Finding</th><th ${TH}>Details</th></tr>`
+  let h = `<ul>`
   for (const f of findings) {
     const desc = (f.description || "").replace(/\n/g, "<br>")
-    h += `<tr><td ${TD}>${esc(f.title || f.check_factor)}</td><td ${TD}>${desc}</td></tr>`
+    h += `<li><strong>${esc(f.title || f.check_factor)}</strong>${desc ? `<br>${desc}` : ""}</li>`
   }
-  return h + `</table>`
+  return h + `</ul>`
 }
 
 function linkTable(rows: any[]): string {
-  let h = `<table ${TBL}><tr><th ${TH}>URL</th><th ${TH}>Reason</th><th ${TH}>Link Text</th><th ${TH}>Found On</th></tr>`
+  let h = `<ul>`
   for (const r of rows) {
     const url = esc(r.url || "")
     const found = esc(r.found_on || "")
-    h += `<tr><td ${TD}><a href="${url}">${url}</a></td><td ${TD}>${esc(r.reason || "")}</td><td ${TD}>${esc(r.link_text || r["Link text"] || "")}</td><td ${TD}>${found ? `<a href="${found}">${found}</a>` : "-"}</td></tr>`
+    h += `<li><a href="${url}">${url}</a> — ${esc(r.reason || "")}${esc(r.link_text || r["Link text"] || "") ? ` (link: ${esc(r.link_text || r["Link text"])})` : ""}${found ? ` — found on <a href="${found}">${found}</a>` : ""}</li>`
   }
-  return h + `</table>`
+  return h + `</ul>`
 }
 
 function imageTable(rows: any[]): string {
-  let h = `<table ${TBL}><tr><th ${TH}>Issue</th><th ${TH}>Image</th><th ${TH}>Detail</th></tr>`
+  let h = `<ul>`
   for (const r of rows) {
     const src = esc(r.src || "")
-    h += `<tr><td ${TD}>${esc(r.type || "")}</td><td ${TD}><a href="${src}">${src}</a></td><td ${TD}>${esc(r.note || "")}</td></tr>`
+    h += `<li><strong>${esc(r.type || "")}</strong> — <a href="${src}">${src}</a>${r.note ? ` (${esc(r.note)})` : ""}</li>`
   }
-  return h + `</table>`
+  return h + `</ul>`
 }
 
 // Render one check-group: a single merged table + its (deduped) screenshots.
@@ -377,7 +376,7 @@ export async function postFinalReportToTED(runId: string, tedTaskId: string) {
       reportText += `Found issues across ${groups.size} check${groups.size > 1 ? "s" : ""}.<br>`
       for (const [factor, group] of groups) {
         const label = FRIENDLY[factor] || titleCase(factor)
-        reportText += `<br><strong style="font-size:14px">${esc(label)}</strong><br>`
+        reportText += `<h3>${esc(label)}</h3>`
         reportText += await renderGroup(factor, group, imgBudget)
       }
     } // End of findings else block
