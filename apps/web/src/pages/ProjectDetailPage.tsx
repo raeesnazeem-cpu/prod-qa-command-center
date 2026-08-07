@@ -24,6 +24,7 @@ import {
 } from "lucide-react"
 import { ProjectOverviewTab } from "../components/ProjectOverviewTab"
 import { RunsTab } from "../components/RunsTab"
+import { DryRunsTab } from "../components/DryRunsTab"
 import { TasksTab } from "../components/TasksTab"
 import { TeamTab } from "../components/TeamTab"
 import { SettingsTab } from "../components/SettingsTab"
@@ -187,6 +188,7 @@ export const ProjectDetailPage = () => {
       minRole: "developer",
     },
     { id: "runs", label: "QA Runs", icon: PlayCircle, minRole: "qa_engineer" },
+    { id: "dry-runs", label: "Dry-run Data", icon: Zap, minRole: "qa_engineer" },
     { id: "tasks", label: "Tasks", icon: CheckSquare, minRole: "developer" },
     { id: "team", label: "Team", icon: Users, minRole: "developer" },
     { id: "settings", label: "Settings", icon: SettingsIcon, minRole: "admin" },
@@ -390,6 +392,7 @@ export const ProjectDetailPage = () => {
           />
         )}
         {activeTab === "runs" && <RunsTab project={project} />}
+        {activeTab === "dry-runs" && <DryRunsTab project={project} />}
         {activeTab === "tasks" && <TasksTab project={project} />}
         {activeTab === "team" && <TeamTab project={project} />}
         {activeTab === "settings" && <SettingsTab project={project} />}

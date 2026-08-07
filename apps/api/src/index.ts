@@ -28,6 +28,7 @@ import { projectsRouter } from "./routes/projects"
 import { usersRouter } from "./routes/users"
 import { userSettingsRouter } from "./routes/userSettings"
 import { runsRouter } from "./routes/runs"
+import { aiFixRunsRouter } from "./routes/ai-fix-runs"
 import { tasksRouter } from "./routes/tasks"
 import { statsRouter } from "./routes/stats"
 import { dashboardRouter } from "./routes/dashboard"
@@ -121,6 +122,7 @@ app.use("/api/users", onboardingRouter)
 app.use("/api/users", usersRouter)
 app.use("/api/runs", runsRouter)
 app.use("/api/runs", signOffRouter)
+app.use("/api/ai-fix-runs", aiFixRunsRouter)
 app.use("/api/tasks", tasksRouter)
 app.use("/api/stats", statsRouter)
 app.use("/api/admin", adminRouter)

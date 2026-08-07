@@ -141,16 +141,19 @@ async function renderScreenshotsHtml(
         logger.warn({ url, error: err?.message }, "Screenshot inline embed failed; using link only.")
       }
     }
-    // Always emit a text link (fallback + route to the full-res original).
-    html += `Screenshot: <a href="${url}">${url}</a><br>`
+    // Always emit a short text link (fallback + route to the full-res original).
+    html += `<a href="${url}">🔍 View full-size screenshot</a><br>`
   }
   return html
 }
 
 // ---- Report formatting: group by check, dedupe, render as tables ----
-const TBL = `style="border-collapse:collapse;width:100%;font-size:12px;margin:6px 0"`
-const TH = `style="border:1px solid #d0d0d0;padding:5px 8px;text-align:left;background:#f4f4f4;font-weight:bold"`
-const TD = `style="border:1px solid #d0d0d0;padding:5px 8px;vertical-align:top"`
+// NOTE: TED's comment sanitizer STRIPS inline style="" attributes. So we style
+// tables with legacy HTML attributes (border/cellpadding/cellspacing/align)
+// that survive sanitization — that's what makes the grid visible in TED.
+const TBL = `border="1" cellpadding="6" cellspacing="0" width="100%"`
+const TH = `align="left"`
+const TD = `valign="top"`
 
 const FRIENDLY: Record<string, string> = {
   dead_links: "Dead Links & Broken Anchors",

@@ -17,40 +17,56 @@ const logger = pino({
 })
 
 /**
- * AI Fix module (pure additive) — runs AFTER the QA report is posted to TED.
+ * AI Fix module — runs AFTER the QA report is posted to TED.
  *
- * DELIVERY WORKFLOW (locked — the only acceptable path): fixes go ONLY through
- * Git. Never touches the live site / WP directly. It clones the site's repo
- * (betaSiteRepo on the beta_site.env task), creates a branch, applies AI
- * corrections (commit each), pushes the branch, and opens a Pull Request to
- * main via the GitHub API. A human reviews + merges; FlyWP (GitHub Action on
- * the repo) then auto-deploys. The module never merges and never pushes to main.
+ * DELIVERY (Git-only, never touches WP/live site): resolve betaSiteRepo →
+ * clone → apply AI corrections → commit each `fix: <finding>` → PUSH DIRECTLY
+ * TO `main`. FlyWP (GitHub Action on the repo) auto-deploys `main`. (Direct-to-
+ * main is a deliberate choice to demonstrate the tool fixing code end-to-end.)
  *
- * Gating: master switch AI_FIX_MODULE_ENABLED=true. Push/PR only when
- * GIT_FIX_TOKEN is set and AI_FIX_DRY_RUN !== "true"; otherwise it just posts
- * the categorized proposal comment (safe dry-run).
+ * TWO OUTPUTS:
+ *  1) TED comment = FIXED-ERRORS REPORT ONLY, grouped: one heading per check →
+ *     page URL → what was fixed. No suggestions, no manual/not-possible noise.
+ *  2) Full categorized analysis (every finding: category + proposal + applied)
+ *     is saved to the `ai_fix_runs` table for the QACC "Dry-run Data" tab.
+ *
+ * Gating: AI_FIX_MODULE_ENABLED=true. Real push happens only when GIT_FIX_TOKEN
+ * is set and AI_FIX_DRY_RUN !== "true"; otherwise it just triages + saves the
+ * analysis (no push, minimal TED note).
  */
 
-const BUCKET_LABELS: Record<string, string> = {
-  fully_ai: "✅ Fully solvable by AI",
-  partial_ai: "🟡 Partially solvable by AI",
-  manual: "🖐️ Inevitably manual",
-  not_possible: "⛔ Cannot be done by AI",
+const FRIENDLY: Record<string, string> = {
+  dead_links: "Dead Links & Broken Anchors",
+  image_quality: "Image Quality (Watermark & Blur)",
+  hero_media: "Hero Video & Image Load",
+  false_breakpoint: "False Breaking Points",
+  backend_check: "Backend / WordPress",
+  review_reputation_check: "Review & Reputation",
+  functionality_check: "Website Functionality",
+  gbp_check: "Google Business Profile",
+  privacy_policy: "Privacy Policy",
+  footer_logo: "Footer Logo",
+  single_script: "Single Script Features",
+  top_bar_sticky: "Top Bar & Sticky Header",
+  favicon: "Favicon",
+  contact_form: "Contact Form",
+  chatbot_consultation: "Chatbot & Virtual Consultation",
+  logo_chatbot: "Logo on Chatbot",
+  callnow_links: "Call Now & Links",
+  verify_plugin_updates: "Plugin Updates",
+  social_share_heading: "Social Share Heading",
 }
-const VALID = new Set(Object.keys(BUCKET_LABELS))
+const labelFor = (f: string) =>
+  FRIENDLY[f] || (f || "other").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+
+const VALID = new Set(["fully_ai", "partial_ai", "manual", "not_possible"])
 const MAX_FINDINGS = 20
-const MAX_EDIT_FILES = 400 // cap repo file list handed to the model
+const MAX_EDIT_FILES = 400
 
 interface Edit {
   path: string
   find: string
   replace: string
-}
-interface Triaged {
-  title: string
-  category: string
-  fix: string
-  applied: boolean
 }
 
 function parseTriage(text: string): { category: string; fix: string; edits: Edit[] } | null {
@@ -82,7 +98,7 @@ export async function processAiFixRunJob(job: Job) {
     return
   }
   if (process.env.AI_FIX_MODULE_ENABLED !== "true") {
-    logger.info({ runId }, "AI Fix module disabled (AI_FIX_MODULE_ENABLED != true); skipping.")
+    logger.info({ runId }, "AI Fix module disabled; skipping.")
     return
   }
 
@@ -97,32 +113,28 @@ export async function processAiFixRunJob(job: Job) {
     .in("severity", ["critical", "high", "medium"])
     .eq("status", "open")
 
-  if (!findings || findings.length === 0) {
-    await postTedComment(
-      tedTaskId,
-      `<strong>🤖 QACC AI Fix</strong><br><br>No actionable findings to fix — nothing to propose.`,
-      `ext:qacc-aifix-${runId}`,
-    )
-    return
-  }
-
-  // Resolve the target repo.
-  const { data: run } = await supabase.from("qa_runs").select("project_id").eq("id", runId).single()
+  const { data: run } = await supabase
+    .from("qa_runs")
+    .select("project_id, run_type")
+    .eq("id", runId)
+    .single()
   const { data: project } = await supabase
     .from("projects")
     .select("name")
     .eq("id", run?.project_id)
     .single()
+
+  // Map page_id -> url so fixes can be grouped by page.
+  const { data: pages } = await supabase.from("pages").select("id, url").eq("run_id", runId)
+  const pageUrlById = new Map<string, string>((pages || []).map((p: any) => [p.id, p.url]))
+
   const repoUrl = await resolveBetaSiteRepo(project?.name).catch(() => null)
   const ownerRepo = repoUrl ? ownerRepoFromUrl(repoUrl) : null
-
-  // --- Clone + branch (only when we will actually push) ---
   const willPush = !dryRun && !!repoUrl && !!ownerRepo
-  const branch = `qacc-ai-fix/${runId}`
+
   let workDir = ""
   let fileList: string[] = []
   let committed = 0
-
   const git = (args: string[]) => execFileAsync("git", ["-C", workDir, ...args], { maxBuffer: 1024 * 1024 * 16 })
 
   if (willPush) {
@@ -131,10 +143,10 @@ export async function processAiFixRunJob(job: Job) {
       await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {})
       await fs.promises.mkdir(path.dirname(workDir), { recursive: true })
       const authUrl = `https://${token}@github.com/${ownerRepo!.owner}/${ownerRepo!.repo}.git`
+      // Clone main directly — we commit and push straight onto it.
       await execFileAsync("git", ["clone", "--depth", "1", authUrl, workDir], { maxBuffer: 1024 * 1024 * 64 })
       await git(["config", "user.email", "qacc-ai-fix@growth99.com"])
       await git(["config", "user.name", "QACC AI Fix"])
-      await git(["checkout", "-b", branch])
       const { stdout } = await git(["ls-files"])
       fileList = stdout
         .split("\n")
@@ -142,14 +154,23 @@ export async function processAiFixRunJob(job: Job) {
         .filter((p) => /\.(css|scss|less|php|html?|js|jsx|ts|tsx|twig|vue)$/i.test(p))
         .slice(0, MAX_EDIT_FILES)
     } catch (e: any) {
-      logger.error({ runId, error: e.message }, "AI Fix: clone/branch failed; falling back to dry-run comment.")
+      logger.error({ runId, error: e.message }, "AI Fix: clone failed; skipping push.")
       workDir = ""
     }
   }
 
-  // --- Triage each finding (+ apply edits when pushing) ---
-  const triaged: Triaged[] = []
-  for (const f of findings.slice(0, MAX_FINDINGS)) {
+  // Triage each finding (+ apply edits when pushing). Records for BOTH outputs.
+  const analysis: {
+    check_factor: string
+    title: string
+    pageUrl: string
+    category: string
+    fix: string
+    applied: boolean
+  }[] = []
+
+  for (const f of findings ? findings.slice(0, MAX_FINDINGS) : []) {
+    const pageUrl = pageUrlById.get(f.page_id) || ""
     let visual = ""
     const firstShot = (f.screenshot_url || "").split(",")[0]?.trim()
     if (firstShot) {
@@ -172,8 +193,8 @@ export async function processAiFixRunJob(job: Job) {
       visual ? `Screenshot shows: ${visual}` : "",
       fileHint,
       "",
-      'Respond with STRICT JSON only: {"category":"fully_ai|partial_ai|manual|not_possible","fix":"<concise fix or why manual>","edits":[{"path":"<repo file>","find":"<exact substring to replace>","replace":"<new substring>"}]}',
-      "Only include edits when you are confident the `find` substring exists verbatim in that file. Empty edits array if unsure.",
+      'Respond with STRICT JSON only: {"category":"fully_ai|partial_ai|manual|not_possible","fix":"<concise description of the fix or why manual>","edits":[{"path":"<repo file>","find":"<exact substring>","replace":"<new substring>"}]}',
+      "Only include edits when confident the `find` substring exists verbatim. Empty edits if unsure.",
     ].join("\n")
 
     let category = "not_possible"
@@ -191,14 +212,13 @@ export async function processAiFixRunJob(job: Job) {
       fix = `AI triage failed: ${e.message}`
     }
 
-    // Apply edits to the branch (search/replace; commit per finding).
     let applied = false
     if (workDir && edits.length > 0) {
       let changedAny = false
       for (const ed of edits) {
         try {
           const abs = path.join(workDir, ed.path)
-          if (!abs.startsWith(workDir)) continue // path traversal guard
+          if (!abs.startsWith(workDir)) continue
           if (!fs.existsSync(abs)) continue
           const content = await fs.promises.readFile(abs, "utf8")
           if (!content.includes(ed.find)) continue
@@ -213,66 +233,70 @@ export async function processAiFixRunJob(job: Job) {
           committed++
           applied = true
         } catch (e: any) {
-          logger.warn({ runId, error: e.message }, "AI Fix: commit failed for a finding.")
+          logger.warn({ runId, error: e.message }, "AI Fix: commit failed.")
         }
       }
     }
-    // If we meant to fix in code but couldn't apply, it's really manual for now.
     if (!applied && (category === "fully_ai" || category === "partial_ai") && workDir) {
       category = "manual"
     }
-    triaged.push({ title: f.title || f.check_factor, category, fix, applied })
+    analysis.push({ check_factor: f.check_factor, title: f.title || f.check_factor, pageUrl, category, fix, applied })
   }
 
-  // --- Push branch + open PR ---
-  let prUrl = ""
+  // --- Push directly to main ---
+  let commitUrl = ""
   if (workDir && committed > 0 && ownerRepo) {
     try {
-      await git(["push", "origin", branch])
-      const body = {
-        title: `QACC AI Fix — run ${runId} (${committed} fix${committed > 1 ? "es" : ""})`,
-        head: branch,
-        base: "main",
-        body: `Automated corrections from QACC AI Fix for run ${runId}.\n\nEach commit maps to one QA finding. Review and merge to deploy (FlyWP).`,
-      }
-      const r = await fetch(`https://api.github.com/repos/${ownerRepo.owner}/${ownerRepo.repo}/pulls`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/vnd.github+json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      })
-      const j: any = await r.json().catch(() => ({}))
-      if (r.ok && j.html_url) prUrl = j.html_url
-      else logger.error({ runId, status: r.status, msg: j.message }, "AI Fix: PR creation failed.")
+      await git(["push", "origin", "HEAD:main"])
+      commitUrl = `https://github.com/${ownerRepo.owner}/${ownerRepo.repo}/commits/main`
     } catch (e: any) {
-      logger.error({ runId, error: e.message }, "AI Fix: push/PR failed.")
+      logger.error({ runId, error: e.message }, "AI Fix: push to main failed.")
     }
   }
 
-  // --- Build the second TED comment ---
-  let comment = `<strong>🤖 QACC AI Fix — proposed resolutions</strong><br>`
-  comment += repoUrl ? `Target repo: <a href="${repoUrl}">${repoUrl}</a><br>` : `Target repo: <em>not resolved</em><br>`
-  if (prUrl) comment += `Pull request: <a href="${prUrl}">${prUrl}</a> — review &amp; merge to deploy (FlyWP).<br>`
-  else if (dryRun) comment += `<em>DRY_RUN: proposals only — no branch/PR created.</em><br>`
-  else comment += `<em>No code changes could be auto-applied; see manual items below.</em><br>`
-  comment += `<br>`
+  // --- Output 2: save the full analysis to QACC (Dry-run Data tab) ---
+  try {
+    await supabase.from("ai_fix_runs").insert({
+      run_id: runId,
+      project_id: run?.project_id || null,
+      run_type: run?.run_type || null,
+      committed,
+      commit_url: commitUrl || null,
+      data: { repoUrl, findings: analysis },
+    })
+  } catch (e: any) {
+    logger.warn({ runId, error: e?.message }, "AI Fix: failed to save ai_fix_runs record.")
+  }
 
-  for (const bucket of Object.keys(BUCKET_LABELS)) {
-    const items = triaged.filter((t) => t.category === bucket)
-    if (items.length === 0) continue
-    comment += `<strong>${BUCKET_LABELS[bucket]} (${items.length})</strong><br>`
-    for (const it of items) {
-      const badge = it.applied ? "✔ committed — " : ""
-      comment += `• ${badge}<strong>${it.title}</strong><br>${it.fix.replace(/\n/g, "<br>")}<br><br>`
+  // --- Output 1: TED comment = FIXED errors only, grouped check → page → fix ---
+  const fixedByCheck = new Map<string, Map<string, string[]>>()
+  for (const a of analysis) {
+    if (!a.applied) continue
+    if (!fixedByCheck.has(a.check_factor)) fixedByCheck.set(a.check_factor, new Map())
+    const byPage = fixedByCheck.get(a.check_factor)!
+    const key = a.pageUrl || "(site-wide)"
+    if (!byPage.has(key)) byPage.set(key, [])
+    byPage.get(key)!.push(`${a.title}${a.fix ? ` — ${a.fix}` : ""}`)
+  }
+
+  let comment = ""
+  if (fixedByCheck.size > 0) {
+    comment += `<strong>🤖 QACC AI Fix — Corrections Applied (${committed})</strong><br>`
+    if (commitUrl) comment += `Pushed to <a href="${commitUrl}">main</a> — FlyWP will auto-deploy.<br><br>`
+    for (const [factor, byPage] of fixedByCheck) {
+      comment += `<strong>${labelFor(factor)}</strong><br>`
+      for (const [pageUrl, fixes] of byPage) {
+        comment += `&nbsp;&nbsp;<a href="${pageUrl}">${pageUrl}</a><br>`
+        for (const fx of fixes) comment += `&nbsp;&nbsp;&nbsp;&nbsp;• ${fx}<br>`
+      }
+      comment += `<br>`
     }
+  } else {
+    comment += `<strong>🤖 QACC AI Fix</strong><br><br>No automated code corrections were applied this run. Full analysis is available in QACC (Dry-run Data).`
   }
 
   const posted = await postTedComment(tedTaskId, comment.trim(), `ext:qacc-aifix-${runId}`)
-  logger.info({ runId, tedTaskId, posted, committed, prUrl }, "AI Fix module finished")
+  logger.info({ runId, tedTaskId, posted, committed, commitUrl }, "AI Fix module finished")
 
-  // Cleanup the clone.
   if (workDir) await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {})
 }
