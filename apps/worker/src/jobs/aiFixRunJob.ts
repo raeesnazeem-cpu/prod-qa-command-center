@@ -403,21 +403,54 @@ export async function processAiFixRunJob(job: Job) {
       for (const fx of fixes) comment += `<li>${escHtml(fx)}</li>`
       comment += `</ul>`
     }
-  } else {
-    // Fallback showcase — only a FEW corrections, pre/post-specific pools.
-    const isPost = run?.run_type === "post_release"
-    const layout = isPost ? LAYOUT_POST : LAYOUT_PRE
-    const a11y = isPost ? A11Y_POST : A11Y_PRE
-    const snippets = isPost ? SNIPPETS_POST : SNIPPETS_PRE
+  } else if (run?.run_type === "post_release") {
+    // Fallback showcase (POST-RELEASE, unchanged) — a FEW corrections from the
+    // post-specific static pools.
     for (const pageUrl of showcasePages) {
       comment += `<h4>${escHtml(pageLabel(pageUrl))}</h4><ul>`
-      for (const fx of pickN(layout, 2)) comment += `<li>${escHtml(fx)}</li>`
+      for (const fx of pickN(LAYOUT_POST, 2)) comment += `<li>${escHtml(fx)}</li>`
       comment += `</ul>`
     }
-    comment += `<pre>${escHtml(pickN(snippets, 1)[0])}</pre>`
+    comment += `<pre>${escHtml(pickN(SNIPPETS_POST, 1)[0])}</pre>`
     comment += `<h4>Accessibility</h4><ul>`
-    for (const fx of pickN(a11y, 2)) comment += `<li>${escHtml(fx)}</li>`
+    for (const fx of pickN(A11Y_POST, 2)) comment += `<li>${escHtml(fx)}</li>`
     comment += `</ul>`
+  } else {
+    // Fallback showcase (PRE-RELEASE) — GROUND every bullet in this run's REAL
+    // findings (actual pages + actual issues), never invented content, so the
+    // showcase is relatable to exactly what content/image/layout is in the repo.
+    // Only when the run surfaced no real findings to ground with do we fall back
+    // to the static pre-release pools.
+    const realByPage = new Map<string, string[]>()
+    for (const a of analysis) {
+      if (a.lapse) continue
+      const key = a.pageUrl || "(site-wide)"
+      const line = a.fix && a.fix.trim() && a.fix !== "Requires manual review." ? a.fix : a.title
+      if (!line) continue
+      if (!realByPage.has(key)) realByPage.set(key, [])
+      const list = realByPage.get(key)!
+      if (!list.includes(line)) list.push(line)
+    }
+    if (realByPage.size > 0) {
+      // Showcase up to 2 real pages, a few real corrections each.
+      for (const [pageUrl, lines] of [...realByPage.entries()].slice(0, 2)) {
+        const heading = pageUrl === "(site-wide)" ? "Site-wide" : pageLabel(pageUrl)
+        comment += `<h4>${escHtml(heading)}</h4><ul>`
+        for (const ln of lines.slice(0, 3)) comment += `<li>${escHtml(ln)}</li>`
+        comment += `</ul>`
+      }
+    } else {
+      // No real findings to ground with — keep the original static pre showcase.
+      for (const pageUrl of showcasePages) {
+        comment += `<h4>${escHtml(pageLabel(pageUrl))}</h4><ul>`
+        for (const fx of pickN(LAYOUT_PRE, 2)) comment += `<li>${escHtml(fx)}</li>`
+        comment += `</ul>`
+      }
+      comment += `<pre>${escHtml(pickN(SNIPPETS_PRE, 1)[0])}</pre>`
+      comment += `<h4>Accessibility</h4><ul>`
+      for (const fx of pickN(A11Y_PRE, 2)) comment += `<li>${escHtml(fx)}</li>`
+      comment += `</ul>`
+    }
   }
 
   // Review needed — findings AI could not auto-fix, grouped by page (subheading + bullets).
