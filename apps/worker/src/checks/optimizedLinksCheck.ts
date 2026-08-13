@@ -222,7 +222,6 @@
 //   return [
 //     {
 //       check_factor: "dead_links",
-//       severity: brokenLinks.length > 5 ? "critical" : "medium",
 //       title: `${brokenLinks.length} broken link${brokenLinks.length === 1 ? "" : "s"} found`,
 //       // IMPORTANT: The UI's RunDetailPage.tsx expects the string "- **" to parse and count dead links!
 //       // Do not change the "- **" prefix, or the UI heading will say "0 dead link found".
@@ -388,7 +387,20 @@ export async function checkOptimizedLinks(
         { pageUrl, error: error.message },
         "Failed to fetch HTML for link extraction",
       )
-      return []
+      // A fetch failure means the page was never scanned. Returning [] here
+      // would be reported as "no broken links" — a false clean pass. Surface it
+      // as a check failure instead.
+      return [
+        {
+          check_factor: "dead_links",
+          title: "Dead Links Check Failed",
+          description: `Could not fetch the page to scan its links: ${error.message}. Process aborted gracefully; QACC will retry on the next run.`,
+          context_text: "System Error",
+          screenshot_url: null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
     }
 
     if (extractedLinks.length === 0) return []
@@ -494,7 +506,6 @@ export async function checkOptimizedLinks(
     return [
       {
         check_factor: "dead_links",
-        severity: brokenLinks.length > 5 ? "critical" : "medium",
         title: `${brokenLinks.length} broken link${brokenLinks.length === 1 ? "" : "s"} found`,
         description: brokenLinks
           .map(
@@ -512,7 +523,6 @@ export async function checkOptimizedLinks(
     return [
       {
         check_factor: "dead_links",
-        severity: "high",
         title: "Dead Links Check Failed",
         description: `The check encountered an unexpected error: ${error.message}. Process aborted gracefully.`,
         context_text: "System Error",

@@ -9,6 +9,19 @@ import os from "os"
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || "" })
 const genAI = new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY || "" })
 
+// Extra Gemini keys (GEMINI_KEYS, comma-separated) tried AFTER the free
+// providers but BEFORE the paid GEMINI_API_KEY. Empty entries dropped.
+const geminiKeyClients = (process.env.GEMINI_KEYS || "")
+  .split(",")
+  .map((k) => k.trim())
+  .filter(Boolean)
+  .map((apiKey) => new GoogleGenAI({ apiKey }))
+
+// Paid Gemini (GEMINI_API_KEY) — last-resort, billed only after everything above fails.
+const paidGeminiClient = process.env.GEMINI_API_KEY
+  ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
+  : null
+
 logger.info(
   {
     hasGroqKey: !!process.env.GROQ_API_KEY,
@@ -165,6 +178,20 @@ export async function chatWithFallback(
     { name: "mistral", fn: mistralChat },
     { name: "cohere", fn: cohereChat },
     { name: "cerebras", fn: cerebrasChat },
+    // Extra Gemini keys (GEMINI_KEYS): after the free providers, before paid.
+    ...geminiKeyClients.map((client, i) => ({
+      name: `gemini-keys-${i + 1}`,
+      fn: (m: ChatMessage[], t: any[], h: (name: string, args: any) => Promise<any>) =>
+        geminiChat(m, t, h, client),
+    })),
+    // GEMINI_API_KEY (paid) — always LAST, only reached if all of the above fail.
+    ...(paidGeminiClient
+      ? [{
+          name: "gemini-paid",
+          fn: (m: ChatMessage[], t: any[], h: (name: string, args: any) => Promise<any>) =>
+            geminiChat(m, t, h, paidGeminiClient!),
+        }]
+      : []),
   ]
 
   const failedProviders: string[] = []
@@ -378,6 +405,7 @@ async function geminiChat(
   messages: ChatMessage[],
   tools: any[],
   toolCallHandler: (name: string, args: any) => Promise<any>,
+  client: GoogleGenAI = genAI,
 ) {
   const systemMessage = messages.find((m) => m.role === "system")?.content || ""
   const safeTools = sanitizeToolsForGemini(tools)
@@ -451,7 +479,7 @@ async function geminiChat(
 
     for (const model of modelsToTry) {
       try {
-        response = await genAI.models.generateContent({
+        response = await client.models.generateContent({
           model: model,
           contents: contents,
           config: {

@@ -357,7 +357,7 @@ router.get("/:id", clerkAuth, async (req: Request, res: Response) => {
     // 3. Fetch all findings for this run to aggregate per page
     const { data: findings, error: findingsError } = await supabase
       .from("findings")
-      .select("id, page_id, check_factor, severity, status")
+      .select("id, page_id, check_factor, status")
       .eq("run_id", id)
 
     if (findingsError) throw findingsError
@@ -415,7 +415,7 @@ router.get("/:id", clerkAuth, async (req: Request, res: Response) => {
 
 /**
  * PATCH /api/findings/:id
- * Update finding details (severity, status, etc.)
+ * Update finding details (status, etc.)
  */
 router.patch(
   "/findings/:id",
@@ -423,12 +423,12 @@ router.patch(
   requireRole("qa_engineer"),
   async (req: Request, res: Response) => {
     const { id } = req.params
-    const { severity, status } = req.body
+    const { status } = req.body
 
     try {
       const { data: updatedFinding, error } = await supabase
         .from("findings")
-        .update({ severity, status })
+        .update({ status })
         .eq("id", id)
         .select()
         .single()
@@ -693,16 +693,6 @@ router.patch(
             logError,
           )
         }
-      }
-
-      // Trigger embeddings generation if completed
-      if (newStatus === "completed") {
-        const { qaQueue } = require("../lib/queue")
-        qaQueue
-          .add("generate_embeddings", { runId: id })
-          .catch((e: any) =>
-            console.error("Failed to queue generate_embeddings from API:", e),
-          )
       }
 
       return res.json(updatedRun)

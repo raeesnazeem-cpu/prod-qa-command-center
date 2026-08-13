@@ -11,19 +11,9 @@ import {
 } from 'lucide-react';
 import { useTasks, useDeleteTask } from '../hooks/useTasks';
 import { TaskDetailPanel } from '../components/TaskDetailPanel';
-import type { Task, TaskStatus, TaskSeverity } from '../api/tasks.api';
+import type { Task, TaskStatus } from '../api/tasks.api';
 import { format } from 'date-fns';
 import { useRole } from '../hooks/useRole';
-
-const getSeverityStyles = (severity: TaskSeverity) => {
-  switch (severity) {
-    case 'critical': return 'bg-red-50 text-red-600 border-red-100';
-    case 'high': return 'bg-orange-50 text-orange-600 border-orange-100';
-    case 'medium': return 'bg-yellow-50 text-yellow-600 border-yellow-100';
-    case 'low': return 'bg-yellow-50 text-yellow-600 border-yellow-100';
-    default: return 'bg-slate-50 text-slate-600 border-slate-100';
-  }
-};
 
 const getStatusStyles = (status: TaskStatus) => {
   switch (status) {
@@ -40,7 +30,6 @@ export const TaskListPage = () => {
   const { mutate: deleteTask } = useDeleteTask();
   const [filters, setFilters] = useState({
     status: '' as TaskStatus | '',
-    severity: '' as TaskSeverity | '',
     assignedTo: '',
     search: ''
   });
@@ -57,7 +46,6 @@ export const TaskListPage = () => {
 
   const { data: tasksData, isLoading } = useTasks({
     status: filters.status || undefined,
-    severity: filters.severity || undefined,
     assignedTo: filters.assignedTo || undefined
   });
 
@@ -120,19 +108,7 @@ export const TaskListPage = () => {
             <option value="closed">Closed</option>
           </select>
 
-          <select 
-            value={filters.severity}
-            onChange={(e) => setFilters({ ...filters, severity: e.target.value as TaskSeverity })}
-            className="bg-slate-50 border border-slate-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-accent transition-all"
-          >
-            <option value="">All Severities</option>
-            <option value="critical">Critical</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-          </select>
-
-          <select 
+          <select
             value={filters.assignedTo}
             onChange={(e) => setFilters({ ...filters, assignedTo: e.target.value })}
             disabled={isDeveloper}
@@ -153,7 +129,6 @@ export const TaskListPage = () => {
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-slate-50/50 border-b border-slate-100">
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Severity</th>
               <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Task Title</th>
               <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Project</th>
               <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Assigned To</th>
@@ -166,12 +141,12 @@ export const TaskListPage = () => {
             {isLoading ? (
               Array.from({ length: 5 }).map((_, i) => (
                 <tr key={i} className="animate-pulse">
-                  <td colSpan={7} className="px-6 py-8 bg-slate-50/20"></td>
+                  <td colSpan={6} className="px-6 py-8 bg-slate-50/20"></td>
                 </tr>
               ))
             ) : filteredTasks.length === 0 ? (
               <tr>
-                <td colSpan={7} className="px-6 py-20 text-center">
+                <td colSpan={6} className="px-6 py-20 text-center">
                   <div className="flex flex-col items-center justify-center space-y-4 opacity-40">
                     <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center">
                       <CheckCircle2 className="w-10 h-10 text-slate-300" />
@@ -190,11 +165,6 @@ export const TaskListPage = () => {
                   onClick={() => handleRowClick(task)}
                   className="group hover:bg-slate-50 transition-all cursor-pointer"
                 >
-                  <td className="px-6 py-4">
-                    <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full border ${getSeverityStyles(task.severity)}`}>
-                      {task.severity}
-                    </span>
-                  </td>
                   <td className="px-6 py-4">
                     <span className="text-sm font-bold text-slate-900 group-hover:text-accent transition-colors">{task.title}</span>
                   </td>

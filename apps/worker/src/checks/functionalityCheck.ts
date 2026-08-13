@@ -96,6 +96,7 @@ export async function checkFunctionality(
     })
 
     if (onProgress) await onProgress(10, "Loading page for functionality testing...")
+    let loadOk = true
     try {
       await page.goto(pageUrl, { waitUntil: "load", timeout: 60000 })
     } catch (e: any) {
@@ -108,6 +109,8 @@ export async function checkFunctionality(
       ) {
         throw e
       }
+      // Page did not finish loading — never emit a "no errors" pass over it.
+      loadOk = false
     }
     await page.waitForTimeout(500)
 
@@ -165,7 +168,6 @@ export async function checkFunctionality(
           const s = await shot(`err_${i}`)
           findings.push({
             check_factor: CHECK_FACTOR,
-            severity: "high",
             title: `JavaScript error triggered by interaction: ${label}`,
             description: `Clicking ${label} produced a new console/page error:\n${newErrs.join("\n")}`,
             context_text: `Page: ${pageUrl}\nControl: ${label}`,
@@ -184,7 +186,6 @@ export async function checkFunctionality(
           const s = await shot(`break_${i}`)
           findings.push({
             check_factor: CHECK_FACTOR,
-            severity: "medium",
             title: `Layout break triggered by interaction: ${label}`,
             description: `Interacting with ${label} introduced ${overflowNow - baselineOverflow}px of horizontal overflow (page went from ${baselineOverflow}px to ${overflowNow}px). Check the expanded/opened state's responsive layout.`,
             context_text: `Page: ${pageUrl}\nControl: ${label}`,
@@ -204,10 +205,31 @@ export async function checkFunctionality(
 
     if (onProgress) await onProgress(95, "Finalizing functionality findings...")
 
-    if (findings.length === 0) {
+    if (findings.length === 0 && !loadOk) {
+      // Page never loaded — cannot claim functionality is fine.
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: "low",
+        title: "Functionality Check Failed",
+        description: `The page did not finish loading, so interactive functionality could not be exercised. Process aborted gracefully; QACC will retry on the next run.`,
+        context_text: `Page: ${pageUrl}\nSystem Error: page load timeout`,
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
+    } else if (findings.length === 0 && exercised === 0) {
+      // Nothing was actually tested — "no errors" here would be a false pass.
+      findings.push({
+        check_factor: CHECK_FACTOR,
+        title: "Functionality Check Failed",
+        description: `No interactive controls could be exercised on this page, so functionality could not be verified. Process aborted gracefully; QACC will retry on the next run.`,
+        context_text: `Page: ${pageUrl}\nControls exercised: 0`,
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
+    } else if (findings.length === 0) {
+      findings.push({
+        check_factor: CHECK_FACTOR,
         title: "Functionality: no interaction errors or breaks",
         description: `Exercised ${exercised} interactive control${exercised === 1 ? "" : "s"} on this page. No JavaScript errors or layout breaks were triggered.`,
         context_text: `Page: ${pageUrl}\nControls exercised: ${exercised}`,
@@ -221,7 +243,6 @@ export async function checkFunctionality(
   } catch (error: any) {
     findings.push({
       check_factor: CHECK_FACTOR,
-      severity: "high",
       title: "Functionality Check Failed",
       description: `The check encountered an unexpected error: ${error.message}. Process aborted gracefully to prevent stalling the scan.`,
       context_text: `Page: ${pageUrl}\nSystem Error`,

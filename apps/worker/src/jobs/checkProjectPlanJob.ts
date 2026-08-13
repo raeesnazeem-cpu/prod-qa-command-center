@@ -1,6 +1,5 @@
 import { Job } from "bullmq"
 import { supabase } from "../lib/supabase"
-import { decrypt } from "@qacc/shared/encryption"
 import { checkProjectPlan } from "../checks/projectPlanCheck"
 import pino from "pino"
 
@@ -23,88 +22,13 @@ export async function processCheckProjectPlanJob(job: Job) {
 
   logger.info({ runId, projectId, isRetry }, "Processing project plan check job")
 
-  // Step 1: Fetch project settings from Supabase to get Basecamp credentials
-  const { data: projectSettings, error: settingsError } = await supabase
-    .from("project_settings")
-    .select(
-      "basecamp_token_encrypted, basecamp_account_id, basecamp_project_id",
-    )
-    .eq("project_id", projectId)
-    .limit(1)
-    .maybeSingle()
-
-  if (settingsError) {
-    throw new Error(
-      `Failed to fetch project settings: ${settingsError.message}`,
-    )
-  }
-
-  if (!projectSettings) {
-    logger.warn(
-      { projectId },
-      "No project settings found. Skipping Basecamp checks.",
-    )
-
-    const { data: firstPage } = await supabase.from("pages").select("id").eq("run_id", runId).limit(1).single()
-    if (firstPage?.id) {
-      await supabase.from("findings").insert([{
-        check_factor: "project_plan",
-        severity: "medium",
-        title: "Project Plan Check Skipped",
-        description: "Project settings are missing. Please configure Basecamp settings to enable this check.",
-        status: "open",
-        ai_generated: false,
-        page_id: firstPage.id,
-        run_id: runId
-      }])
-    }
-
-    // if (isRetry) {
-    //   await supabase.from("qa_runs").update({ status: "completed" }).eq("id", runId)
-    // }
-    return
-  }
-
-  const { basecamp_token_encrypted, basecamp_account_id, basecamp_project_id } =
-    projectSettings
-
-  if (
-    !basecamp_token_encrypted ||
-    !basecamp_account_id ||
-    !basecamp_project_id
-  ) {
-    logger.warn(
-      { projectId },
-      "Basecamp credentials not configured for this project. Skipping.",
-    )
-
-    const { data: firstPage } = await supabase.from("pages").select("id").eq("run_id", runId).limit(1).single()
-    if (firstPage?.id) {
-      await supabase.from("findings").insert([{
-        check_factor: "project_plan",
-        severity: "medium",
-        title: "Project Plan Check Skipped",
-        description: "Basecamp credentials are not configured for this project. Please configure Basecamp settings to enable this check.",
-        status: "open",
-        ai_generated: false,
-        page_id: firstPage.id,
-        run_id: runId
-      }])
-    }
-
-    // if (isRetry) {
-    //   await supabase.from("qa_runs").update({ status: "completed" }).eq("id", runId)
-    // }
-    return
-  }
-
-  // Decrypt basecamp token
-  let decryptedToken: string
-  try {
-    decryptedToken = decrypt(basecamp_token_encrypted)
-  } catch (decryptErr: any) {
-    throw new Error(`Failed to decrypt Basecamp token: ${decryptErr.message}`)
-  }
+  // Resolve the TED client name from the project (project.name == TED clientName).
+  const { data: project } = await supabase
+    .from("projects")
+    .select("name")
+    .eq("id", projectId)
+    .single()
+  const clientName = project?.name || ""
 
   // Step 2: Fetch the first page of the run to use as page_id for findings table constraint
   const { data: firstPage, error: pageError } = await supabase
@@ -131,7 +55,6 @@ export async function processCheckProjectPlanJob(job: Job) {
     "performance",
     "seo",
     "spelling",
-    "broken_links",
     "dummy_content",
     "image_compliance",
     "ai_content_audit",
@@ -186,25 +109,21 @@ export async function processCheckProjectPlanJob(job: Job) {
   // Step 3: Call the general check functions
   let findings: any[] = []
   try {
-    // Fetch run to get site_url and enabled_checks
+    // Fetch run to get site_url, enabled_checks and the resolved theme type
     const { data: run } = await supabase
       .from("qa_runs")
-      .select("site_url, enabled_checks")
+      .select("site_url, enabled_checks, theme_type")
       .eq("id", runId)
       .single()
 
     const enabledChecks = run?.enabled_checks || []
 
-    // 1. Run Project Plan Check if enabled
+    // 1. Run Project Plan Check if enabled (reads plan from TED)
     if (enabledChecks.includes("project_plan")) {
-      logger.info("Calling checkProjectPlan with basecamp settings")
+      logger.info({ clientName }, "Calling checkProjectPlan (TED)")
       const planFindings = await checkProjectPlan(
-        {
-          basecamp_token: decryptedToken,
-          basecamp_account_id,
-          basecamp_project_id,
-        },
-        { id: pageId, siteUrl: run?.site_url },
+        clientName,
+        { id: pageId, siteUrl: run?.site_url, themeType: run?.theme_type },
         updateProgress,
       )
       findings = [...findings, ...planFindings]
@@ -272,7 +191,6 @@ export async function processCheckProjectPlanJob(job: Job) {
   )
 
   if (!needsPageScan && !isRetry) {
-    const { qaQueue } = require("../lib/queue") // Dyn import queue
     await supabase
       .from("qa_runs")
       .update({
@@ -286,13 +204,6 @@ export async function processCheckProjectPlanJob(job: Job) {
       { runId },
       "Run marked as completed after general check completion",
     )
-
-    // Trigger embeddings generation
-    qaQueue
-      .add("generate_embeddings", { runId })
-      .catch((e: any) =>
-        logger.error("Failed to queue generate_embeddings:", e),
-      )
   }
 
   logger.info({ runId }, "Project plan check job completed successfully")

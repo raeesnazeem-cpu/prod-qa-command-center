@@ -66,6 +66,7 @@ export async function checkFalseBreakpoints(
   const findings: Finding[] = []
   let context: any = null
   let page: any = null
+  let loadOk = false
 
   try {
     if (onProgress) await onProgress(5, "Opening isolated viewport sweep...")
@@ -77,8 +78,12 @@ export async function checkFalseBreakpoints(
 
     try {
       await page.goto(pageUrl, { waitUntil: "load", timeout: 60000 })
+      loadOk = true
     } catch (e: any) {
-      // Same tolerance as crawlPageJob: proceed on load timeout/abort.
+      // Same tolerance as crawlPageJob: proceed on load timeout/abort — but a
+      // page that never loaded must NOT be reported as a clean pass. The sweep
+      // of an unloaded/empty document trivially has no overflow, which would
+      // fabricate a "No false breaking points detected" result.
       if (
         !(
           e.message?.includes("Timeout") ||
@@ -207,9 +212,6 @@ export async function checkFalseBreakpoints(
         }
       } catch {}
 
-      const severity: Finding["severity"] =
-        worst.overflow > 200 ? "high" : worst.overflow > 60 ? "medium" : "low"
-
       const bandLabel =
         band.fromWidth === band.toWidth
           ? `around ${band.fromWidth}px`
@@ -226,7 +228,6 @@ export async function checkFalseBreakpoints(
 
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity,
         title: `False breaking point at ${onsetWidth}px (${bandLabel})`,
         description: `The layout develops a horizontal scrollbar starting at a viewport width of <strong>${onsetWidth}px</strong> and remains broken ${bandLabel}. Content overflows the viewport by up to <strong>${worst.overflow}px</strong>, which is not a designed responsive breakpoint. Likely culprits:\n\n${culpritList}`,
         context_text: `URL: ${pageUrl}\nOnset width: ${onsetWidth}px\nBroken band: ${band.fromWidth}px–${band.toWidth}px\nMax overflow: ${worst.overflow}px`,
@@ -236,13 +237,24 @@ export async function checkFalseBreakpoints(
       } as Finding)
     }
 
-    // --- 4. INFORMATIONAL PASS FINDING (matches existing check UX) ---
-    if (findings.length === 0) {
+    // --- 4. PASS / LAPSE FINDING ---
+    if (findings.length === 0 && !loadOk) {
+      // Page never finished loading — the sweep measured an empty/partial
+      // document. Report a lapse, not a clean pass, so tedSync marks this
+      // "could not complete" rather than "passed".
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: "low",
+        title: "False Breakpoint Check Failed",
+        description: `The page did not finish loading within the timeout, so the viewport sweep could not run against a rendered layout. No pass/fail conclusion can be drawn — this check could not complete.`,
+        context_text: `URL: ${pageUrl}\nPage load: timed out / aborted`,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
+    } else if (findings.length === 0) {
+      findings.push({
+        check_factor: CHECK_FACTOR,
         title: "No false breaking points detected",
-        description: `Swept viewport widths from ${COARSE_WIDTHS[0]}px to ${COARSE_WIDTHS[COARSE_WIDTHS.length - 1]}px. No unintended horizontal overflow (false breakpoint) was found — the layout stays within the viewport at every sampled width.`,
+        description: `No false-breakpoint issues were found. Swept viewport widths from ${COARSE_WIDTHS[0]}px to ${COARSE_WIDTHS[COARSE_WIDTHS.length - 1]}px; no unintended horizontal overflow appeared — the layout stays within the viewport at every sampled width.`,
         context_text: `URL: ${pageUrl}\nWidths sampled: ${COARSE_WIDTHS.length}`,
         status: "open",
         ai_generated: false,
@@ -256,7 +268,6 @@ export async function checkFalseBreakpoints(
     return [
       {
         check_factor: CHECK_FACTOR,
-        severity: "high",
         title: "False Breakpoint Check Failed",
         description: `The check encountered an unexpected error: ${error.message}. Process aborted gracefully to prevent stalling the scan.`,
         context_text: `URL: ${pageUrl}\nSystem Error`,

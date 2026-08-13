@@ -1,40 +1,20 @@
-import { Request, Response, NextFunction } from 'express'
+import { Request, Response, NextFunction } from "express"
 
-type Role = 'super_admin' | 'admin' | 'sub_admin' | 'project_manager' | 'qa_engineer' | 'developer'
+type Role =
+  | "super_admin"
+  | "admin"
+  | "sub_admin"
+  | "project_manager"
+  | "qa_engineer"
+  | "developer"
 
-const ROLE_HIERARCHY: Record<Role, number> = {
-  super_admin: 6,
-  admin: 5,
-  sub_admin: 4,
-  project_manager: 3,
-  qa_engineer: 2,
-  developer: 1,
-}
-
-export const requireRole = (minimumRole: Role) => {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    const userRole = req.auth?.role as Role | null | undefined
-
-    if (!userRole) {
-      res.status(403).json({ error: 'No role found on authenticated user' })
-      return
-    }
-
-    const userLevel = ROLE_HIERARCHY[userRole]
-    const requiredLevel = ROLE_HIERARCHY[minimumRole]
-
-    if (userLevel === undefined) {
-      res.status(403).json({ error: `Unknown role: ${userRole}` })
-      return
-    }
-
-    if (userLevel < requiredLevel) {
-      res.status(403).json({
-        error: `Insufficient permissions. Required: ${minimumRole}, got: ${userRole}`,
-      })
-      return
-    }
-
+/**
+ * Headless mode: RBAC is TED's responsibility. This is a pass-through that
+ * preserves the `requireRole("...")` call signature at every existing call
+ * site so nothing needs editing, while never blocking a request.
+ */
+export const requireRole = (_minimumRole: Role) => {
+  return (_req: Request, _res: Response, next: NextFunction): void => {
     next()
   }
 }

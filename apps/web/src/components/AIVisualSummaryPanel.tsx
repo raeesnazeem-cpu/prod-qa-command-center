@@ -17,32 +17,6 @@ interface AIVisualSummaryPanelProps {
   onCreateTask: (finding: QAFinding) => void
 }
 
-const SeverityBadge = ({ severity }: { severity: string }) => {
-  const styles = {
-    critical: "bg-red-100 text-red-700 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-800",
-    high: "bg-orange-100 text-orange-700 border-orange-200 dark:bg-orange-900/30 dark:text-orange-400 dark:border-orange-800",
-    medium: "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800",
-    low: "bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800",
-  }
-
-  const Icon =
-    severity === "critical"
-      ? ShieldAlert
-      : severity === "high"
-        ? AlertCircle
-        : severity === "medium"
-          ? AlertTriangle
-          : Info
-
-  return (
-    <div
-      className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-bold uppercase tracking-tight ${styles[severity as keyof typeof styles] || styles.low}`}
-    >
-      <Icon size={10} />
-      {severity}
-    </div>
-  )
-}
 
 export const AIVisualSummaryPanel: React.FC<AIVisualSummaryPanelProps> = ({
   findings,
@@ -120,7 +94,6 @@ export const AIVisualSummaryPanel: React.FC<AIVisualSummaryPanelProps> = ({
               >
                 <div className="flex items-start justify-between gap-4 mb-3">
                   <div className="space-y-1">
-                    <SeverityBadge severity={finding.severity} />
                     <span className="block text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-[0.2em] pt-1">
                       {finding.title.replace("[VISUAL DIFF] ", "")}
                     </span>

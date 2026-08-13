@@ -34,7 +34,7 @@ export async function findProjectsByNames(names: string[], orgId: string) {
 }
 
 /**
- * Get project findings statistics grouped by status and severity.
+ * Get project findings statistics grouped by status.
  */
 export async function getProjectStats(projectId: string) {
   const { data: runs } = await supabase
@@ -47,7 +47,7 @@ export async function getProjectStats(projectId: string) {
 
   const { data, error } = await supabase
     .from("findings")
-    .select("status, severity")
+    .select("status")
     .in("run_id", runIds)
 
   if (error) throw error
@@ -60,7 +60,7 @@ export async function getProjectStats(projectId: string) {
 export async function getTaskStats(projectId: string) {
   const { data, error } = await supabase
     .from("tasks")
-    .select("status, severity")
+    .select("status")
     .eq("project_id", projectId)
 
   if (error) throw error
@@ -270,7 +270,6 @@ export async function getTasksByUserId(userId: string) {
       id, 
       title, 
       status, 
-      severity, 
       project_id, 
       projects (
         name

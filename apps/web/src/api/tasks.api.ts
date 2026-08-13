@@ -5,10 +5,9 @@ import {
   CreateCommentInput,
   RebuttalInput,
   TaskStatus,
-  TaskSeverity,
 } from "@qacc/shared"
 
-export type { TaskStatus, TaskSeverity } from "@qacc/shared"
+export type { TaskStatus } from "@qacc/shared"
 
 export interface Task {
   id: string
@@ -16,7 +15,6 @@ export interface Task {
   project_id: string
   title: string
   description: string
-  severity: TaskSeverity
   status: TaskStatus
   assigned_to?: string
   created_by: string
@@ -75,7 +73,6 @@ export interface TaskRebuttal {
 export interface TaskFilters {
   projectId?: string
   status?: TaskStatus
-  severity?: TaskSeverity
   assignedTo?: string
   createdBy?: string
   limit?: number
@@ -88,7 +85,6 @@ export const getTasks = async (
   const params = new URLSearchParams()
   if (filters.projectId) params.append("project_id", filters.projectId)
   if (filters.status) params.append("status", filters.status)
-  if (filters.severity) params.append("severity", filters.severity)
   if (filters.assignedTo) params.append("assigned_to", filters.assignedTo)
   if (filters.createdBy) params.append("created_by", filters.createdBy)
   if (filters.limit) params.append("limit", filters.limit.toString())

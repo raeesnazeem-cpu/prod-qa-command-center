@@ -1,7 +1,4 @@
 import { Request, Response, NextFunction } from "express"
-import { getAuth, clerkClient } from "@clerk/express"
-import { supabase } from "../lib/supabase"
-import { randomUUID } from "crypto"
 
 export interface AuthPayload {
   userId: string
@@ -19,263 +16,110 @@ declare global {
   }
 }
 
+/**
+ * The deployment is single-tenant: one organisation ("Default Organization")
+ * owns every project, user and run, so these are constants rather than
+ * configuration. They are real rows — `created_by` and `org_id` are FKs, and a
+ * fabricated UUID would violate them. SYSTEM_USER_ID / SYSTEM_ORG_ID still
+ * override if the target database ever changes.
+ */
+const DEFAULT_SYSTEM_USER_ID = "7e6b260d-39b5-4485-b8e5-578a995625a9" // tedsystem-…@ted.internal
+const DEFAULT_SYSTEM_ORG_ID = "57d2a6b4-3131-493b-9253-fbf8c748487e" // Default Organization
+
+// Stamp the synthetic system identity on the request. Role stays "super_admin"
+// so requireRole() and every downstream reader keep working exactly as before —
+// this is a LOGIN GATE ONLY, not a re-introduction of RBAC. `email` is the one
+// field that reflects the real signed-in human (when the gate is on).
+function stampSystemIdentity(req: Request, email: string, clerkUserId: string) {
+  req.auth = {
+    userId: process.env.SYSTEM_USER_ID || DEFAULT_SYSTEM_USER_ID,
+    clerkUserId,
+    orgId: process.env.SYSTEM_ORG_ID || DEFAULT_SYSTEM_ORG_ID,
+    role: "super_admin",
+    email,
+  }
+}
+
+// --- Login gate config (all env-driven; OFF by default) --------------------
+// The gate is DISABLED unless AUTH_GATE_ENABLED === "true". While disabled,
+// clerkAuth behaves EXACTLY as the old pass-through — zero behavior change — so
+// deploying this code changes nothing until the env flag is flipped (after the
+// frontend Google login is live). This is the safe, reversible rollout switch.
+const AUTH_GATE_ENABLED = process.env.AUTH_GATE_ENABLED === "true"
+// Human logins are limited to these Google Workspace domains.
+const ALLOWED_DOMAINS = (
+  process.env.AUTH_ALLOWED_DOMAINS || "growth99.com,growth99.net"
+)
+  .split(",")
+  .map((d) => d.trim().toLowerCase())
+  .filter(Boolean)
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || ""
+
+// Verify a Google ID token via Google's own tokeninfo endpoint. Google checks
+// the signature and expiry for us and returns the claims (or a non-200 on any
+// invalid/expired token). No extra npm dependency needed.
+async function verifyGoogleIdToken(idToken: string): Promise<any | null> {
+  try {
+    const r = await fetch(
+      "https://oauth2.googleapis.com/tokeninfo?id_token=" +
+        encodeURIComponent(idToken),
+    )
+    if (!r.ok) return null
+    return await r.json()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Headless mode with an optional human login gate.
+ *
+ * - Gate OFF (default): unchanged pass-through — stamps the system identity and
+ *   trusts every caller. Webhook routes never use this middleware; they stay on
+ *   the TED shared secret regardless.
+ * - Gate ON (AUTH_GATE_ENABLED=true): requires a valid Google ID token from an
+ *   allowed domain (growth99.com / growth99.net). On success it still stamps the
+ *   SAME super_admin system identity, so no downstream code / RBAC changes.
+ *   No/invalid token → 401; wrong domain → 403.
+ */
 export const clerkAuth = async (
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> => {
-  try {
-    const auth = getAuth(req)
-
-    if (!auth.userId) {
-      console.error("--- Clerk Auth Failed: No User ID in Request ---")
-      res
-        .status(401)
-        .json({ error: "Unauthorized", details: "No active session found" })
-      return
-    }
-
-    // 1. Get raw claims to extract name/email
-    const claims = auth.sessionClaims as any
-    let email = claims?.email || claims?.primary_email_address || null
-    let firstName = claims?.first_name || claims?.given_name || ""
-    let lastName = claims?.last_name || claims?.family_name || ""
-    let fullName =
-      claims?.full_name ||
-      claims?.name ||
-      (firstName ? `${firstName} ${lastName}`.trim() : null)
-
-    // 1.5 Fallback to Clerk Backend API if claims are missing data
-    if (!email || !fullName) {
-      console.log(
-        `[clerkAuth] Missing claims for ${auth.userId}, fetching from Clerk API...`,
-      )
-      try {
-        const fullClerkUser = await clerkClient.users.getUser(auth.userId)
-        if (!email) {
-          email =
-            fullClerkUser.emailAddresses.find(
-              (e) => e.id === fullClerkUser.primaryEmailAddressId,
-            )?.emailAddress ||
-            fullClerkUser.emailAddresses[0]?.emailAddress ||
-            null
-        }
-        if (!fullName) {
-          firstName = fullClerkUser.firstName || ""
-          lastName = fullClerkUser.lastName || ""
-          fullName =
-            firstName || lastName ? `${firstName} ${lastName}`.trim() : null
-        }
-      } catch (clerkErr) {
-        console.error(
-          `[clerkAuth] Failed to fetch user from Clerk API:`,
-          clerkErr,
-        )
-      }
-    }
-
-    // 2. Get role from Clerk if available (priority)
-    let role = (auth.orgRole as string) || null
-    let orgId: string | null = null
-
-    // 3. Always fetch user from Supabase to get the internal UUID org_id and profile
-    console.log(`[clerkAuth] Fetching user profile for ${auth.userId}...`)
-    let { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("clerk_user_id", auth.userId)
-      .maybeSingle()
-
-    // 4. Synchronization: Update name/email if they changed or were missing in Supabase
-    if (user && (fullName || email)) {
-      const updates: any = {}
-      if (fullName && (!user.full_name || user.full_name !== fullName))
-        updates.full_name = fullName
-      if (email && (!user.email || user.email !== email)) updates.email = email
-
-      if (Object.keys(updates).length > 0) {
-        console.log(
-          `[clerkAuth] Syncing profile updates for ${auth.userId}:`,
-          updates,
-        )
-        const { error: syncError } = await supabase
-          .from("users")
-          .update(updates)
-          .eq("id", user.id)
-        if (syncError) {
-          console.error(
-            `[clerkAuth] Failed to sync profile for ${auth.userId}:`,
-            syncError,
-          )
-        } else {
-          // Refresh local user object
-          user = { ...user, ...updates }
-        }
-      }
-    }
-
-    // 5. Self-healing: If user doesn't exist in Supabase, create them
-    if (!user && !error) {
-      console.log(
-        `[clerkAuth] User ${auth.userId} not found in Supabase. Creating profile...`,
-      )
-
-      // Ensure a default organization exists
-      let { data: defaultOrg } = await supabase
-        .from("organizations")
-        .select("id")
-        .limit(1)
-        .maybeSingle()
-
-      if (!defaultOrg) {
-        console.log(`[clerkAuth] Creating default organization...`)
-        const { data: newOrg, error: orgError } = await supabase
-          .from("organizations")
-          .insert({ name: "Default Organization" })
-          .select()
-          .single()
-
-        if (!orgError && newOrg) {
-          defaultOrg = newOrg
-        }
-      }
-
-      if (defaultOrg) {
-        const userId = randomUUID()
-        console.log(
-          `[clerkAuth] Inserting new user ${userId} for Clerk user ${auth.userId}`,
-        )
-
-        const { data: newUser, error: insertError } = await supabase
-          .from("users")
-          .insert({
-            id: userId,
-            clerk_user_id: auth.userId,
-            clerk_id: auth.userId,
-            email: email,
-            full_name: fullName || "New User", // Ensure non-null if required
-            role: "developer", // Default role for new users
-            org_id: defaultOrg.id,
-          })
-          .select()
-          .single()
-
-        if (!insertError && newUser) {
-          user = newUser
-          console.log(
-            `[clerkAuth] Created new user profile for ${auth.userId} with UUID ${user.id}`,
-          )
-        } else if (insertError) {
-          console.error(
-            `[clerkAuth] Failed to create user profile:`,
-            insertError,
-          )
-          // Even if insert fails, we might want to know why.
-          // Retry fetching on conflict
-          if (insertError.code === "23505") {
-            // Unique violation
-            const { data: retryUser } = await supabase
-              .from("users")
-              .select("*")
-              .eq("clerk_user_id", auth.userId)
-              .maybeSingle()
-            if (retryUser) user = retryUser
-          }
-        }
-      }
-    }
-
-    // 6. Resolve role and orgId
-    if (user) {
-      // Trust the database role as the primary source of truth for permissions
-      // Clerk roles are only used as a fallback or for initial setup
-      if (user.role) {
-        // Normalize role string: lowercase and replace spaces/hyphens with underscores
-        const normalized = user.role.toLowerCase().replace(/[\s-]/g, "_")
-        // Map common variants to internal role names
-        if (normalized === "qa") role = "qa_engineer"
-        else role = normalized
-      } else if (role) {
-        // Simple mapping for common Clerk roles if user.role is missing
-        const clerkRole = role.toLowerCase().replace(/[\s-]/g, "_")
-        if (clerkRole === "org:admin" || clerkRole === "admin") role = "admin"
-        else if (clerkRole === "org:member" || clerkRole === "member")
-          role = "developer"
-        else if (clerkRole === "qa") role = "qa_engineer"
-        else role = clerkRole
-      }
-
-      // ALWAYS use the UUID from the database for orgId
-      orgId = user.org_id
-    }
-
-    // 7. Final safety check: if orgId is still null, find ANY organization
-    if (!orgId) {
-      console.log(
-        `[clerkAuth] orgId still null for ${auth.userId}, attempting final fallback...`,
-      )
-      const { data: fallbackOrg } = await supabase
-        .from("organizations")
-        .select("id")
-        .limit(1)
-        .maybeSingle()
-
-      if (fallbackOrg) {
-        orgId = fallbackOrg.id
-        // Update user so they have it next time
-        await supabase
-          .from("users")
-          .update({ org_id: orgId })
-          .eq("clerk_user_id", auth.userId)
-      }
-    }
-
-    let finalUserId = user?.id || auth.userId
-    let finalRole = role
-    let finalEmail = email || user?.email || null
-    let finalOrgId = orgId
-
-    // --- IMPERSONATION LOGIC ---
-    // Only allow super_admin to impersonate another user
-    const impersonatedUserId = req.header("x-impersonate-user")
-    if (impersonatedUserId && role === "super_admin") {
-      console.log(
-        `[clerkAuth] Super Admin ${finalUserId} impersonating ${impersonatedUserId}`,
-      )
-      const { data: impersonatedUser } = await supabase
-        .from("users")
-        .select("*")
-        .eq("id", impersonatedUserId)
-        .single()
-
-      if (impersonatedUser) {
-        finalUserId = impersonatedUser.id
-        finalRole = impersonatedUser.role
-        finalEmail = impersonatedUser.email
-        finalOrgId = impersonatedUser.org_id
-      }
-    }
-
-    // Map to our local AuthPayload format
-    req.auth = {
-      userId: finalUserId,
-      clerkUserId: auth.userId, // Keep original Clerk ID for sync if needed
-      orgId: finalOrgId,
-      role: finalRole,
-      email: finalEmail,
-    } as any
-
-    console.log("--- Clerk Auth Success ---")
-    console.log("User:", req.auth?.userId, `(${fullName})`)
-    console.log("Org:", req.auth?.orgId)
-    console.log("Role:", req.auth?.role)
-
+  // Gate disabled → original behavior, untouched.
+  if (!AUTH_GATE_ENABLED) {
+    stampSystemIdentity(req, "system@qacc.internal", "system")
     next()
-  } catch (err: any) {
-    console.error("--- Clerk Auth Middleware Error ---")
-    console.error("Error:", err.message)
-    res
-      .status(401)
-      .json({ error: "Authentication failed", details: err.message })
+    return
   }
+
+  // Gate enabled → require a valid, allowed Google login.
+  const authz = req.headers.authorization || ""
+  const token = authz.startsWith("Bearer ") ? authz.slice(7).trim() : ""
+  if (!token) {
+    res.status(401).json({ error: "Login required" })
+    return
+  }
+
+  const info = await verifyGoogleIdToken(token)
+  if (!info || !info.email) {
+    res.status(401).json({ error: "Invalid login" })
+    return
+  }
+  // If a client id is configured, the token must have been minted for our app.
+  if (GOOGLE_CLIENT_ID && info.aud !== GOOGLE_CLIENT_ID) {
+    res.status(401).json({ error: "Invalid login (wrong app)" })
+    return
+  }
+  const emailVerified = info.email_verified === true || info.email_verified === "true"
+  const email = String(info.email).toLowerCase()
+  const domain = email.split("@")[1] || ""
+  if (!emailVerified || !ALLOWED_DOMAINS.includes(domain)) {
+    res.status(403).json({ error: "This account is not allowed." })
+    return
+  }
+
+  stampSystemIdentity(req, email, "google:" + (info.sub || ""))
+  next()
 }

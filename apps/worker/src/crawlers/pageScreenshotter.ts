@@ -85,16 +85,19 @@ export async function screenshotPage(
           `Waiting for ${viewport.name} content...`
         );
       }
-      // Wait for Elementor or fallback to networkidle
+      // Wait for rendered theme content, then fall back to networkidle.
+      // Sites are code-first WP themes (block or classic) — never Elementor —
+      // so probe block/semantic containers instead of framework classes.
       try {
-        await page.waitForSelector('.elementor-section, .elementor-widget, .elementor', { 
-          timeout: 15000 
-        });
-        logger.debug({ url, viewport: viewport.name }, 'Elementor detected');
+        await page.waitForSelector(
+          '.wp-site-blocks, .wp-block-group, main, [role="main"], #content, .site-content',
+          { timeout: 8000 }
+        );
+        logger.debug({ url, viewport: viewport.name }, 'Theme content rendered');
       } catch (e) {
-        logger.debug({ url, viewport: viewport.name }, 'Elementor not detected, waiting for networkidle');
-        await page.waitForNetworkIdle({ timeout: 20000 }).catch(() => null);
+        logger.debug({ url, viewport: viewport.name }, 'No theme container matched, waiting for networkidle');
       }
+      await page.waitForNetworkIdle({ timeout: 20000 }).catch(() => null);
 
       if (onProgress) {
         await onProgress(

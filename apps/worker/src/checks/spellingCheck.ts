@@ -62,10 +62,53 @@ export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Prom
   });
 
   const findings: Finding[] = [];
-  
+
   // Strip simple URLs out of block.text before tokenizing
   const urlRegex = /https?:\/\/[^\s]+|www\.[^\s]+/g;
-  const wordRegex = /[a-zA-Z]+/g;
+  // A "word" is a run of letters that MAY be joined to more letters by an
+  // apostrophe (straight or curly) or a hyphen. This keeps contractions
+  // ("didn't"), possessives ("provider's") and hyphenated compounds
+  // ("add-ons", "well-being") intact. The previous /[a-zA-Z]+/g split on those
+  // punctuation marks, so "add-ons" became "add"+"ons" and "wasn't" became
+  // "wasn"+"t" — the fragments ("ons", "wasn") then failed the dictionary and
+  // produced nonsense "misspellings". See spelling false-positive incident.
+  const wordRegex = /[A-Za-z]+(?:['‘’-][A-Za-z]+)*/g;
+
+  // nspell's dictionary uses straight apostrophes; curly ones must be
+  // normalized or "didn’t" won't match "didn't".
+  const normalizeApos = (w: string) => w.replace(/[‘’]/g, "'");
+
+  // A single hyphen part is acceptable if it's a real word, its singular is
+  // (so "ons" in "add-ons" passes via "on"), it's too short to judge, or it's
+  // allowlisted. Mirrors the token-level skip rules below.
+  const isPartOk = (p: string): boolean => {
+    const lower = p.toLowerCase();
+    if (p.length < 3) return true;
+    if (allowlistSet.has(lower)) return true;
+    if (spell.correct(p)) return true;
+    if (lower.endsWith("s") && spell.correct(p.slice(0, -1))) return true;
+    return false;
+  };
+
+  // Whole-token correctness, tolerant of contractions, possessives and
+  // hyphenated compounds the flat dictionary doesn't carry as single entries.
+  const isTokenCorrect = (token: string): boolean => {
+    const norm = normalizeApos(token);
+    if (spell.correct(norm)) return true;
+    // Hyphenated compound: correct when every part is individually fine.
+    if (norm.includes("-")) {
+      const parts = norm.split("-").filter(Boolean);
+      if (parts.length > 1 && parts.every(isPartOk)) return true;
+    }
+    // Contraction / possessive: accept when the base before the apostrophe is a
+    // real word ("provider's" -> "provider"), covering entries the dictionary
+    // lists only in their base form.
+    if (norm.includes("'")) {
+      const base = norm.split("'")[0];
+      if (base.length >= 2 && spell.correct(base)) return true;
+    }
+    return false;
+  };
 
   // Track added words to deduplicate findings
   const dedupWords = new Set<string>();
@@ -91,7 +134,9 @@ export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Prom
       // Rule: skip words in custom allowlist
       if (allowlistSet.has(word.toLowerCase())) continue;
 
-      const isMispelled = !spell.spell(word);
+      // Correctness is judged on the WHOLE token (contractions, possessives and
+      // hyphenated compounds kept intact) — not on punctuation-split fragments.
+      const isMispelled = !isTokenCorrect(word);
       if (isMispelled) {
         dedupWords.add(word.toLowerCase());
         const suggestions = spell.suggest(word);
@@ -106,7 +151,6 @@ export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Prom
 
         findings.push({
           check_factor: 'spelling',
-          severity: 'low',
           title: `Misspelled: ${word}`,
           description: suggestions.length > 0 ? `Suggestion: ${suggestions[0]}` : `No suggestions found for ${word}`,
           context_text: contextText,

@@ -12,7 +12,7 @@ import {
   ChevronDown,
 } from "lucide-react"
 import { format } from "date-fns"
-import { Task, TaskStatus, TaskSeverity } from "../api/tasks.api"
+import { Task, TaskStatus } from "../api/tasks.api"
 import {
   useTask,
   useUpdateTask,
@@ -339,11 +339,6 @@ export const TaskDetailPanel = ({
             <h2 className="font-bold text-slate-900 dark:text-white">
               Task Details
             </h2>
-            <span
-              className={`text-[10px] font-bold uppercase tracking-widest px-2.5 py-0.5 rounded-full border ${getSeverityStyles(task.severity)}`}
-            >
-              {task.severity}
-            </span>
           </div>
           <button
             onClick={onClose}
@@ -446,7 +441,6 @@ export const TaskDetailPanel = ({
                                 finding_id: task.finding_id,
                                 title: task.title,
                                 description: task.description,
-                                severity: task.severity,
                                 assigned_to: userId,
                                 status: task.status,
                                 gallery_images: task.gallery_images,
@@ -784,21 +778,6 @@ export const TaskDetailPanel = ({
       />
     </>
   )
-}
-
-const getSeverityStyles = (severity: TaskSeverity) => {
-  switch (severity) {
-    case "critical":
-      return "bg-red-50 text-red-600 border-red-100 dark:bg-[#1D2A31] dark:border-red-900/50 dark:text-red-400"
-    case "high":
-      return "bg-orange-50 text-orange-600 border-orange-100 dark:bg-[#1D2A31] dark:border-orange-900/50 dark:text-orange-400"
-    case "medium":
-      return "bg-yellow-50 text-yellow-600 border-yellow-100 dark:bg-[#1D2A31] dark:border-yellow-900/50 dark:text-yellow-400"
-    case "low":
-      return "bg-yellow-50 text-yellow-600 border-yellow-100 dark:bg-[#1D2A31] dark:border-yellow-900/50 dark:text-yellow-400"
-    default:
-      return "bg-slate-50 text-slate-600 border-slate-100 dark:bg-[#1D2A31] dark:border-slate-700 dark:text-slate-400"
-  }
 }
 
 const getStatusStyles = (status: TaskStatus) => {

@@ -60,8 +60,10 @@ export const StartRunModal = ({
     resolver: zodResolver(CreateRunSchema),
     defaultValues: {
       project_id: project.id,
-      run_type: project.is_pre_release ? "pre_release" : "post_release",
-      site_url: project.is_pre_release ? project.site_url : (project.live_site_url || project.site_url),
+      // Internal QA is a phase within the pre-release stage, so a manual run on
+      // an internal-QA project is a pre-release run against the beta site.
+      run_type: (project.is_pre_release || project.is_internal_qa) ? "pre_release" : "post_release",
+      site_url: (project.is_pre_release || project.is_internal_qa) ? project.site_url : (project.live_site_url || project.site_url),
       figma_url: "",
       enabled_checks: [],
       is_woocommerce: project.is_woocommerce,
@@ -98,8 +100,8 @@ export const StartRunModal = ({
 
   useEffect(() => {
     if (isOpen) {
-      setValue("run_type", project.is_pre_release ? "pre_release" : "post_release");
-      setValue("site_url", project.is_pre_release ? project.site_url : (project.live_site_url || project.site_url));
+      setValue("run_type", (project.is_pre_release || project.is_internal_qa) ? "pre_release" : "post_release");
+      setValue("site_url", (project.is_pre_release || project.is_internal_qa) ? project.site_url : (project.live_site_url || project.site_url));
     }
   }, [isOpen, project, setValue])
 
@@ -461,7 +463,9 @@ export const StartRunModal = ({
     },
   ]
 
-  const checkOptions = project.is_pre_release
+  // Internal QA runs on the pre-release side (beta site + pre-release checks).
+  const isPreReleaseSide = project.is_pre_release || project.is_internal_qa
+  const checkOptions = isPreReleaseSide
     ? PRE_RELEASE_CHECKS
     : POST_RELEASE_CHECKS
 
@@ -557,14 +561,14 @@ export const StartRunModal = ({
                 </label>
                 <div className="grid grid-cols-3 gap-3">
                   <label
-                    className={`relative ${project.is_pre_release ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}
+                    className={`relative ${isPreReleaseSide ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}
                   >
                     <input
                       type="radio"
                       {...register("run_type")}
                       value="pre_release"
                       className="sr-only peer"
-                      disabled={!project.is_pre_release}
+                      disabled={!isPreReleaseSide}
                     />
                     <div className="p-1 border border-slate-200 dark:border-slate-700 rounded-md text-center peer-checked:border-accent peer-checked:bg-accent/5 dark:peer-checked:bg-accent/10 transition-all">
                       <span className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 peer-checked:text-accent">
@@ -573,14 +577,14 @@ export const StartRunModal = ({
                     </div>
                   </label>
                   <label
-                    className={`relative ${!project.is_pre_release ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}
+                    className={`relative ${!isPreReleaseSide ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}
                   >
                     <input
                       type="radio"
                       {...register("run_type")}
                       value="post_release"
                       className="sr-only peer"
-                      disabled={project.is_pre_release}
+                      disabled={isPreReleaseSide}
                     />
                     <div className="p-1 border border-slate-200 dark:border-slate-700 rounded-md text-center peer-checked:border-accent peer-checked:bg-accent/5 dark:peer-checked:bg-accent/10 transition-all">
                       <span className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 peer-checked:text-accent">

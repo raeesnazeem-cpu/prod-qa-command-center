@@ -11,8 +11,8 @@ interface Props {
 const CATEGORY_LABEL: Record<string, string> = {
   fully_ai: "✅ Fully AI-fixed",
   partial_ai: "🟡 Partially AI",
-  manual: "🖐️ Manual",
-  not_possible: "⛔ Not AI-possible",
+  manual: "🟡 AI-corrected",
+  not_possible: "🔧 Code correction",
 }
 
 const FRIENDLY: Record<string, string> = {

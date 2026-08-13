@@ -275,7 +275,6 @@ export async function createTask(
       project_id: args.project_id,
       title: args.title,
       description: args.description,
-      severity: args.severity || "medium",
       status: "open",
       assigned_to: args.assigned_to,
       finding_id: args.finding_id,
@@ -292,7 +291,6 @@ export async function createTask(
     org_id: orgId,
     title: data.title,
     description: data.description,
-    severity: data.severity,
     status: data.status,
   }).catch((err) => console.error("Failed to sync task embedding:", err))
 
@@ -343,7 +341,6 @@ export async function updateTask(
     org_id: orgId,
     title: data.title,
     description: data.description,
-    severity: data.severity,
     status: data.status,
   }).catch((err) => console.error("Failed to sync task embedding:", err))
 
@@ -518,7 +515,6 @@ export async function updateFinding(
     run_id: data.run_id,
     title: data.title,
     description: data.description,
-    severity: data.severity,
     status: data.status,
     org_id: orgId,
     project_id,

@@ -1,10 +1,15 @@
 import { Job } from "bullmq"
 import { checkLearnMoreButtons } from "../checks/learnMoreButtonsCheck"
+import { checkPageSpeed } from "../checks/pageSpeedCheck"
 import { chromium } from "playwright"
 import { supabase } from "../lib/supabase"
 import { qaQueue } from "../lib/queue"
-import { postFinalReportToTED, postScanCompleteComment } from "../lib/tedSync"
-import { checkBrokenLinks } from "../checks/brokenLinksCheck"
+import {
+  postFinalReportToTED,
+  postScanCompleteComment,
+  markAllTedTasksCompleted,
+} from "../lib/tedSync"
+import { runCrossBrowserCheck } from "../checks/crossBrowserCheck"
 import { checkExternalLinks } from "../checks/externalLinkCheck"
 import { checkMeta } from "../checks/metaCheck"
 import { checkConsoleErrors } from "../checks/consoleErrorCheck"
@@ -31,17 +36,21 @@ import {
   checkSingleScript,
   checkTopBarAndStickyHeader,
   checkFavicon,
-  checkUrlAndTabMatching,
   checkGrowth99ContactForm,
   checkChatbotAndConsultation,
   checkTextShareMetadata,
   checkCallnowLinks,
   checkUrlTabComparison,
-  checkPluginUpdates,
   checkSocialShareHeading,
   checkLogoOnChatbot,
 } from "../checks/preReleaseSuite"
+import {
+  checkPluginCount,
+  checkPluginUpdatesCredentialFree,
+  checkLiveSiteLink,
+} from "../checks/postReleaseSuite"
 import { checkGsr } from "../checks/gsrCheck"
+import type { ThemeType } from "../lib/themeType"
 import pino from "pino"
 
 const logger = pino({
@@ -51,6 +60,31 @@ const logger = pino({
     options: { colorize: true },
   },
 })
+
+// When a check throws all the way to the caller, we must NOT swallow it into an
+// empty result — an empty result is indistinguishable from "check ran, found
+// nothing" and gets reported to the client as a clean pass. Instead we emit a
+// tool-lapse finding (title contains "Check Failed" so tedSync's
+// isToolLapseFinding() marks the check "could not complete" rather than
+// "passed"). The check_factor MUST match what the real check emits so the lapse
+// is attributed to the right subtask.
+function lapse(checkFactor: string) {
+  return (e: any): any[] => {
+    const msg = e?.message || String(e)
+    logger.error({ checkFactor, error: msg }, "Check threw; recording tool lapse")
+    return [
+      {
+        check_factor: checkFactor,
+        title: "Check Failed",
+        description: `The ${checkFactor} check encountered an unexpected error: ${msg}. Process aborted gracefully.`,
+        context_text: "System Error",
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      },
+    ]
+  }
+}
 
 export async function processCrawlPageJob(job: Job) {
   const { runId, pageId, url: pageUrl } = job.data
@@ -68,7 +102,7 @@ export async function processCrawlPageJob(job: Job) {
   const { data: run, error: runError } = await supabase
     .from("qa_runs")
     .select(
-      "status, is_woocommerce, site_url, enabled_checks, project_id, live_site_url",
+      "status, is_woocommerce, site_url, enabled_checks, project_id, live_site_url, released_site_url, theme_type",
     )
     .eq("id", runId)
     .single()
@@ -80,6 +114,12 @@ export async function processCrawlPageJob(job: Job) {
     )
     throw new Error(`Failed to fetch run status: ${runError?.message}`)
   }
+
+  // Theme type resolved once at scan start (startRunJob) and stored on the run.
+  // Threaded into the checks whose logic diverges between a classic PHP theme
+  // and a block/FSE theme; everything else ignores it. Absent → "unknown", which
+  // every consumer treats as the existing (block) behaviour.
+  const themeType: ThemeType = (run.theme_type as ThemeType) || "unknown"
 
   // Check if run is paused or cancelled
   if (run.status === "paused" || run.status === "cancelled") {
@@ -350,31 +390,27 @@ export async function processCrawlPageJob(job: Job) {
             checkHeroMedia(page, screenshots, runId, async (p, m) => {
               await updateCheckProgress("hero_media", p, m)
               await new Promise((resolve) => setTimeout(resolve, 1500))
-            }).catch((e) => {
+            }, themeType).catch((e) => {
               logger.error("Hero media check failed:", e)
-              return []
+              return lapse("hero_media")(e)
             }),
           )
         }
       }
 
       if (enabledChecks.includes("visual_regression")) {
-        checkPromises.push(
-          checkBrokenLinks(page, screenshots).catch((e) => {
-            logger.error("Broken links check failed:", e)
-            return []
-          }),
-        )
+        // broken_links retired — dead_links (optimizedLinksCheck) supersets it
+        // (all assets + cross-page dedup) and is the one TED actually enqueues.
         checkPromises.push(
           checkExternalLinks(page, screenshots).catch((e) => {
             logger.error("External links check failed:", e)
-            return []
+            return lapse("external_links")(e)
           }),
         )
         checkPromises.push(
           checkImageCompliance(page, screenshots).catch((e) => {
             logger.error("Image compliance check failed:", e)
-            return []
+            return lapse("image_compliance")(e)
           }),
         )
       }
@@ -383,26 +419,26 @@ export async function processCrawlPageJob(job: Job) {
         checkPromises.push(
           checkMeta(page, screenshots).catch((e) => {
             logger.error("Meta check failed:", e)
-            return []
+            return lapse("meta_tags")(e)
           }),
         )
         checkPromises.push(
           checkDummyContent(page, screenshots).catch((e) => {
             logger.error("Dummy content check failed:", e)
-            return []
+            return lapse("dummy_content")(e)
           }),
         )
         checkPromises.push(
           checkSpelling(page, screenshots).catch((e) => {
             logger.error("Spelling check failed:", e)
-            return []
+            return lapse("spelling")(e)
           }),
         )
         if (hasForms) {
           checkPromises.push(
             checkForms(page, screenshots, runId).catch((e) => {
               logger.error("Forms check failed:", e)
-              return []
+              return lapse("forms")(e)
             }),
           )
         }
@@ -410,9 +446,9 @@ export async function processCrawlPageJob(job: Job) {
 
       if (enabledChecks.includes("console_errors")) {
         checkPromises.push(
-          checkConsoleErrors(page, screenshots).catch((e) => {
+          checkConsoleErrors(page, screenshots, consoleErrors, criticalErrors).catch((e) => {
             logger.error("Console errors check failed:", e)
-            return []
+            return lapse("console_errors")(e)
           }),
         )
       }
@@ -437,7 +473,7 @@ export async function processCrawlPageJob(job: Job) {
               )
             } catch (e) {
               logger.error("Dead links check failed:", e)
-              return []
+              return lapse("dead_links")(e)
             }
           })(),
         )
@@ -458,7 +494,7 @@ export async function processCrawlPageJob(job: Job) {
               )
             } catch (e) {
               logger.error("Contact form check failed:", e)
-              return []
+              return lapse("contact_form")(e)
             }
           })(),
         )
@@ -478,7 +514,7 @@ export async function processCrawlPageJob(job: Job) {
               )
             } catch (e) {
               logger.error(e, "Learn More Buttons check failed:")
-              return []
+              return lapse("learn_more_buttons")(e)
             }
           })(),
         )
@@ -491,7 +527,7 @@ export async function processCrawlPageJob(job: Job) {
             await updateCheckProgress("false_breakpoint", p, m)
           }).catch((e) => {
             logger.error("False breakpoint check failed:", e)
-            return []
+            return lapse("false_breakpoint")(e)
           }),
         )
       }
@@ -502,7 +538,7 @@ export async function processCrawlPageJob(job: Job) {
             await updateCheckProgress("functionality_check", p, m)
           }).catch((e) => {
             logger.error("Functionality check failed:", e)
-            return []
+            return lapse("functionality_check")(e)
           }),
         )
       }
@@ -512,7 +548,7 @@ export async function processCrawlPageJob(job: Job) {
         checkPromises.push(
           checkSpelling(page, screenshots).catch((e) => {
             logger.error("Spelling check failed:", e)
-            return []
+            return lapse("spelling")(e)
           }),
         )
       }
@@ -520,7 +556,7 @@ export async function processCrawlPageJob(job: Job) {
         checkPromises.push(
           checkGrammar(page, screenshots).catch((e) => {
             logger.error("Grammar check failed:", e)
-            return []
+            return lapse("grammar")(e)
           }),
         )
       }
@@ -528,7 +564,7 @@ export async function processCrawlPageJob(job: Job) {
         checkPromises.push(
           checkAccessibility(page, screenshots).catch((e) => {
             logger.error("Accessibility check failed:", e)
-            return []
+            return lapse("accessibility_check")(e)
           }),
         )
       }
@@ -539,7 +575,7 @@ export async function processCrawlPageJob(job: Job) {
             await updateCheckProgress("image_quality", p, m)
           }).catch((e) => {
             logger.error("Image quality check failed:", e)
-            return []
+            return lapse("image_quality")(e)
           }),
         )
       }
@@ -553,7 +589,7 @@ export async function processCrawlPageJob(job: Job) {
               return await checkWooCommerce(wooPage, run.site_url, run)
             } catch (e) {
               logger.error("WooCommerce check failed:", e)
-              return []
+              return lapse("woocommerce")(e)
             } finally {
               await wooPage.close()
             }
@@ -584,7 +620,7 @@ export async function processCrawlPageJob(job: Job) {
               },
             ).catch((e) => {
               logger.error("Privacy policy check failed:", e)
-              return []
+              return lapse("privacy_policy")(e)
             }),
           )
         }
@@ -595,7 +631,7 @@ export async function processCrawlPageJob(job: Job) {
               await updateCheckProgress("footer_logo", p, m)
             }).catch((e) => {
               logger.error("Footer logo check failed:", e)
-              return []
+              return lapse("footer_logo")(e)
             }),
           )
         }
@@ -610,7 +646,7 @@ export async function processCrawlPageJob(job: Job) {
               await updateCheckProgress("single_script", p, m)
             }).catch((e) => {
               logger.error("Single script check failed:", e)
-              return []
+              return lapse("single_script")(e)
             }),
           )
         }
@@ -626,9 +662,10 @@ export async function processCrawlPageJob(job: Job) {
               async (p, m) => {
                 await updateCheckProgress("top_bar_sticky", p, m)
               },
+              themeType,
             ).catch((e) => {
               logger.error("Top bar & sticky header check failed:", e)
-              return []
+              return lapse("top_bar_sticky")(e)
             }),
           )
         }
@@ -639,7 +676,7 @@ export async function processCrawlPageJob(job: Job) {
               await updateCheckProgress("favicon", p, m)
             }).catch((e) => {
               logger.error("Favicon check failed:", e)
-              return []
+              return lapse("favicon")(e)
             }),
           )
         }
@@ -647,9 +684,13 @@ export async function processCrawlPageJob(job: Job) {
         await Promise.all(checkPromises)
         if (enabledChecks.includes("chatbot_consultation")) {
           checkPromises.push(
-            checkChatbotAndConsultation(page, runId).catch((e) => {
+            checkChatbotAndConsultation(page, runId, {
+              projectId: run.project_id,
+              projectName,
+              siteUrl: run.site_url,
+            }).catch((e) => {
               logger.error("Chatbot consultation check failed:", e)
-              return []
+              return lapse("chatbot_consultation")(e)
             }),
           )
         }
@@ -667,7 +708,7 @@ export async function processCrawlPageJob(job: Job) {
               },
             ).catch((e) => {
               logger.error("Logo on chatbot check failed:", e)
-              return []
+              return lapse("logo_chatbot")(e)
             }),
           )
         }
@@ -677,7 +718,7 @@ export async function processCrawlPageJob(job: Job) {
           checkPromises.push(
             checkTextShareMetadata(page, projectName).catch((e) => {
               logger.error("Text share metadata check failed:", e)
-              return []
+              return lapse("text_share")(e)
             }),
           )
         }
@@ -696,7 +737,7 @@ export async function processCrawlPageJob(job: Job) {
               },
             ).catch((e) => {
               logger.error("Callnow & Links check failed:", e)
-              return []
+              return lapse("callnow_links")(e)
             }),
           )
         }
@@ -715,7 +756,7 @@ export async function processCrawlPageJob(job: Job) {
               },
             ).catch((e) => {
               logger.error("URL Tab Comparison check failed:", e)
-              return []
+              return lapse("url_tab_compare")(e)
             }),
           )
         }
@@ -723,18 +764,69 @@ export async function processCrawlPageJob(job: Job) {
         await Promise.all(checkPromises)
         if (enabledChecks.includes("verify_plugin_updates")) {
           checkPromises.push(
-            checkPluginUpdates(
+            checkPluginUpdatesCredentialFree(
               pageUrl,
               runId,
               pageId,
-              wpPassword,
               browser,
               async (p, m) => {
                 await updateCheckProgress("verify_plugin_updates", p, m)
               },
             ).catch((e) => {
               logger.error("Plugin updates check failed:", e)
-              return []
+              return lapse("verify_plugin_updates")(e)
+            }),
+          )
+        }
+
+        await Promise.all(checkPromises)
+        if (enabledChecks.includes("plugin_number")) {
+          checkPromises.push(
+            checkPluginCount(
+              pageUrl,
+              runId,
+              pageId,
+              browser,
+              async (p, m) => {
+                await updateCheckProgress("plugin_number", p, m)
+              },
+            ).catch((e) => {
+              logger.error("Plugin count check failed:", e)
+              return lapse("plugin_number")(e)
+            }),
+          )
+        }
+
+        await Promise.all(checkPromises)
+        if (enabledChecks.includes("live_site_link")) {
+          checkPromises.push(
+            checkLiveSiteLink(
+              {
+                notesUrl: run.live_site_url,
+                releasedUrl: run.released_site_url,
+                fallbackUrl: pageUrl,
+              },
+              runId,
+              pageId,
+              browser,
+              async (p, m) => {
+                await updateCheckProgress("live_site_link", p, m)
+              },
+            ).catch((e) => {
+              logger.error("Live site link check failed:", e)
+              return lapse("live_site_link")(e)
+            }),
+          )
+        }
+
+        await Promise.all(checkPromises)
+        if (enabledChecks.includes("page_speed")) {
+          checkPromises.push(
+            checkPageSpeed(pageUrl, runId, pageId, async (p, m) => {
+              await updateCheckProgress("page_speed", p, m)
+            }).catch((e) => {
+              logger.error("Page speed check failed:", e)
+              return lapse("page_speed")(e)
             }),
           )
         }
@@ -746,14 +838,14 @@ export async function processCrawlPageJob(job: Job) {
               pageUrl,
               runId,
               pageId,
-              wpPassword,
               browser,
               async (p, m) => {
                 await updateCheckProgress("backend_check", p, m)
               },
+              run.project_id,
             ).catch((e) => {
               logger.error("Backend check failed:", e)
-              return []
+              return lapse("backend_check")(e)
             }),
           )
         }
@@ -771,7 +863,7 @@ export async function processCrawlPageJob(job: Job) {
               },
             ).catch((e) => {
               logger.error("Review & reputation check failed:", e)
-              return []
+              return lapse("review_reputation_check")(e)
             }),
           )
         }
@@ -787,7 +879,7 @@ export async function processCrawlPageJob(job: Job) {
               },
             ).catch((e) => {
               logger.error("GBP check failed:", e)
-              return []
+              return lapse("gbp_check")(e)
             }),
           )
         }
@@ -805,7 +897,7 @@ export async function processCrawlPageJob(job: Job) {
               },
             ).catch((e) => {
               logger.error("Social share heading check failed:", e)
-              return []
+              return lapse("social_share_heading")(e)
             }),
           )
         }
@@ -817,7 +909,7 @@ export async function processCrawlPageJob(job: Job) {
               await updateCheckProgress("single_script", p, m)
             }).catch((e) => {
               logger.error("Single script check failed:", e)
-              return []
+              return lapse("single_script")(e)
             }),
           )
         }
@@ -843,7 +935,7 @@ export async function processCrawlPageJob(job: Job) {
                   100,
                   `Failed: ${err.message}`,
                 ).catch(() => {})
-                return []
+                return lapse("gsr_check")(err)
               }),
           )
         }
@@ -1040,30 +1132,34 @@ export async function processCrawlPageJob(job: Job) {
 
           logger.info({ runId }, "Run marked as completed (fallback)")
 
-          qaQueue
-            .add("generate_embeddings", { runId })
-            .catch((e) =>
-              logger.error("Failed to queue generate_embeddings:", e),
-            )
+          // Run-level cross-browser visual check (no-op unless enabled). Runs
+          // before the TED report so its findings are included in the summary.
+          await runCrossBrowserCheck(runId).catch((e) =>
+            logger.error("Cross-browser check failed:", e),
+          )
 
           // Post the final QA report back to TED (idempotent — see tedSync).
           if (runCheck.ted_task_id) {
-            // 1) main report → 2) "scan complete, fixes running" → 3) AI Fix pass.
-            await postFinalReportToTED(runId, runCheck.ted_task_id).catch((e) =>
-              logger.error("TED Sync failed:", e),
-            )
-            await postScanCompleteComment(runCheck.ted_task_id, runId)
-            qaQueue
-              .add("ai_fix_run", { runId, tedTaskId: runCheck.ted_task_id })
-              .catch((e) => logger.error("Failed to queue ai_fix_run:", e))
+            const report = await postFinalReportToTED(
+              runId,
+              runCheck.ted_task_id,
+            ).catch((e) => {
+              logger.error("TED Sync failed:", e)
+              return null
+            })
+            // Only trigger the AI fix when the report actually posted AND there
+            // were real issues. All-passed → say so and skip the fix.
+            await maybeTriggerAiFix(runId, runCheck.ted_task_id, report)
           }
         }
       } else if (isComplete) {
         logger.info({ runId }, "Run marked as completed")
 
-        qaQueue
-          .add("generate_embeddings", { runId })
-          .catch((e) => logger.error("Failed to queue generate_embeddings:", e))
+        // Run-level cross-browser visual check (no-op unless enabled). Runs
+        // before the TED report so its findings are included in the summary.
+        await runCrossBrowserCheck(runId).catch((e) =>
+          logger.error("Cross-browser check failed:", e),
+        )
 
         // Post the final QA report back to TED (idempotent — see tedSync).
         const { data: finalRun } = await supabase
@@ -1072,14 +1168,16 @@ export async function processCrawlPageJob(job: Job) {
           .eq("id", runId)
           .single()
         if (finalRun?.ted_task_id) {
-          // 1) main report → 2) "scan complete, fixes running" → 3) AI Fix pass.
-          await postFinalReportToTED(runId, finalRun.ted_task_id).catch((e) =>
-            logger.error("TED Sync failed:", e),
-          )
-          await postScanCompleteComment(finalRun.ted_task_id, runId)
-          qaQueue
-            .add("ai_fix_run", { runId, tedTaskId: finalRun.ted_task_id })
-            .catch((e) => logger.error("Failed to queue ai_fix_run:", e))
+          const report = await postFinalReportToTED(
+            runId,
+            finalRun.ted_task_id,
+          ).catch((e) => {
+            logger.error("TED Sync failed:", e)
+            return null
+          })
+          // Only trigger the AI fix when the report actually posted AND there
+          // were real issues. All-passed → say so and skip the fix.
+          await maybeTriggerAiFix(runId, finalRun.ted_task_id, report)
         }
       }
 
@@ -1104,5 +1202,44 @@ export async function processCrawlPageJob(job: Job) {
     }
 
     logger.info({ pageId, runId }, "Page crawl lifecycle finished")
+  }
+}
+
+/**
+ * Decide whether to run the AI fix after a run's TED report is posted.
+ * - report === null  → the report didn't post (duplicate path / error): do nothing.
+ * - AI fix module off → do nothing (the summary already went out).
+ * - real issues found → post the "scan complete, AI Fix running" comment and
+ *   queue the ai_fix_run job.
+ * - everything passed → post a short "AI Fix skipped, no issues" comment and do
+ *   NOT queue the fix.
+ */
+async function maybeTriggerAiFix(
+  runId: string,
+  tedTaskId: string,
+  report: { hasIssues: boolean; issueCount: number } | null,
+): Promise<void> {
+  if (!report) return
+
+  // If the AI-fix module is off, the run is finished here — close out the TED
+  // tasks so nothing is left "In Progress" and the flow can advance.
+  if (process.env.AI_FIX_MODULE_ENABLED !== "true") {
+    await markAllTedTasksCompleted(runId, tedTaskId)
+    return
+  }
+
+  if (report.hasIssues) {
+    // Real issues → hand off to the AI-fix pass. It posts the ONE combined
+    // section-wise report (issue → fix → pass) and then calls
+    // markAllTedTasksCompleted itself, so tasks close AFTER the fix.
+    await postScanCompleteComment(tedTaskId, runId)
+    qaQueue
+      .add("ai_fix_run", { runId, tedTaskId })
+      .catch((e) => logger.error("Failed to queue ai_fix_run:", e))
+  } else {
+    // Everything passed — postFinalReportToTED already posted the section-wise
+    // report (each check named + how it passed), so there's nothing to add here.
+    // No fix pass runs; just close out the TED tasks.
+    await markAllTedTasksCompleted(runId, tedTaskId)
   }
 }

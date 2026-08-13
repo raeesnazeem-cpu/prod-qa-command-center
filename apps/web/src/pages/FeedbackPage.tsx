@@ -24,20 +24,6 @@ import { Skeleton } from "../components/Skeleton"
 import { useProjects } from "../hooks/useProjects"
 
 // Sub-components duplicated for Kanban rendering
-const getSeverityColor = (severity: string) => {
-  switch (severity) {
-    case "critical":
-      return "bg-red-50 text-red-600 border-red-100"
-    case "high":
-      return "bg-amber-50 text-amber-600 border-amber-100"
-    case "medium":
-      return "bg-amber-50 text-amber-600 border-amber-100"
-    case "low":
-      return "bg-yellow-50 text-yellow-600 border-yellow-100"
-    default:
-      return "bg-slate-50 text-slate-500 border-slate-200"
-  }
-}
 
 const getTaskStatusColor = (status: string) => {
   switch (status) {
@@ -141,38 +127,12 @@ const KanbanCard = ({ task, onClick, role, onDelete, onNotResolved }: any) => {
     })
   }
 
-  const handleSeverityChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    e.stopPropagation()
-    updateTask({
-      id: task.id,
-      data: {
-        severity: e.target.value as "critical" | "high" | "medium" | "low",
-      },
-    })
-  }
-
   return (
     <div
       onClick={() => onClick(task)}
       className="bg-[#fbfbfd] dark:bg-[#1B2A30] dark:hover:bg-transparent p-4 rounded-xl border border-transparent dark:border-slate-700 shadow-lg hover:shadow-xl transition-all cursor-pointer group relative"
     >
       <div className="flex items-center justify-between mb-2 relative z-10">
-        <select
-          value={task.severity || "medium"}
-          onChange={handleSeverityChange}
-          onClick={(e) => e.stopPropagation()}
-          disabled={task.status === "resolved" || task.status === "closed"}
-          className={`text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-lg border appearance-none outline-none text-center ${getSeverityColor(task.severity)} ${
-            task.status === "resolved" || task.status === "closed"
-              ? "cursor-not-allowed opacity-70"
-              : "cursor-pointer"
-          }`}
-        >
-          <option value="critical">CRITICAL</option>
-          <option value="high">HIGH</option>
-          <option value="medium">MEDIUM</option>
-          <option value="low">LOW</option>
-        </select>
         <div className="flex items-center gap-2">
           {task.basecamp_url && (
             <CheckCircle2 size={12} className="text-emerald-600" />
@@ -610,7 +570,6 @@ export const FeedbackPage = () => {
         project_id: projectId,
         title: `[Feedback] ${heading}`,
         description: `Project: ${projectNameStr}\nStage: ${stage}\n\n${description}\n\n*Note: Tasks created via Feedback are intended for Super Admin review.*`,
-        severity: "medium",
         status: "open",
         gallery_images: uploadedUrls.length > 0 ? uploadedUrls : undefined,
       }

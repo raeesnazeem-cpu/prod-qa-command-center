@@ -187,21 +187,6 @@ export const TasksTab = ({ project, runId }: TasksTabProps) => {
     }
   }
 
-  const getSeverityColor = (severity: string) => {
-    switch (severity) {
-      case "critical":
-        return "bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 border-red-100 dark:border-red-800"
-      case "high":
-        return "bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 border-amber-100 dark:border-amber-800"
-      case "medium":
-        return "bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 border-amber-100 dark:border-amber-800"
-      case "low":
-        return "bg-yellow-50 dark:bg-yellow-900/30 text-yellow-600 dark:text-yellow-400 border-yellow-100 dark:border-yellow-800"
-      default:
-        return "bg-slate-50 dark:bg-[#131d22] text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-700"
-    }
-  }
-
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -394,11 +379,6 @@ export const TasksTab = ({ project, runId }: TasksTabProps) => {
 
                       <div className="flex items-center justify-between mb-2 relative z-10">
                         <div className="flex items-center space-x-2">
-                          <span
-                            className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${getSeverityColor(task.severity)}`}
-                          >
-                            {task.severity}
-                          </span>
                           {task.basecamp_url && (
                             <div
                               className="text-emerald-600"

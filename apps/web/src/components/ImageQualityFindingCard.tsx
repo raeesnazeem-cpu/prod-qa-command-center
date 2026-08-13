@@ -14,7 +14,6 @@ import {
 import { useBulkDeleteTasks } from "../hooks/useTasks"
 import { useRole } from "../hooks/useRole"
 import { useParams, Link } from "react-router-dom"
-import { FindingSeverityEditor } from "./FindingSeverityEditor"
 import { QAFinding } from "../api/runs.api"
 import { useAuthAxios } from "../lib/useAuthAxios"
 
@@ -83,12 +82,6 @@ export const ImageQualityFindingCard: React.FC<FindingCardProps> = ({
     }
   }, [finding.context_text])
 
-  const severityIcons = {
-    critical: <ShieldAlert size={20} />,
-    high: <AlertTriangle size={20} />,
-    medium: <AlertCircle size={20} />,
-    low: <Info size={20} />,
-  }
 
   const handlePushToBasecamp = async () => {
     setIsPushing(true)
@@ -173,13 +166,6 @@ export const ImageQualityFindingCard: React.FC<FindingCardProps> = ({
             {isSelected ? <CheckboxOn /> : <Square size={20} strokeWidth={2} />}
           </button>
         )}
-        <FindingSeverityEditor
-          findingId={finding.id}
-          pageId={finding.page_id}
-          currentSeverity={finding.severity}
-          canEdit={canAction && !isFalsePositive && !isLocked}
-          symbolOnly={true}
-        />
         <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-[0.1em]">
           <ImageIcon size={14} className="text-accent" />
           image quality
@@ -189,12 +175,10 @@ export const ImageQualityFindingCard: React.FC<FindingCardProps> = ({
       <div className="flex items-start gap-3">
         <div
           className={`mt-1 p-3 rounded-xl shrink-0 ${
-            finding.severity === "high" || finding.severity === "critical"
-              ? "bg-red-50 text-red-600"
-              : "bg-yellow-50 text-yellow-600"
+            "bg-yellow-50 text-yellow-600"
           }`}
         >
-          {severityIcons[finding.severity]}
+          {<AlertCircle size={20} />}
         </div>
         <h4 className="font-bold text-slate-900 dark:text-slate-200 text-base leading-tight">
           {finding.title}

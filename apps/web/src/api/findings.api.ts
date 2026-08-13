@@ -6,7 +6,6 @@ export interface FindingFilters {
   pageId?: string;
   status?: string;
   checkFactor?: string;
-  severity?: string;
 }
 
 export const updateFindingStatus = async (
@@ -15,15 +14,6 @@ export const updateFindingStatus = async (
   status: 'open' | 'confirmed' | 'false_positive'
 ): Promise<QAFinding> => {
   const response = await axios.patch<QAFinding>(`/api/findings/${id}/status`, { status });
-  return response.data;
-};
-
-export const updateFindingSeverity = async (
-  axios: AxiosInstance,
-  id: string,
-  severity: 'critical' | 'high' | 'medium' | 'low'
-): Promise<QAFinding> => {
-  const response = await axios.patch<QAFinding>(`/api/findings/${id}`, { severity });
   return response.data;
 };
 

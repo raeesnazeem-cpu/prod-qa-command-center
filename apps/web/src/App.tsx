@@ -5,6 +5,7 @@ import { Toaster } from "react-hot-toast"
 import { router } from "./routes"
 import { queryClient } from "./lib/queryClient"
 import { useEffect } from "react"
+import { GoogleLoginGate } from "./components/GoogleLoginGate"
 
 export const App = () => {
   useEffect(() => {
@@ -25,9 +26,11 @@ export const App = () => {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} future={{ v7_startTransition: true }} />
-      <Toaster position="top-right" />
-      {/* <ReactQueryDevtools initialIsOpen={false} /> */}
+      <GoogleLoginGate>
+        <RouterProvider router={router} future={{ v7_startTransition: true }} />
+        <Toaster position="top-right" />
+        {/* <ReactQueryDevtools initialIsOpen={false} /> */}
+      </GoogleLoginGate>
     </QueryClientProvider>
   )
 }

@@ -314,17 +314,6 @@ export const DashboardPage = () => {
                             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[300%] aspect-square bg-[conic-gradient(from_0deg,transparent_0_45deg,theme(colors.accent)_135deg,transparent_180deg_225deg,#a3d4c7_315deg,transparent_360deg)] opacity-0 group-hover:opacity-100 group-hover:animate-[spin_4s_linear_infinite]" />
                           </div>
                           <div className="flex justify-between items-start mb-4 relative z-10">
-                            <span
-                              className={`text-[9px] font-bold uppercase tracking-[0.2em] px-2.5 py-1 rounded-full border ${
-                                task.severity === "critical"
-                                  ? "bg-red-50 text-red-600 border-red-100"
-                                  : task.severity === "high"
-                                    ? "bg-orange-50 text-orange-600 border-orange-100"
-                                    : "bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-100 dark:border-slate-700"
-                              }`}
-                            >
-                              {task.severity}
-                            </span>
                             <span className="text-[10px] text-slate-400 font-bold flex items-center gap-1">
                               <Clock size={12} />
                               {format(new Date(task.created_at), "MMM d")}

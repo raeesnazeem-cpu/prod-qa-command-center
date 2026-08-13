@@ -44,10 +44,26 @@ export async function checkForms(page: PlaywrightPage, pageRecord: any, runId?: 
       const formPage = await context.newPage();
       await formPage.goto(pageUrl, { waitUntil: 'load', timeout: 60000 });
 
-      const formSelector = `form:nth-of-type(${formInfo.index + 1})`;
-      const formElement = await formPage.$(formSelector);
+      // `formInfo.index` is the document-order index across ALL <form> elements
+      // (from the $$eval above). `form:nth-of-type(n)` counts per-parent, so it
+      // silently targets the wrong form (or none) when forms live under
+      // different parents — quietly dropping a real form. Index into the full
+      // document-order list instead so the same form is re-selected reliably.
+      const allForms = await formPage.$$('form');
+      const formElement = allForms[formInfo.index] || null;
 
-      if (!formElement) continue;
+      if (!formElement) {
+        findings.push({
+          check_factor: 'forms',
+          title: 'Form Check Failed',
+          description: `A form ("${formInfo.id}") detected on the page could not be located for testing, so it could not be verified. Process aborted gracefully.`,
+          context_text: `Form ID: ${formInfo.id}\nAction: ${formInfo.action}\nPreview: ${formInfo.html}`,
+          screenshot_url: null,
+          status: 'open',
+          ai_generated: false,
+        } as Finding);
+        continue;
+      }
 
       // Fill inputs
       const inputs = await formElement.$$('input, textarea, select');
@@ -114,7 +130,6 @@ export async function checkForms(page: PlaywrightPage, pageRecord: any, runId?: 
         }
         findings.push({
           check_factor: 'forms',
-          severity: 'high',
           title: 'Form submission unconfirmed',
           description: `A form on the page was submitted but no confirmation message or redirect was detected within 5 seconds.`,
           context_text: `Form ID: ${formInfo.id}\nAction: ${formInfo.action}\nPreview: ${formInfo.html}`,
@@ -126,6 +141,17 @@ export async function checkForms(page: PlaywrightPage, pageRecord: any, runId?: 
 
     } catch (error: any) {
       console.error(`Error testing form ${formInfo.id}:`, error.message);
+      // Don't swallow: a crashed test is otherwise indistinguishable from a
+      // form that submitted successfully (both emit no finding) — a false pass.
+      findings.push({
+        check_factor: 'forms',
+        title: 'Form Check Failed',
+        description: `The form ("${formInfo.id}") could not be tested: ${error.message}. Process aborted gracefully; QACC will retry on the next run.`,
+        context_text: `Form ID: ${formInfo.id}\nAction: ${formInfo.action}\nPreview: ${formInfo.html}`,
+        screenshot_url: null,
+        status: 'open',
+        ai_generated: false,
+      } as Finding);
     } finally {
       if (context) await context.close();
     }

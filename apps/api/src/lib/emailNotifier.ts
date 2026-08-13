@@ -52,7 +52,6 @@ export async function emailTaskAssigned(user: any, task: any, projectName: strin
       </p>
       <div style="background-color: #f8fafc; padding: 15px; border-radius: 6px; margin: 20px 0;">
         <p style="margin: 0; font-weight: bold; color: #0f172a;">${task.title}</p>
-        <p style="margin: 10px 0 0 0; color: #64748b; font-size: 14px;">Severity: ${task.severity.toUpperCase()}</p>
       </div>
       <a href="${taskUrl}" style="display: inline-block; background-color: #93c0b1; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; font-weight: bold;">View Task</a>
       <p style="margin-top: 30px; border-top: 1px solid #e2e8f0; padding-top: 20px; font-size: 12px; color: #94a3b8;">

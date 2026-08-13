@@ -23,11 +23,10 @@ export async function checkImageCompliance(page: PlaywrightPage, pageRecord: any
     const { src, alt, width, height, naturalWidth, naturalHeight, outerHTML } = img;
     const lowerSrc = src.toLowerCase();
 
-    // 1. Missing or empty alt attribute (low severity)
+    // 1. Missing or empty alt attribute
     if (alt === null || alt.trim() === '') {
       findings.push({
         check_factor: 'image_compliance',
-        severity: 'low',
         title: 'Missing or empty alt attribute',
         description: 'Image is missing an alt attribute or it is empty. This impacts accessibility.',
         context_text: `Element: ${outerHTML}`,
@@ -37,13 +36,12 @@ export async function checkImageCompliance(page: PlaywrightPage, pageRecord: any
       });
     }
 
-    // 2. Placeholder/Stock/Dummy images (medium severity)
+    // 2. Placeholder/Stock/Dummy images
     const placeholderKeywords = ['stock', 'placeholder', 'dummy', 'sample'];
     const foundKeyword = placeholderKeywords.find(kw => lowerSrc.includes(kw));
     if (foundKeyword) {
       findings.push({
         check_factor: 'image_compliance',
-        severity: 'medium',
         title: `Placeholder image detected (${foundKeyword})`,
         description: `Image source contains "${foundKeyword}", suggesting it might be temporary or stock content.`,
         context_text: `Source: ${src}\nElement: ${outerHTML}`,
@@ -53,12 +51,11 @@ export async function checkImageCompliance(page: PlaywrightPage, pageRecord: any
       });
     }
 
-    // 3. Small dimensions (potential tracking pixel) (low severity)
+    // 3. Small dimensions (potential tracking pixel)
     // We check natural dimensions if available, otherwise skip if 0 (not loaded yet)
     if (naturalWidth > 0 && naturalHeight > 0 && naturalWidth < 50 && naturalHeight < 50) {
       findings.push({
         check_factor: 'image_compliance',
-        severity: 'low',
         title: 'Small image dimensions (potential tracking pixel)',
         description: `Image natural dimensions are ${naturalWidth}x${naturalHeight}px. Small images are often used for tracking or might be layout spacers.`,
         context_text: `Source: ${src}\nDimensions: ${naturalWidth}x${naturalHeight}`,
@@ -68,11 +65,10 @@ export async function checkImageCompliance(page: PlaywrightPage, pageRecord: any
       });
     }
 
-    // 4. Missing width/height attributes (low severity - CLS risk)
+    // 4. Missing width/height attributes (CLS risk)
     if (!width || !height) {
       findings.push({
         check_factor: 'image_compliance',
-        severity: 'low',
         title: 'Missing width or height attributes',
         description: 'Image lacks explicit width or height attributes, which can cause Cumulative Layout Shift (CLS).',
         context_text: `Element: ${outerHTML}`,
@@ -104,7 +100,6 @@ export async function checkImageCompliance(page: PlaywrightPage, pageRecord: any
           for (const issue of aiIssues) {
             findings.push({
               check_factor: 'image_compliance',
-              severity: issue.severity,
               title: `AI Vision: ${issue.issue}`,
               description: `AI detected a visual issue: ${issue.issue}. Affected area: ${issue.area}`,
               context_text: `AI-Vision analysis of desktop screenshot.`,

@@ -9,7 +9,7 @@ import { supabase } from '../lib/supabase';
  * 
  * TASK_CREATED: A new task was added
  * TASK_ASSIGNED: A task was assigned to a user
- * TASK_UPDATED: Task description, severity, or status changed
+ * TASK_UPDATED: Task description or status changed
  * TASK_DELETED: A task was removed
  * 
  * COMMENT_ADDED: A new comment on a task

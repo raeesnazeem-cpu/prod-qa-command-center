@@ -25,7 +25,6 @@ import { useBulkDeleteTasks } from "../hooks/useTasks"
 import { useRole } from "../hooks/useRole"
 import { useProject } from "../hooks/useProjects"
 import { useParams, Link } from "react-router-dom"
-import { FindingSeverityEditor } from "./FindingSeverityEditor"
 import { FindingCardWithScreenshot } from "./FindingCardWithScreenshot"
 import { RebuttalVerdictCard } from "./RebuttalVerdictCard"
 import { QAFinding } from "../api/runs.api"
@@ -194,12 +193,6 @@ export const ProjectPlanFindingCard: React.FC<FindingCardProps> = ({
         }) === i,
     )
 
-  const severityIcons = {
-    critical: <ShieldAlert size={20} />,
-    high: <AlertTriangle size={20} />,
-    medium: <AlertCircle size={20} />,
-    low: <Info size={20} />,
-  }
 
   if (!canAction) {
     return (
@@ -217,32 +210,19 @@ export const ProjectPlanFindingCard: React.FC<FindingCardProps> = ({
             className={`mt-1 p-3 rounded-xl shrink-0 transition-transform group-hover:scale-110 ${
               isFalsePositive
                 ? "bg-slate-100 text-slate-400"
-                : finding.severity === "critical"
-                  ? "bg-red-50 text-red-600"
-                  : finding.severity === "high"
-                    ? "bg-orange-50 text-orange-600"
-                    : finding.severity === "medium"
-                      ? "bg-yellow-50 text-yellow-600"
-                      : "bg-blue-50 text-blue-600"
+                : "bg-blue-50 text-blue-600"
             }`}
           >
             {isFalsePositive ? (
               <XCircle size={20} />
             ) : (
-              severityIcons[finding.severity]
+              <AlertCircle size={20} />
             )}
           </div>
 
           <div className="flex-1 min-w-0">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
-                <FindingSeverityEditor
-                  findingId={finding.id}
-                  pageId={finding.page_id}
-                  currentSeverity={finding.severity}
-                  canEdit={false}
-                  symbolOnly={true}
-                />
                 <div className="flex items-center gap-1.5 text-[9px] font-bold text-slate-400 uppercase tracking-[0.2em]">
                   {CHECK_FACTOR_ICONS[finding.check_factor] || (
                     <FileSearch size={14} />
@@ -443,13 +423,6 @@ export const ProjectPlanFindingCard: React.FC<FindingCardProps> = ({
               <Square size={20} strokeWidth={2} />
             )}
           </button>
-          <FindingSeverityEditor
-            findingId={finding.id}
-            pageId={finding.page_id}
-            currentSeverity={finding.severity}
-            canEdit={!isFalsePositive && !isLocked}
-            symbolOnly={true}
-          />
           <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-[0.1em]">
             {CHECK_FACTOR_ICONS[finding.check_factor] || (
               <FileSearch size={14} />

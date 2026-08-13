@@ -134,8 +134,6 @@ router.get("/", clerkAuth, async (req: Request, res: Response) => {
   const { userId: clerkUserId, role, orgId } = req.auth!
 
   try {
-    const supabaseUserId = await getSupabaseUserId(clerkUserId)
-
     let query = supabase
       .from("projects")
       .select(
@@ -160,10 +158,16 @@ router.get("/", clerkAuth, async (req: Request, res: Response) => {
         )
       `,
       )
-      .eq("org_id", orgId)
 
-    // Filter by membership if not super_admin or admin
+    // Single-tenant deployment: only scope by org when an org id is present, so
+    // an absent one lists everything instead of silently matching zero rows.
+    if (orgId) query = query.eq("org_id", orgId)
+
+    // Filter by membership if not super_admin or admin. Resolving the caller's
+    // user row only matters here — doing it up front made an unresolvable id
+    // fail the whole listing.
     if (role !== "super_admin" && role !== "admin" && role !== "qa_engineer") {
+      const supabaseUserId = await getSupabaseUserId(clerkUserId)
       const { data: memberships } = await supabase
         .from("project_members")
         .select("project_id")
@@ -358,7 +362,7 @@ router.get("/:id", clerkAuth, async (req: Request, res: Response) => {
           id, status, completed_at, created_at, pages_processed, pages_total,
           creator:users!qa_runs_created_by_fkey (full_name, email)
         ),
-        tasks(id, status, severity, created_at, title, finding_id),
+        tasks(id, status, created_at, title, finding_id),
         project_settings(*)
       `,
       )

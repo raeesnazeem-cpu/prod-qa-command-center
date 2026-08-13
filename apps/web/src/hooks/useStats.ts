@@ -20,7 +20,6 @@ export interface DashboardStats {
   priorityTasks: Array<{
     id: string;
     title: string;
-    severity: string;
     projectId: string;
     projectName: string;
   }>;

@@ -104,7 +104,6 @@ export const VisualDiffPage: React.FC = () => {
         project_id: projectId!,
         title: finding.title,
         description: finding.description || "",
-        severity: finding.severity,
         finding_id: finding.id,
         gallery_images: finding.gallery_images,
       })

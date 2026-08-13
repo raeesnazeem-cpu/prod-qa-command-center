@@ -250,11 +250,6 @@ export const FindingReviewPanel: React.FC<FindingReviewPanelProps> = ({
       open,
       confirmed,
       falsePositives,
-      critical: allUniqueFindings.filter((f) => f.severity === "critical")
-        .length,
-      high: allUniqueFindings.filter((f) => f.severity === "high").length,
-      medium: allUniqueFindings.filter((f) => f.severity === "medium").length,
-      low: allUniqueFindings.filter((f) => f.severity === "low").length,
       total,
       resolvedPercentage: total > 0 ? Math.round((resolved / total) * 100) : 0,
     }
@@ -325,55 +320,6 @@ export const FindingReviewPanel: React.FC<FindingReviewPanelProps> = ({
             </div>
 
             <div className="flex-1 space-y-8 w-full">
-              {/* Severity Breakdown Text */}
-              <div className="space-y-3">
-                <div className="flex items-center gap-2 text-slate-400">
-                  <h4 className="text-[10px] font-bold uppercase tracking-[0.2em]">
-                    Audit Summary
-                  </h4>
-                </div>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xl font-bold text-red-600">
-                      {stats.critical}
-                    </span>
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-tight">
-                      Critical
-                    </span>
-                  </div>
-                  <div className="h-4 w-px bg-slate-200 dark:bg-[#1d2a31]" />
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xl font-bold text-orange-500">
-                      {stats.high}
-                    </span>
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-tight">
-                      High
-                    </span>
-                  </div>
-                  <div className="h-4 w-px bg-slate-200 dark:bg-[#1d2a31]" />
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xl font-bold text-amber-500">
-                      {stats.medium}
-                    </span>
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-tight">
-                      Medium
-                    </span>
-                  </div>
-                  <div className="h-4 w-px bg-slate-200 dark:bg-[#1d2a31]" />
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xl font-bold text-blue-500">
-                      {stats.low}
-                    </span>
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-tight">
-                      Low
-                    </span>
-                  </div>
-                  <span className="text-[10px] font-medium text-slate-400 italic ml-2">
-                    findings found
-                  </span>
-                </div>
-              </div>
-
               {/* Status Breakdown Text */}
               <div className="space-y-3">
                 <div className="flex items-center gap-2 text-slate-400">

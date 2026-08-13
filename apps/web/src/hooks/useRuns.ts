@@ -224,7 +224,7 @@ export const useUpdateFinding = (pageId: string | null) => {
       data,
     }: {
       findingId: string
-      data: Partial<Pick<QAFinding, "severity" | "status">>
+      data: Partial<Pick<QAFinding, "status">>
     }) => updateFinding(axios, findingId, data),
     onMutate: async ({ findingId, data }) => {
       // Cancel any outgoing refetches

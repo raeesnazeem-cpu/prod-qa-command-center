@@ -14,8 +14,7 @@ import {
   ChevronLeft,
   LayoutDashboard,
   PlayCircle,
-  CheckSquare,
-  Users,
+  MessageSquare,
   Settings as SettingsIcon,
   Loader2,
   AlertCircle,
@@ -25,8 +24,7 @@ import {
 import { ProjectOverviewTab } from "../components/ProjectOverviewTab"
 import { RunsTab } from "../components/RunsTab"
 import { DryRunsTab } from "../components/DryRunsTab"
-import { TasksTab } from "../components/TasksTab"
-import { TeamTab } from "../components/TeamTab"
+import { TedCommentsTab } from "../components/TedCommentsTab"
 import { SettingsTab } from "../components/SettingsTab"
 import { CanDo } from "../components/CanDo"
 import { useRole } from "../hooks/useRole"
@@ -80,43 +78,10 @@ export const ProjectDetailPage = () => {
     }
   }, [searchParams, activeTab])
 
-  useEffect(() => {
-    if (
-      activeTab === "tasks" &&
-      isDeveloper &&
-      !location.state?.runsFixApplied
-    ) {
-      const taskId = searchParams.get("taskId")
-      navigate(
-        isDeveloper
-          ? `/projects/${id}?tab=overview`
-          : `/projects/${id}?tab=runs`,
-        {
-          replace: true,
-          state: { ...location.state, overviewFixApplied: true },
-        },
-      )
-
-      setTimeout(() => {
-        navigate(
-          `/projects/${id}?tab=tasks${taskId ? `&taskId=${taskId}` : ""}`,
-          {
-            state: { ...location.state, runsFixApplied: true },
-          },
-        )
-      }, 0)
-    } else if (
-      ["runs", "team", "settings"].includes(activeTab) &&
-      !location.state?.overviewFixApplied
-    ) {
-      navigate(`/projects/${id}?tab=overview`, { replace: true })
-      setTimeout(() => {
-        navigate(`/projects/${id}?tab=${activeTab}`, {
-          state: { ...location.state, overviewFixApplied: true },
-        })
-      }, 0)
-    }
-  }, [activeTab, location.state, navigate, id, searchParams])
+  // NOTE: the old remount "fix-applied" navigation dance (bounce runs/team/
+  // settings through overview) was removed — it caused the tab to flicker back
+  // to Details and could strand the user there. Tabs now render directly from
+  // `activeTab` below.
 
   if (isLoading) {
     return (
@@ -189,8 +154,12 @@ export const ProjectDetailPage = () => {
     },
     { id: "runs", label: "QA Runs", icon: PlayCircle, minRole: "qa_engineer" },
     { id: "dry-runs", label: "Dry-run Data", icon: Zap, minRole: "qa_engineer" },
-    { id: "tasks", label: "Tasks", icon: CheckSquare, minRole: "developer" },
-    { id: "team", label: "Team", icon: Users, minRole: "developer" },
+    {
+      id: "ted-comments",
+      label: "TED Comments",
+      icon: MessageSquare,
+      minRole: "developer",
+    },
     { id: "settings", label: "Settings", icon: SettingsIcon, minRole: "admin" },
   ]
 
@@ -200,29 +169,16 @@ export const ProjectDetailPage = () => {
     <div className="max-w-7xl mx-auto space-y-8 animate-in fade-in duration-500">
       {/* Breadcrumbs & Back */}
       <div className="flex items-center space-x-4">
-        {activeTab === "tasks" && !isDeveloper ? (
-          <button
-            onClick={() => navigate(-1)}
-            className="p-2 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-full transition-colors border border-transparent hover:border-slate-100 dark:hover:border-slate-700 shadow-none hover:shadow-sm"
-          >
-            <ChevronLeft className="w-5 h-5 text-slate-600 dark:text-slate-400" />
-          </button>
-        ) : (
-          <Link
-            to={
-              activeTab === "tasks"
-                ? isDeveloper
-                  ? `/projects/${id}?tab=overview`
-                  : `/projects/${id}?tab=runs`
-                : ["runs", "team", "settings"].includes(activeTab)
-                  ? `/projects/${id}?tab=overview`
-                  : "/projects"
-            }
-            className="p-2 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-full transition-colors border border-transparent hover:border-slate-100 dark:hover:border-slate-700 shadow-none hover:shadow-sm"
-          >
-            <ChevronLeft className="w-5 h-5 text-slate-600 dark:text-slate-400" />
-          </Link>
-        )}
+        <Link
+          to={
+            ["runs", "dry-runs", "ted-comments", "settings"].includes(activeTab)
+              ? `/projects/${id}?tab=overview`
+              : "/projects"
+          }
+          className="p-2 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-full transition-colors border border-transparent hover:border-slate-100 dark:hover:border-slate-700 shadow-none hover:shadow-sm"
+        >
+          <ChevronLeft className="w-5 h-5 text-slate-600 dark:text-slate-400" />
+        </Link>
 
         <div className="flex items-center space-x-2 text-sm font-medium text-slate-400 dark:text-slate-500">
           <Link
@@ -232,28 +188,9 @@ export const ProjectDetailPage = () => {
             Projects
           </Link>
           <span>/</span>
-          {activeTab === "tasks" ? (
-            <>
-              {!isDeveloper ? (
-                <button
-                  onClick={() => navigate(-1)}
-                  className="hover:text-accent dark:hover:text-accent transition-colors"
-                >
-                  {project.name}
-                </button>
-              ) : (
-                <Link
-                  to={`/projects/${id}?tab=overview`}
-                  className="hover:text-accent dark:hover:text-accent transition-colors"
-                >
-                  {project.name}
-                </Link>
-              )}
-
-              <span>/</span>
-              <span className="text-slate-900 dark:text-slate-200">Tasks</span>
-            </>
-          ) : ["runs", "team", "settings"].includes(activeTab) ? (
+          {["runs", "dry-runs", "ted-comments", "settings"].includes(
+            activeTab,
+          ) ? (
             <>
               <Link
                 to={`/projects/${id}?tab=overview`}
@@ -265,9 +202,11 @@ export const ProjectDetailPage = () => {
               <span className="text-slate-900 dark:text-slate-200">
                 {activeTab === "runs"
                   ? "QA Runs"
-                  : activeTab === "team"
-                    ? "Team"
-                    : "Settings"}
+                  : activeTab === "dry-runs"
+                    ? "Dry-run Data"
+                    : activeTab === "ted-comments"
+                      ? "TED Comments"
+                      : "Settings"}
               </span>
             </>
           ) : (
@@ -393,8 +332,7 @@ export const ProjectDetailPage = () => {
         )}
         {activeTab === "runs" && <RunsTab project={project} />}
         {activeTab === "dry-runs" && <DryRunsTab project={project} />}
-        {activeTab === "tasks" && <TasksTab project={project} />}
-        {activeTab === "team" && <TeamTab project={project} />}
+        {activeTab === "ted-comments" && <TedCommentsTab project={project} />}
         {activeTab === "settings" && <SettingsTab project={project} />}
       </div>
 

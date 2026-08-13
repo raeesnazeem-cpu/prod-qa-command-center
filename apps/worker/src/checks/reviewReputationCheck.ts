@@ -70,10 +70,28 @@ export async function checkReviewReputation(
       const s = await shot(page, "no_page")
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: "high",
         title: "Reviews page not found (/reviews)",
         description: `Requesting ${reviewsUrl} returned HTTP 404. The reviews & reputation page appears to be missing.`,
         context_text: `URL: ${reviewsUrl}\nHTTP: 404`,
+        screenshot_url: s || null,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
+      return findings
+    }
+
+    // A failed navigation (timeout/DNS/reset → resp === null) or any non-404
+    // error status means the page never loaded. Scraping the empty DOM below
+    // would fabricate "missing contact number / email / social / Google"
+    // defects that assert the page lacks content it may well have. Treat this
+    // as a check that could not complete, not a page full of defects.
+    if (!resp || status === null || status >= 400) {
+      const s = await shot(page, "load_error")
+      findings.push({
+        check_factor: CHECK_FACTOR,
+        title: "Review & Reputation Check Failed",
+        description: `The reviews page could not be loaded${status ? ` (HTTP ${status})` : " (navigation failed)"}, so it could not be verified. Process aborted gracefully; QACC will retry on the next run.`,
+        context_text: `URL: ${reviewsUrl}\nHTTP: ${status ?? "no response"}`,
         screenshot_url: s || null,
         status: "open",
         ai_generated: false,
@@ -149,7 +167,6 @@ export async function checkReviewReputation(
     if (!popupOpened) {
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: "medium",
         title: "Review popup did not open",
         description:
           "Could not detect a review popup/modal opening on the /reviews page. Verify the 'Write a Review' flow works. Screenshot attached for confirmation.",
@@ -178,7 +195,6 @@ export async function checkReviewReputation(
 
     findings.push({
       check_factor: CHECK_FACTOR,
-      severity: missing.length > 0 ? "high" : "low",
       title:
         missing.length > 0
           ? `Review & Reputation: missing ${missing.join(", ")}`
@@ -195,7 +211,6 @@ export async function checkReviewReputation(
   } catch (error: any) {
     findings.push({
       check_factor: CHECK_FACTOR,
-      severity: "high",
       title: "Review & Reputation Check Failed",
       description: `The check encountered an unexpected error: ${error.message}. Process aborted gracefully to prevent stalling the scan.`,
       context_text: `URL: ${reviewsUrl}\nSystem Error`,

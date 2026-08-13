@@ -60,7 +60,6 @@ export const ManualScanOverlay: React.FC<ManualScanOverlayProps> = ({
   // Form state
   const [title, setTitle] = useState("")
   const [description, setDescription] = useState("")
-  const [severity, setSeverity] = useState<"critical" | "high" | "medium" | "low">("medium")
   const [checkFactor, setCheckFactor] = useState("visual_diff")
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -173,7 +172,6 @@ export const ManualScanOverlay: React.FC<ManualScanOverlayProps> = ({
         page_id: selectedPageId,
         run_id: run.id,
         check_factor: checkFactor,
-        severity,
         title: displayTitle,
         description: fullDescription,
         screenshot_url: uploadedGallery[0],
@@ -193,7 +191,6 @@ export const ManualScanOverlay: React.FC<ManualScanOverlayProps> = ({
           finding_id: newFinding.id,
           title: displayTitle,
           description: fullDescription,
-          severity,
           assigned_to: userId,
           status: "open",
           gallery_images: uploadedGallery,
@@ -393,21 +390,6 @@ export const ManualScanOverlay: React.FC<ManualScanOverlayProps> = ({
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">
-                        Severity
-                      </label>
-                      <select
-                        value={severity}
-                        onChange={(e) => setSeverity(e.target.value as any)}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-sm px-3 py-2.5 text-xs text-slate-900 focus:outline-none focus:border-slate-400 transition-all appearance-none cursor-pointer"
-                      >
-                        <option value="low">Low</option>
-                        <option value="medium">Medium</option>
-                        <option value="high">High</option>
-                        <option value="critical">Critical</option>
-                      </select>
-                    </div>
                     <div className="space-y-1.5">
                       <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">
                         Type

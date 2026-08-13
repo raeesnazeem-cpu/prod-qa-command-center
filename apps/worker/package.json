@@ -10,6 +10,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1086.0",
     "@google-cloud/storage": "^7.21.0",
+    "@lambdatest/smartui-cli": "^4.1.78",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@playwright/test": "^1.42.1",
     "@qacc/ai": "workspace:*",

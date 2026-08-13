@@ -1,3 +1,4 @@
+import { GoogleGenAI } from "@google/genai"
 import { genAI } from "./geminiClient"
 import "dotenv/config"
 import PQueue from "p-queue"
@@ -9,55 +10,70 @@ const queue = new PQueue({
   carryoverConcurrencyCount: true,
 })
 
+// Default vision models when a caller doesn't pass its own list. gemini-2.0-flash
+// is retired-adjacent; the 2.5 flash-lite + living-alias pair matches the text
+// fallback chain in the worker's aiFallback.
+const DEFAULT_VISION_MODELS = ["gemini-2.5-flash-lite", "gemini-flash-latest"]
+
+function toImageParts(imageBuffer: Buffer | Buffer[]) {
+  const bufs = Array.isArray(imageBuffer) ? imageBuffer : [imageBuffer]
+  return bufs.map((buf) => ({
+    inlineData: { data: buf.toString("base64"), mimeType: "image/png" },
+  }))
+}
+
+/**
+ * analyzeImageWith — vision completion against a SPECIFIC client + model list,
+ * trying each model in order. Unlike `analyzeImage` it THROWS when every model
+ * fails, so a caller (e.g. the worker's describeImage) can fail over to the next
+ * provider/key. Still shares the 15/min rate-limit queue.
+ */
+export async function analyzeImageWith(
+  client: GoogleGenAI,
+  models: string[],
+  imageBuffer: Buffer | Buffer[],
+  prompt: string,
+): Promise<string> {
+  const imageParts = toImageParts(imageBuffer)
+  return queue.add(async () => {
+    let lastErr: any
+    for (const model of models.length ? models : DEFAULT_VISION_MODELS) {
+      try {
+        const response: any = await client.models.generateContent({
+          model,
+          contents: [{ role: "user", parts: [{ text: prompt }, ...(imageParts as any)] }],
+        })
+        const text =
+          response?.text ||
+          (response?.candidates?.[0]?.content?.parts || []).map((p: any) => p.text).join("")
+        if (text) return text
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    throw lastErr || new Error("Gemini vision returned no text")
+  }) as Promise<string>
+}
+
 /**
  * analyzeImage
- * Sends an image buffer and a prompt to Gemini 1.5 Flash.
- * Returns the raw text response from the model.
- * Handles errors gracefully and adheres to rate limits.
+ * Sends an image buffer + prompt to Gemini vision using the default free client.
+ * Swallows errors (returns "") — the legacy contract its callers rely on.
  */
 export async function analyzeImage(
   imageBuffer: Buffer | Buffer[],
   prompt: string,
 ): Promise<string> {
-  return queue.add(async () => {
-    try {
-      const imageParts = Array.isArray(imageBuffer)
-        ? imageBuffer.map((buf) => ({
-            inlineData: {
-              data: buf.toString("base64"),
-              mimeType: "image/png",
-            },
-          }))
-        : [
-            {
-              inlineData: {
-                data: imageBuffer.toString("base64"),
-                mimeType: "image/png",
-              },
-            },
-          ]
-
-      const response = await genAI.models.generateContent({
-        model: "gemini-1.5-flash",
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: prompt }, ...(imageParts as any)],
-          },
-        ],
-      })
-
-      return response.text
-    } catch (error) {
+  return analyzeImageWith(genAI, DEFAULT_VISION_MODELS, imageBuffer, prompt).catch(
+    (error) => {
       console.error("Gemini Vision API error:", error)
       return ""
-    }
-  }) as Promise<string>
+    },
+  )
 }
 
 export interface Finding {
   issue: string
-  severity: "critical" | "high" | "medium" | "low"
   area: string
 }
 
@@ -68,7 +84,7 @@ export interface Finding {
 export async function inspectPageScreenshot(
   screenshotBuffer: Buffer,
 ): Promise<Finding[]> {
-  const prompt = `Inspect this website screenshot. Return a JSON array of ONLY clear, definite issues: [{issue: string, severity: 'critical'|'high'|'medium'|'low', area: string}]. Look for: visible image watermarks, clearly blurry/pixelated images, text overlapping other elements, buttons/links cut off, obvious broken layout. Return [] if no clear issues. Return ONLY JSON, no markdown.`
+  const prompt = `Inspect this website screenshot. Return a JSON array of ONLY clear, definite issues: [{issue: string, area: string}]. Look for: visible image watermarks, clearly blurry/pixelated images, text overlapping other elements, buttons/links cut off, obvious broken layout. Return [] if no clear issues. Return ONLY JSON, no markdown.`
 
   const text = await analyzeImage(screenshotBuffer, prompt)
 
@@ -89,7 +105,6 @@ export async function inspectPageScreenshot(
 
 export interface VisionIssue {
   issue: string
-  severity: "high" | "medium" | "low"
   area: string
 }
 
@@ -101,7 +116,7 @@ export interface VisionIssue {
 export async function analyzeScreenshot(
   imageBuffer: Buffer,
 ): Promise<VisionIssue[]> {
-  const prompt = `Inspect this website screenshot carefully. Identify ONLY: (1) images that have visible watermarks, (2) images that are clearly blurry or pixelated at this resolution, (3) obvious layout breaks where content is overlapping. Return a JSON array: [{issue: string, severity: 'high'|'medium'|'low', area: string}]. Return empty array [] if no issues found.`
+  const prompt = `Inspect this website screenshot carefully. Identify ONLY: (1) images that have visible watermarks, (2) images that are clearly blurry or pixelated at this resolution, (3) obvious layout breaks where content is overlapping. Return a JSON array: [{issue: string, area: string}]. Return empty array [] if no issues found.`
 
   const text = await analyzeImage(imageBuffer, prompt)
 

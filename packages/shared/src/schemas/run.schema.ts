@@ -12,7 +12,7 @@ export const RunStatusSchema = z.enum([
 
 export const CreateRunSchema = z.object({
   project_id: z.string().uuid(),
-  run_type: z.enum(["pre_release", "post_release"]),
+  run_type: z.enum(["pre_release", "post_release", "internal_qa"]),
   site_url: z.string().url(),
   figma_url: z.string().url().or(z.literal("")).nullable().optional(),
   enabled_checks: z

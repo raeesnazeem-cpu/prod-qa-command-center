@@ -163,7 +163,6 @@ export async function checkGsr(
       return [
         {
           check_factor: "gsr_check",
-          severity: "high",
           title: "Google Search Results (Failed)",
           description:
             "Failed to fetch Google Search results. The request was either blocked by Google or a CAPTCHA was encountered. Please try again.",
@@ -178,7 +177,6 @@ export async function checkGsr(
     return [
       {
         check_factor: "gsr_check",
-        severity: "low",
         title: `${serps.length} SERPs Found`,
         description: JSON.stringify(serps),
         context_text: `Found ${serps.length} SERPs for site:${domain}`,
@@ -191,9 +189,12 @@ export async function checkGsr(
     return [
       {
         check_factor: "gsr_check",
-        severity: "high",
         title: "GSR Check Failed",
-        description: "[]",
+        // NOT "[]": on success `description` carries JSON.stringify(serps), so a
+        // consumer parsing it would read "[]" as a valid, empty "0 SERPs found"
+        // result — a crash masquerading as a clean empty pass. Use a plain
+        // human-readable error string instead.
+        description: `The GSR check could not complete: ${error.message}. Process aborted gracefully; QACC will retry on the next run.`,
         context_text: `Error: ${error.message}`,
         screenshot_url: null,
         status: "open",

@@ -1,153 +1,34 @@
 import { createBrowserRouter, Navigate } from "react-router-dom";
 import { AppLayout } from "@/layouts/AppLayout";
 import { ChatProvider } from "@/contexts/ChatContext";
-import { ProtectedRoute } from "@/components/ProtectedRoute";
-import { MaintenanceGuard } from "@/components/MaintenanceGuard";
 import {
-  LoginPage,
-  RegisterPage,
-  DashboardPage,
   ProjectsPage,
   ProjectDetailPage,
   RunDetailPage,
+  FixPreviewPage,
   SettingsPage,
-  TasksPage,
-  TeamPage,
-  OnboardingPage,
-  // TestPage,
-  VisualDiffPage,
-  QueueHistoryPage,
-  ActivityLogPage,
-  StatsPage,
-  AllTasksPage,
-  FeedbackPage,
 } from "@/pages";
-import { AuthenticateWithRedirectCallback } from "@clerk/react";
 
+// Headless mode: no auth routes, no ProtectedRoute. TED owns auth. The UI is a
+// read-only viewer for scans, progress, findings, and dry-run reports.
 export const router = createBrowserRouter(
   [
+    // Standalone, chrome-free carousel opened by the TED "AI Fix" link. Kept
+    // OUTSIDE AppLayout so it shows nothing of QACC.
+    { path: "/fix-preview/:id", element: <FixPreviewPage /> },
     {
-      element: <MaintenanceGuard />,
+      element: (
+        <ChatProvider>
+          <AppLayout />
+        </ChatProvider>
+      ),
       children: [
-        {
-          path: "/",
-          element: <Navigate to="/dashboard" replace />,
-        },
-        {
-          path: "/login",
-          children: [
-            {
-              index: true,
-              element: <LoginPage />,
-            },
-            {
-              path: "*",
-              element: <LoginPage />,
-            },
-          ],
-        },
-        {
-          path: "/register",
-          children: [
-            {
-              index: true,
-              element: <RegisterPage />,
-            },
-            {
-              path: "*",
-              element: <RegisterPage />,
-            },
-          ],
-        },
-        {
-          element: <ProtectedRoute />,
-          children: [
-            {
-              element: (
-                <ChatProvider>
-                  <AppLayout />
-                </ChatProvider>
-              ),
-              children: [
-                {
-                  path: "/onboarding",
-                  element: <OnboardingPage />,
-                },
-                {
-                  path: "/dashboard",
-                  element: <DashboardPage />,
-                },
-                // {
-                //   path: "/test",
-                //   element: <TestPage />,
-                // },
-                {
-                  path: "/sso-callback",
-                  element: <AuthenticateWithRedirectCallback />,
-                },
-                // If Clerk is specifically sending to /login/sso-callback, use this:
-                {
-                  path: "/login/sso-callback",
-                  element: <AuthenticateWithRedirectCallback />,
-                },
-
-                {
-                  path: "/projects",
-                  element: <ProjectsPage />,
-                },
-                {
-                  path: "/projects/:id",
-                  element: <ProjectDetailPage />,
-                },
-                {
-                  path: "/projects/:id/runs/:runId",
-                  element: <RunDetailPage />,
-                },
-                {
-                  path: "/projects/:id/runs/:runId/diff",
-                  element: <VisualDiffPage />,
-                },
-                {
-                  path: "/tasks",
-                  element: <TasksPage />,
-                },
-                {
-                  path: "/all-tasks",
-                  element: <AllTasksPage />,
-                },
-                {
-                  path: "/settings",
-                  element: <SettingsPage />,
-                },
-                {
-                  path: "/team",
-                  element: <TeamPage />,
-                },
-                {
-                  path: "/team",
-                  element: <TeamPage />,
-                },
-                {
-                  path: "/stats",
-                  element: <StatsPage />,
-                },
-
-                {
-                  path: "/admin/queue-history",
-                  element: <QueueHistoryPage />,
-                },
-                {
-                  path: "/admin/activity-logs",
-                  element: <ActivityLogPage />,
-                },
-                {
-                  path: "/feedback",
-                  element: <FeedbackPage />,
-                },
-              ],
-            },
-          ],
-        },
+        { path: "/", element: <Navigate to="/projects" replace /> },
+        { path: "/projects", element: <ProjectsPage /> },
+        { path: "/projects/:id", element: <ProjectDetailPage /> },
+        { path: "/projects/:id/runs/:runId", element: <RunDetailPage /> },
+        { path: "/settings", element: <SettingsPage /> },
+        { path: "*", element: <Navigate to="/projects" replace /> },
       ],
     },
   ],

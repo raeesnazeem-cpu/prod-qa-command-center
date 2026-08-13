@@ -1,5 +1,5 @@
-import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom"
-import { useUser, UserButton, useClerk } from "@clerk/react"
+import { Outlet, NavLink } from "react-router-dom"
+import { useUser, UserButton } from "@clerk/react"
 import {
   LayoutDashboard,
   FolderKanban,
@@ -19,7 +19,6 @@ import {
   User,
   MessageSquare,
   X,
-  Shield,
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react"
@@ -38,11 +37,8 @@ export const AppLayout = () => {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [isImpersonateOpen, setIsImpersonateOpen] = useState(false)
   const [impersonateSearch, setImpersonateSearch] = useState("")
-  const { user, isLoaded } = useUser()
-  const { signOut } = useClerk()
+  const { user } = useUser()
   const { role, profile, isLoading, isAdmin } = useRole()
-  const navigate = useNavigate()
-  const location = useLocation()
   const { data: users } = useWorkspaceUsers()
   const { user: appUser, setUser } = useAppStore()
 
@@ -77,55 +73,12 @@ export const AppLayout = () => {
   useRealtimeTasks()
   useRealtimeNotifications()
 
-  useEffect(() => {
-    // Redirect to onboarding if profile is incomplete in Supabase
-    if (!isLoading && location.pathname !== "/onboarding") {
-      // A profile is incomplete if role is missing, full_name is missing,
-      // or if it's the default "New User" name we set in the middleware.
-      const isProfileIncomplete =
-        !profile?.role ||
-        !profile?.full_name ||
-        profile?.full_name === "New User"
-
-      if (isProfileIncomplete) {
-        navigate("/onboarding", { replace: true })
-      }
-    }
-  }, [profile, isLoading, navigate, location.pathname])
-
-  // --- DOMAIN GUARD (growth99.com & growth99.net ONLY) ---
-  if (isLoaded && user) {
-    const email = user.primaryEmailAddress?.emailAddress || ""
-    if (!email.endsWith("@growth99.com") && !email.endsWith("@growth99.net")) {
-      const isAllowedDevEmail =
-        import.meta.env.DEV && email === "iraeesnaseem@gmail.com"
-
-      if (!isAllowedDevEmail) {
-        return (
-          <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-[#131d22]">
-            <div className="bg-white dark:bg-[#1D2A31] p-8 rounded-xl shadow-lg border border-red-500/30 text-center max-w-md">
-              <Shield className="w-16 h-16 text-red-500 mx-auto mb-4" />
-              <h1 className="text-2xl font-bold text-slate-900 dark:text-white mb-2">
-                Access Denied
-              </h1>
-              <p className="text-slate-600 dark:text-slate-400 mb-6">
-                Only employees with a <b>@growth99.com</b> or{" "}
-                <b>@growth99.net</b> email address are permitted to access this
-                portal.
-              </p>
-              <button
-                onClick={() => signOut()}
-                className="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-6 rounded transition-colors"
-              >
-                Sign Out
-              </button>
-            </div>
-          </div>
-        )
-      }
-    }
-  }
-  // -------------------------------------------------------
+  // Headless mode: there is no browser sign-in, no profile and no /onboarding
+  // route, so the old onboarding redirect and the growth99.com/.net domain guard
+  // are both gone. They ran off the Clerk identity, which is now the shim's
+  // synthetic system@qacc.internal user — the guard denied every visitor and its
+  // Sign Out button was a no-op, and the redirect bounced /onboarding off the
+  // catch-all route in a loop. TED owns access to this UI now.
 
   const isDeveloper = role === "developer"
 

@@ -29,13 +29,23 @@ export const useRole = (): UseRoleReturn => {
   const axios = useAuthAxios();
   const { user, setUser } = useAppStore();
 
+  // Headless mode: TED owns auth and the /api/me route was removed in the
+  // Phase 1 strip. There is no browser session to profile, so resolve to the
+  // synthetic super_admin identity the API/clerk shim already uses. Without
+  // this, role is null, canDo() fails, and every role-gated UI element (the
+  // project tabs, admin nav) silently disappears.
+  const SYSTEM_PROFILE = {
+    id: 'system',
+    role: 'super_admin' as Role,
+    full_name: 'System',
+    email: 'system@qacc.internal',
+    org_id: 'system',
+  };
+
   const { data: profile, isLoading } = useQuery({
     queryKey: ['me'],
-    queryFn: async () => {
-      const response = await axios.get('/api/me');
-      return response.data;
-    },
-    staleTime: 1000 * 60 * 5, // 5 minutes
+    queryFn: async () => SYSTEM_PROFILE,
+    staleTime: Infinity,
   });
 
   useEffect(() => {
@@ -44,9 +54,11 @@ export const useRole = (): UseRoleReturn => {
     }
   }, [profile, setUser]);
 
-  // Apply dev role override if present
+  // Apply dev role override if present, else fall back to the system role so the
+  // UI is never left role-less (which would hide the tabs).
   const devOverride = getDevRoleOverride();
-  const rawRole = devOverride ?? user?.role ?? profile?.role ?? null;
+  const rawRole =
+    devOverride ?? user?.role ?? profile?.role ?? SYSTEM_PROFILE.role;
   const role = (() => {
     if (!rawRole) return null;
     const normalized = rawRole.toLowerCase().replace(/[\s-]/g, '_');

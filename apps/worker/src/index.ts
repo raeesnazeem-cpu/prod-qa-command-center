@@ -4,12 +4,7 @@ import pino from "pino"
 import { processTestJob } from "./jobs/testJob"
 import { processStartRunJob } from "./jobs/startRunJob"
 import { processCrawlPageJob } from "./jobs/crawlPageJob"
-import { processRunChecksJob } from "./jobs/runChecksJob"
-import { processAnalyzeRebuttalJob } from "./jobs/analyzeRebuttalJob"
-import { processVisualDiffJob } from "./jobs/visualDiffJob"
-import { processGenerateEmbeddingsJob } from "./jobs/generateEmbeddingsJob"
 import { processCaptureScreenshotJob } from "./jobs/captureScreenshotJob"
-import { processRunAiChecksJob } from "./jobs/runAiChecksJob"
 import { processCrawlBatchJob } from "./jobs/crawlBatchJob"
 import { processCheckProjectPlanJob } from "./jobs/checkProjectPlanJob"
 import { processCheckPaidMediaJob } from "./jobs/checkPaidMediaJob"
@@ -59,22 +54,6 @@ const worker = new Worker(
           break
         case "ai_fix_run":
           await processAiFixRunJob(job)
-          break
-        case "run_checks":
-          await processRunChecksJob(job)
-          break
-        case "run_ai_checks":
-        case "queueGeminiCall":
-          await processRunAiChecksJob(job)
-          break
-        case "analyze_rebuttal":
-          await processAnalyzeRebuttalJob(job)
-          break
-        case "visual_diff":
-          await processVisualDiffJob(job)
-          break
-        case "generate_embeddings":
-          await processGenerateEmbeddingsJob(job)
           break
         case "capture_screenshot":
           return await processCaptureScreenshotJob(job)

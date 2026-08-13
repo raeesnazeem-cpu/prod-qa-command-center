@@ -2,7 +2,23 @@ import { Page as PlaywrightPage } from "playwright"
 import { Finding } from "@qacc/shared"
 import axios from "axios"
 import * as cheerio from "cheerio"
+import type { ThemeType } from "../lib/themeType"
 import pino from "pino"
+
+// Header/banner selectors. Block/FSE themes expose the header as a
+// template-part (`.wp-block-template-part`, `#masthead`, `<header>`); many
+// classic PHP themes — especially Stitch-generated ones — have NO <header> at
+// all and render the site nav as a bare <nav> (e.g. `<nav id="topNav">`). The
+// classic variant therefore also accepts <nav>, so the header check isn't a
+// false "no header found" on a classic theme.
+const HEADER_SELECTOR_BLOCK =
+  "header, [role='banner'], .wp-block-template-part[class*='header'], .site-header, #masthead"
+const HEADER_SELECTOR_CLASSIC =
+  HEADER_SELECTOR_BLOCK +
+  ", nav#topNav, nav[id*='nav' i], nav[class*='nav' i], nav[class*='header' i], nav"
+function headerSelectorFor(themeType?: ThemeType): string {
+  return themeType === "classic" ? HEADER_SELECTOR_CLASSIC : HEADER_SELECTOR_BLOCK
+}
 
 // 1. Initialize Logger
 const logger = pino({
@@ -57,7 +73,7 @@ export async function checkPrivacyPolicy(
     if ((await footerElement.count()) === 0) {
       footerElement = page
         .locator(
-          '.site-footer, .footer, #footer, [data-elementor-type="footer"]',
+          '[role="contentinfo"], .wp-block-template-part[class*="footer"], .site-footer, .footer, #footer, .wp-block-group[class*="footer"]',
         )
         .first()
     }
@@ -104,16 +120,43 @@ export async function checkPrivacyPolicy(
       await onProgress(40, "Checking checkout page for privacy notice...")
 
     const checkoutUrl = url.endsWith("/") ? `${url}checkout` : `${url}/checkout`
+    // The checkout privacy notice only applies to WooCommerce (ecommerce) sites.
+    // Non-ecommerce sites have no /checkout — requiring a notice there would
+    // fabricate a "Privacy Policy Missing" defect on every brochure site. Gate
+    // on a REAL WooCommerce checkout element (WP often soft-404s /checkout with
+    // a 200 + theme 404 template) and scope the notice to WooCommerce's
+    // dedicated .woocommerce-privacy-policy-text element, not a bare "privacy"
+    // substring anywhere on the page (which a footer link would satisfy).
+    let checkoutExists = false
     let hasPrivacyPolicyOnCheckout = false
 
     try {
-      await page.goto(checkoutUrl, { waitUntil: "networkidle", timeout: 15000 })
-      const checkoutText = await page.evaluate(() =>
-        document.body.innerText.toLowerCase(),
-      )
-      hasPrivacyPolicyOnCheckout =
-        checkoutText.includes("privacy policy") ||
-        checkoutText.includes("privacy")
+      const resp = await page.goto(checkoutUrl, {
+        waitUntil: "networkidle",
+        timeout: 15000,
+      })
+      const status = resp ? resp.status() : 0
+      if (status >= 200 && status < 400) {
+        const checkoutInfo = await page.evaluate(() => {
+          const hasCheckoutForm =
+            !!document.querySelector(
+              'form.woocommerce-checkout, form.checkout, .wc-block-checkout, .woocommerce-checkout',
+            ) || document.body.className.includes("woocommerce-checkout")
+          const privacyEl = document.querySelector(
+            ".woocommerce-privacy-policy-text",
+          )
+          const privacyText = privacyEl ? privacyEl.textContent || "" : ""
+          const hasPrivacyLink = !!(
+            privacyEl && privacyEl.querySelector('a[href*="privacy"]')
+          )
+          return {
+            hasCheckoutForm,
+            hasPrivacyNotice: /privacy/i.test(privacyText) || hasPrivacyLink,
+          }
+        })
+        checkoutExists = checkoutInfo.hasCheckoutForm
+        hasPrivacyPolicyOnCheckout = checkoutInfo.hasPrivacyNotice
+      }
     } catch (e) {
       // Ignored if checkout page is inaccessible
     }
@@ -291,15 +334,25 @@ At [Your Business Name], we are dedicated to respecting and protecting your priv
       .filter(Boolean)
       .join(",")
 
-    if (footerHasLink && hasPrivacyPolicyOnCheckout) {
+    // The checkout notice is only REQUIRED when the site actually has a
+    // WooCommerce checkout. Brochure/non-ecommerce sites pass on the footer
+    // link alone (they have no checkout to carry a notice).
+    const checkoutRequirementMet = !checkoutExists || hasPrivacyPolicyOnCheckout
+    const checkoutStatus = !checkoutExists
+      ? "N/A (no WooCommerce checkout)"
+      : hasPrivacyPolicyOnCheckout
+        ? "Found"
+        : "Missing"
+
+    if (footerHasLink && checkoutRequirementMet) {
       return [
         {
           check_factor: "privacy_policy",
-          severity: "low",
           title: "Privacy Policy Verified",
-          description:
-            "The Privacy Policy link was successfully found in the footer, and the policy notice is present on the checkout page.",
-          context_text: `Content Match: ${isContentMatch ? "Yes" : "No"}\n\n===ACTUAL POLICY TEXT===\n${actualPolicyText}`,
+          description: checkoutExists
+            ? "The Privacy Policy link was successfully found in the footer, and the WooCommerce checkout privacy notice is present."
+            : "The Privacy Policy link was successfully found in the footer. This site has no WooCommerce checkout, so a checkout privacy notice is not applicable.",
+          context_text: `Footer Link: Found\nCheckout Notice: ${checkoutStatus}\nContent Match: ${isContentMatch ? "Yes" : "No"}\n\n===ACTUAL POLICY TEXT===\n${actualPolicyText}`,
           screenshot_url: finalScreenshotUrl,
           status: "open",
           ai_generated: false,
@@ -309,9 +362,8 @@ At [Your Business Name], we are dedicated to respecting and protecting your priv
       return [
         {
           check_factor: "privacy_policy",
-          severity: "medium",
           title: "Privacy Policy Missing",
-          description: `Privacy Policy check failed. Footer Link: ${footerHasLink ? "Found" : "Missing"}. Checkout Notice: ${hasPrivacyPolicyOnCheckout ? "Found" : "Missing"}.`,
+          description: `Privacy Policy check failed. Footer Link: ${footerHasLink ? "Found" : "Missing"}. Checkout Notice: ${checkoutStatus}.`,
           context_text: `Content Match: ${isContentMatch ? "Yes" : "No"}\n\n===ACTUAL POLICY TEXT===\n${actualPolicyText}`,
           screenshot_url: finalScreenshotUrl,
           status: "open",
@@ -324,7 +376,6 @@ At [Your Business Name], we are dedicated to respecting and protecting your priv
     return [
       {
         check_factor: "privacy_policy",
-        severity: "high",
         title: "Privacy Policy Check Failed",
         description: `The check encountered an unexpected error: ${err.message}. Process aborted gracefully.`,
         context_text: "System Error",
@@ -357,6 +408,9 @@ export async function checkFooterLogo(
   let desktopUrl = ""
   let tabletUrl = ""
   let mobileUrl = ""
+  let footerFoundAny = false
+  let loadedAny = false
+  const footerBuffers: { name: string; buffer: Buffer }[] = []
 
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
@@ -376,9 +430,10 @@ export async function checkFooterLogo(
         viewport: { width: vp.width, height: vp.height },
       })
       const newPage = await context.newPage()
-      await newPage
+      const resp = await newPage
         .goto(url, { waitUntil: "load", timeout: 30000 })
-        .catch(() => {})
+        .catch(() => null)
+      if (resp) loadedAny = true
 
 //      const footer = newPage
 //        .locator('footer, div[class*="footer"], section[class*="footer"]')
@@ -388,12 +443,13 @@ export async function checkFooterLogo(
       if ((await footer.count()) === 0) {
         footer = newPage
           .locator(
-            '.site-footer, .footer, #footer, [data-elementor-type="footer"]',
+            '[role="contentinfo"], .wp-block-template-part[class*="footer"], .site-footer, .footer, #footer, .wp-block-group[class*="footer"]',
           )
           .first()
       }
 
       if ((await footer.count()) > 0) {
+        footerFoundAny = true
         // Scroll the footer into view to trigger lazy loading of images
         if (onProgress)
           await onProgress(60, `Taking screenshot of footer on ${vp.name}...`)
@@ -405,6 +461,7 @@ export async function checkFooterLogo(
 
         // Capture only the footer element
         const buffer = await footer.screenshot()
+        footerBuffers.push({ name: vp.name, buffer })
 
         const storagePath = `${runId}/${pageId}/footer_${vp.name}.png`
 
@@ -423,7 +480,6 @@ export async function checkFooterLogo(
     return [
       {
         check_factor: "footer_logo",
-        severity: "high",
         title: "Footer Logo Check Failed",
         description: `The check encountered an unexpected error: ${e.message}. Process aborted gracefully.`,
         screenshot_url: null,
@@ -437,13 +493,84 @@ export async function checkFooterLogo(
     .filter(Boolean)
     .join(",")
 
+  // Guard against a false "ran fine" result: if the page never loaded, no
+  // footer was located, or no screenshot was captured, we have no evidence to
+  // verify. Emit a lapse finding (title contains "Check Failed") so tedSync
+  // marks this "could not complete" rather than surfacing an empty review card
+  // that looks like a clean pass.
+  if (!loadedAny || !footerFoundAny || !screenshotUrls) {
+    const reason = !loadedAny
+      ? "the page did not load"
+      : !footerFoundAny
+        ? "no footer element could be located on any viewport"
+        : "no footer screenshot could be captured"
+    return [
+      {
+        check_factor: "footer_logo",
+        title: "Footer Logo Check Failed",
+        description: `Could not verify the footer logo because ${reason}. No evidence was captured, so this check could not complete.`,
+        context_text: `URL: ${url}`,
+        screenshot_url: screenshotUrls || null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
+  // Vision verdict PER VIEW (desktop, tablet, mobile): on each view the correct
+  // approved Growth99 logo must load with no tagline. Passes only when ALL
+  // captured views pass; fails naming the offending view(s). Falls back to a
+  // manual "verify" finding when vision is unavailable for every view.
+  const { verifyFooterLogo, evaluateFooterLogo } = require("../lib/footerLogoVision")
+  if (onProgress) await onProgress(85, "Analyzing footer logo across views (vision)...")
+
+  const perView: { name: string; pass: boolean; reasons: string[]; variant?: string; notes?: string }[] = []
+  for (const { name, buffer } of footerBuffers) {
+    const verdict = await verifyFooterLogo(buffer).catch(() => null)
+    if (!verdict) continue // vision unavailable for this view
+    const { pass, reasons } = evaluateFooterLogo(verdict)
+    perView.push({ name, pass, reasons, variant: verdict.variant, notes: verdict.notes })
+  }
+
+  if (perView.length > 0) {
+    const failed = perView.filter((v) => !v.pass)
+    if (failed.length === 0) {
+      const variants = Array.from(new Set(perView.map((v) => v.variant))).join("/")
+      return [
+        {
+          check_factor: "footer_logo",
+          title: "Footer Logo Verified",
+          description: `No footer logo issues found. The approved Growth99 logo (${variants} variant) loads correctly with no tagline across all checked views (${perView.map((v) => v.name).join(", ")}).`,
+          context_text: JSON.stringify(perView),
+          screenshot_url: screenshotUrls,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+    const detail = failed
+      .map((v) => `${v.name}: ${v.reasons.join("; ")}`)
+      .join(" | ")
+    return [
+      {
+        check_factor: "footer_logo",
+        title: "Footer Logo issue",
+        description: `Footer logo did not pass on ${failed.length} of ${perView.length} view(s) — ${detail}. Verify against the evidence screenshots (Desktop/Tablet/Mobile).`,
+        context_text: JSON.stringify(perView),
+        screenshot_url: screenshotUrls,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
+  // Vision unavailable → keep the manual verify finding (no silent pass).
   return [
     {
       check_factor: "footer_logo",
-      severity: "low",
       title: "Verify Footer Logo",
       description:
-        "Please verify the footer logo across all 3 views (Desktop, Tablet, Mobile) using the evidence screenshots. The logo should not contain a tagline.",
+        "Please verify the footer logo across all 3 views (Desktop, Tablet, Mobile) using the evidence screenshots. It must be the approved Growth99 logo (white or colour variant) with no tagline.",
       screenshot_url: screenshotUrls,
       status: "open",
       ai_generated: false,
@@ -478,6 +605,12 @@ export async function checkSingleScript(
   let tabletUrl = ""
   let mobileUrl = ""
   let codeUrl = ""
+  // Whether the Growth99 single-script embed is installed on this page. The
+  // embed is a one-time, site-wide snippet: a <div id="...business-id..."
+  // data-id="..."> plus the integration <script>. The business-id value differs
+  // per site, so we key on the STABLE integration script src (installed = the
+  // loader script is present); the id div alone (no loader) is not functional.
+  let installed = false
 
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
@@ -579,6 +712,23 @@ export async function checkSingleScript(
         : "Element #feature-buttons not found in page source"
     })
 
+    // Detect the single-script embed: the integration loader script is the
+    // definitive signal (id div value varies per site, script src does not).
+    try {
+      const domHit = await newPage.evaluate(
+        () =>
+          !!document.querySelector(
+            'script[src*="chatbot.growth99.com/assets/js/integration.js"]',
+          ),
+      )
+      const content = await newPage.content().catch(() => "")
+      installed =
+        domHit ||
+        content.includes("chatbot.growth99.com/assets/js/integration.js")
+    } catch {
+      installed = false
+    }
+
     const renderPage = await context.newPage()
     await renderPage.setContent(
       `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
@@ -598,7 +748,6 @@ export async function checkSingleScript(
     return [
       {
         check_factor: "single_script",
-        severity: "high",
         title: "Single Script Check Failed",
         description: `The check encountered an unexpected error: ${e.message}. Process aborted gracefully.`,
         screenshot_url: null,
@@ -612,13 +761,28 @@ export async function checkSingleScript(
     .filter(Boolean)
     .join(",")
 
+  // Installed -> pass (clean-pass phrasing so the report marks it Passed).
+  // Not installed -> fail: the site-wide single-script embed is missing here.
+  if (installed) {
+    return [
+      {
+        check_factor: "single_script",
+        title: "Single Script Installed",
+        description:
+          "No issues found. The single-script embed is installed on this page.",
+        screenshot_url: screenshotUrls,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
   return [
     {
       check_factor: "single_script",
-      severity: "medium",
-      title: "Verify Single Script Features",
+      title: "Single Script Not Installed",
       description:
-        "Please verify the single script features across Desktop, Tablet, Mobile and verify the script code addition.",
+        "The single-script embed was not found on this page. This one-time, site-wide snippet should be present in the header or footer of every page.",
       screenshot_url: screenshotUrls,
       status: "open",
       ai_generated: false,
@@ -631,8 +795,10 @@ export async function checkSingleScript(
  * 5️⃣ CHECK 5: Top Bar & Sticky Header Check
  * =========================================================================
  * The Logic:
- * - Top Bar Check: Search for Mobile, Email, and Social media links in the header metadata bar.
- * - Sticky Header Check: Bounding box comparison before and after scrolling down 500px to ensure the header stays visible.
+ * - Top Bar Check: capture the header for manual verification of the metadata
+ *   bar (Mobile, Email, Social links).
+ * - Sticky Header Check: compare the header's viewport-relative position before
+ *   and after scrolling ~800px to determine whether it stays pinned.
  */
 export async function checkTopBarAndStickyHeader(
   url: string,
@@ -640,12 +806,19 @@ export async function checkTopBarAndStickyHeader(
   pageId: string,
   sharedBrowser?: any,
   onProgress?: (progress: number, message: string) => Promise<void>,
+  themeType?: ThemeType,
 ): Promise<Finding[]> {
   const { chromium } = require("playwright")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
+  // Classic themes may carry the nav in a bare <nav>; block themes use a
+  // template-part header. Pick the matching selector set (defaults to block).
+  const headerSelector = headerSelectorFor(themeType)
 
   let codeUrl = ""
   let headerUrl = ""
+  let headerFound = false
+  let stickyMeasured = false
+  let stickyObserved = false
 
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
@@ -664,9 +837,7 @@ export async function checkTopBarAndStickyHeader(
     if (onProgress) await onProgress(40, "Taking screenshot of the header...")
 
     const headerElement = newPage
-      .locator(
-        "header, .site-header, #masthead, [data-elementor-type='header']",
-      )
+      .locator(headerSelector)
       .first()
     if ((await headerElement.count()) > 0) {
       const buffer = await headerElement.screenshot()
@@ -674,21 +845,56 @@ export async function checkTopBarAndStickyHeader(
         buffer,
         `${runId}/${pageId}/header_nav.png`,
       )
+
+      // Sticky-header measurement (docstring promise): compare the header's
+      // viewport-relative position before and after scrolling. A sticky/fixed
+      // header stays pinned near the top (top ~0) after scroll; a normal header
+      // scrolls up out of view (top goes strongly negative). getBoundingClientRect
+      // is viewport-relative, so this is scroll-aware and reliable.
+      try {
+        const measure = () =>
+          headerElement.evaluate((el: Element) => {
+            const r = el.getBoundingClientRect()
+            return { top: r.top, height: r.height }
+          })
+        const before = await measure()
+        await newPage.evaluate(() => window.scrollBy(0, 800))
+        await newPage.waitForTimeout(600)
+        const after = await measure()
+        headerFound = true
+        // Pinned = still within the top band of the viewport and visible.
+        stickyObserved =
+          after.top >= -5 && after.top < 150 && after.height > 0
+        stickyMeasured = true
+        // Reset scroll so the code-snippet capture below is unaffected.
+        await newPage.evaluate(() => window.scrollTo(0, 0)).catch(() => {})
+      } catch {
+        // Measurement failed — leave stickyMeasured false (manual verify).
+      }
     }
 
     if (onProgress) await onProgress(70, "Extracting header code snippet...")
 
-    const codeSnippet = await newPage.evaluate(() => {
-      const stickyEl = document.querySelector(
-        '.elementor-sticky, [data-settings*="sticky"], .is-sticky, [class*="sticky"]',
-      )
-      if (stickyEl) return stickyEl.outerHTML
+    const codeSnippet = await newPage.evaluate((HEADER_SELECTOR: string) => {
+      // Prefer the element that is GENUINELY pinned (computed position), rather
+      // than guessing from class names — block themes pin via theme.json/CSS and
+      // carry no framework-specific "sticky" class.
+      const candidates = Array.from(
+        document.querySelectorAll(
+          `${HEADER_SELECTOR}, .is-sticky, .sticky-header, [class*='sticky' i], [class*='fixed' i]`,
+        ),
+      ).slice(0, 40)
+      const pinned = candidates.find((el) => {
+        const cs = getComputedStyle(el)
+        if (cs.position !== "sticky" && cs.position !== "fixed") return false
+        const r = el.getBoundingClientRect()
+        return r.height > 0 && r.top + window.scrollY < 400
+      })
+      if (pinned) return pinned.outerHTML
 
-      const el = document.querySelector(
-        "header, .site-header, #masthead, [data-elementor-type='header']",
-      )
+      const el = document.querySelector(HEADER_SELECTOR)
       return el ? el.outerHTML : "Header element not found"
-    })
+    }, headerSelector)
 
     const codeContext = await browser.newContext()
     const renderPage = await codeContext.newPage()
@@ -710,7 +916,6 @@ export async function checkTopBarAndStickyHeader(
     return [
       {
         check_factor: "top_bar_sticky",
-        severity: "high",
         title: "Top Bar & Sticky Header Check Failed",
         description: `The check encountered an unexpected error: ${e.message}. Process aborted gracefully.`,
         screenshot_url: null,
@@ -722,13 +927,18 @@ export async function checkTopBarAndStickyHeader(
 
   const screenshotUrls = [codeUrl, headerUrl].filter(Boolean).join(",")
 
+  const stickyLine = stickyMeasured
+    ? `Sticky header measurement: the header ${stickyObserved ? "STAYED pinned near the top" : "did NOT stay pinned (scrolled out of view)"} after an ~800px scroll.`
+    : headerFound
+      ? "Sticky header measurement: could not be measured this run."
+      : "Sticky header measurement: no header element was located."
+
   return [
     {
       check_factor: "top_bar_sticky",
-      severity: "medium",
       title: "Verify Top Bar & Sticky Header",
-      description:
-        "Please verify the top bar and sticky header using the provided screenshots.",
+      description: `Please verify the top bar using the provided screenshots. ${stickyLine}`,
+      context_text: `Header found: ${headerFound ? "Yes" : "No"}\nSticky measured: ${stickyMeasured ? "Yes" : "No"}\nSticky observed: ${stickyMeasured ? (stickyObserved ? "Pinned" : "Not pinned") : "N/A"}`,
       screenshot_url: screenshotUrls,
       status: "open",
       ai_generated: false,
@@ -758,6 +968,11 @@ export async function checkFavicon(
   let tabletUrl = ""
   let mobileUrl = ""
   let codeUrl = ""
+  let faviconDeclared = false
+  let faviconChecked = false
+  let faviconResourceOk = false
+  let faviconHttpStatus = 0
+  let codeLoadOk = false
 
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
@@ -858,16 +1073,46 @@ export async function checkFavicon(
     })
 
     const codePage = await codeContext.newPage()
-    await codePage
+    const codeResp = await codePage
       .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-      .catch(() => {})
+      .catch(() => null)
+    codeLoadOk = !!codeResp
 
-    const codeSnippet = await codePage.evaluate(() => {
+    const faviconInfo = await codePage.evaluate(() => {
       const el = document.querySelector(
-        'link[rel*="icon"], link[rel*="shortcut"]',
-      )
-      return el ? el.outerHTML : "Favicon element not found in page source"
+        'link[rel*="icon" i], link[rel*="shortcut" i], link[rel="apple-touch-icon" i]',
+      ) as HTMLLinkElement | null
+      return {
+        declared: !!el,
+        // Resolve to an absolute URL; fall back to the conventional /favicon.ico.
+        href: el ? el.href : window.location.origin + "/favicon.ico",
+        outerHTML: el
+          ? el.outerHTML
+          : "Favicon element not found in page source",
+      }
     })
+    const codeSnippet = faviconInfo.outerHTML
+
+    // Actually verify the favicon RESOURCE resolves (docstring promise). A link
+    // tag that points at a 404 is a broken favicon and must be reported, not
+    // silently passed. Only attempt when the page itself loaded.
+    if (codeLoadOk) {
+      try {
+        const res = await codePage.request.get(faviconInfo.href, {
+          timeout: 15000,
+        })
+        faviconHttpStatus = res.status()
+        const ct = (res.headers()["content-type"] || "").toLowerCase()
+        // OK = 2xx AND not obviously the HTML 404/soft-404 page.
+        faviconResourceOk = res.ok() && !ct.includes("text/html")
+        faviconChecked = true
+      } catch (e) {
+        // Network-level failure — cannot determine; leave faviconChecked false
+        // so we fall back to the manual-verify card rather than a false defect.
+        faviconChecked = false
+      }
+    }
+    faviconDeclared = faviconInfo.declared
 
     const renderPage = await codeContext.newPage()
     await renderPage.setContent(
@@ -887,7 +1132,6 @@ export async function checkFavicon(
     return [
       {
         check_factor: "favicon",
-        severity: "high",
         title: "Favicon Check Failed",
         description: `The check encountered an unexpected error: ${e.message}. Process aborted gracefully.`,
         screenshot_url: null,
@@ -901,13 +1145,31 @@ export async function checkFavicon(
     .filter(Boolean)
     .join(",")
 
+  // If the HTTP verification ran and the favicon is missing or broken, that's a
+  // real defect — report it instead of the generic manual-verify card.
+  if (faviconChecked && !faviconResourceOk) {
+    return [
+      {
+        check_factor: "favicon",
+        title: "Favicon Missing or Broken",
+        description: faviconDeclared
+          ? `A favicon link was found in the page source, but the favicon resource did not resolve successfully (HTTP ${faviconHttpStatus || "error"}). A broken favicon shows a blank/default icon in the browser tab.`
+          : `No favicon link was declared in the page source, and the conventional /favicon.ico did not resolve successfully (HTTP ${faviconHttpStatus || "error"}). The browser tab will show a default icon.`,
+        context_text: `URL: ${url}\nFavicon declared: ${faviconDeclared ? "Yes" : "No"}\nFavicon HTTP status: ${faviconHttpStatus || "unreachable"}`,
+        screenshot_url: screenshotUrls || null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
   return [
     {
       check_factor: "favicon",
-      severity: "medium",
       title: "Verify Favicon",
-      description:
-        "Please verify the favicon across Desktop, Tablet, Mobile and verify the favicon code addition.",
+      description: faviconChecked
+        ? `The favicon resource resolved successfully (HTTP ${faviconHttpStatus}). Please verify it displays correctly across Desktop, Tablet, Mobile.`
+        : "Please verify the favicon across Desktop, Tablet, Mobile and verify the favicon code addition.",
       screenshot_url: screenshotUrls,
       status: "open",
       ai_generated: false,
@@ -932,15 +1194,23 @@ export async function checkUrlAndTabMatching(
   const findings: Finding[] = []
 
   const pageTitle = await page.title()
-  if (
-    !pageTitle ||
-    pageTitle.trim() === "" ||
-    pageTitle.toLowerCase().includes("untitled") ||
-    pageTitle.toLowerCase().includes("page")
-  ) {
+  // Only flag titles that are actually generic placeholders. The previous
+  // `includes("page")` test wrongly flagged valid titles like "Homepage" and
+  // "About Page" as invalid — a fabricated defect. Match known placeholder
+  // patterns (WP defaults, bare/numbered "Page", "Untitled") instead.
+  const trimmedTitle = (pageTitle || "").trim()
+  const placeholderPatterns = [
+    /untitled/i, // "Untitled", "Untitled Page"
+    /^sample page$/i, // WP default page title
+    /^new page$/i,
+    /^page\s*\d*$/i, // "Page", "Page 1"
+  ]
+  const isPlaceholderTitle = placeholderPatterns.some((p) =>
+    p.test(trimmedTitle),
+  )
+  if (!pageTitle || trimmedTitle === "" || isPlaceholderTitle) {
     findings.push({
       check_factor: "url_matching",
-      severity: "medium",
       title: `Invalid Tab Title for ${page.url()}`,
       description: `The page tab title "${pageTitle || "Empty"}" is invalid or blank. Please format it with your business name and page details.`,
       status: "open",
@@ -975,7 +1245,6 @@ export async function checkUrlAndTabMatching(
         if (missingPaths.length > 0) {
           findings.push({
             check_factor: "url_matching",
-            severity: "medium",
             title: "Dev Site Sitemap URL Mismatch",
             description: `We compared standard live site page paths and found some essential paths are missing on the new dev site: ${missingPaths.join(", ")}. Please verify if these should be migrated.`,
             status: "open",
@@ -1012,6 +1281,7 @@ export async function checkGrowth99ContactForm(
 
   let hasForm = false
   let screenshots: string[] = []
+  let contactFormCheckError: string | null = null
 
   const browser = sharedBrowser || (await chromium.launch({ headless: true }))
   let context: any = null
@@ -1158,9 +1428,28 @@ export async function checkGrowth99ContactForm(
   } catch (e: any) {
     console.error("Growth99 contact form check failed:", e)
     contactFormScreenshotLocks.delete(runId) // release the lock on error
+    contactFormCheckError = e?.message || String(e)
   } finally {
     if (context) await context.close()
     if (!sharedBrowser) await browser.close()
+  }
+
+  // If the check crashed, do NOT fall through to the normal "Verify Contact
+  // Form" card — with hasForm defaulting to false and no screenshots it is
+  // indistinguishable from a genuine "no form found" result (a silent lapse
+  // reported as a normal pass). Surface the failure instead.
+  if (contactFormCheckError) {
+    return [
+      {
+        check_factor: "contact_form",
+        title: "Contact Form Check Failed",
+        description: `The contact form check could not complete: ${contactFormCheckError}. Process aborted gracefully; QACC will retry on the next run.`,
+        context_text: `URL: ${url}\nSystem Error`,
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
   }
 
   const findingData = {
@@ -1168,14 +1457,34 @@ export async function checkGrowth99ContactForm(
     hasForm,
   }
 
+  // hasForm was set by scanning the rendered page source for the Growth99 form
+  // widget (matched on a stable substring, independent of the per-form id). The
+  // report must NEVER echo that widget URL/snippet — only the found/not-found
+  // outcome, so:
+  //   • found     -> clean-pass phrasing ("No … issues found") so it passes,
+  //   • not found -> a real defect ("Contact form not found") so it fails.
+  if (hasForm) {
+    return [
+      {
+        check_factor: "contact_form",
+        title: "Contact Form Verified",
+        description:
+          "No contact form issues found. The contact form is present on this page.",
+        context_text: JSON.stringify(findingData),
+        screenshot_url: screenshots.length > 0 ? screenshots.join(",") : null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
   return [
     {
       check_factor: "contact_form",
-      severity: "medium",
-      title: "Verify Contact Form",
-      description: "Verify the Growth99 contact form across all pages.",
+      title: "Contact Form Not Found",
+      description: "No contact form was found on this page.",
       context_text: JSON.stringify(findingData),
-      screenshot_url: screenshots.length > 0 ? screenshots.join(",") : null,
+      screenshot_url: null,
       status: "open",
       ai_generated: false,
     } as Finding,
@@ -1193,70 +1502,153 @@ export async function checkGrowth99ContactForm(
 export async function checkChatbotAndConsultation(
   page: PlaywrightPage,
   runId?: string,
-  pageRecord?: any,
+  opts?: { projectId?: string; projectName?: string; siteUrl?: string },
 ): Promise<Finding[]> {
   const sharp = require("sharp")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
-  const findings: Finding[] = []
+  const { analyzeChatWidgets, confirmSelfAssessmentWidget } = require("../lib/chatWidgetsVision")
+  const { getChatbotConsultationCodes } = require("../lib/basecampClient")
 
-  const chatbotLauncher = page.locator(
-    "#g99-chatbot-launcher, .g99-chatbot-launcher, #g99-chatbot-button",
-  )
-  const virtualConsultationLauncher = page.locator(
-    '.g99-consultation-btn, #g99-consultation-btn, [class*="consultation"]',
-  )
+  const factor = "chatbot_consultation"
 
-  const hasChatbot = (await chatbotLauncher.count()) > 0
-  const hasConsultation = (await virtualConsultationLauncher.count()) > 0
-
-  if (!hasChatbot && !hasConsultation) {
-    return []
+  // 1. Let every JS-injected widget settle, then screenshot the loaded page.
+  await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {})
+  await page.waitForTimeout(5000)
+  const shot = await page.screenshot().catch(() => null)
+  let screenshotUrl: string | null = null
+  if (shot && runId) {
+    const jpg = await sharp(shot).jpeg({ quality: 85 }).toBuffer()
+    screenshotUrl =
+      (await uploadScreenshot(jpg, `${runId}/chatbot_consultation_${Date.now()}.jpg`, {
+        bucket: "evidence",
+        isPublic: true,
+      }).catch(() => "")) || null
   }
 
-  if (hasChatbot) {
-    try {
-      await chatbotLauncher.first().click({ timeout: 5000 })
-      await page.waitForTimeout(1000)
+  // 2. Vision: are the circular buttons + chatbot bubble actually visible?
+  const verdict = shot ? await analyzeChatWidgets(shot).catch(() => null) : null
 
-      const isWindowOpen = await page
-        .locator("#g99-chatbot-window, .g99-chatbot-window")
-        .first()
-        .isVisible()
-      if (!isWindowOpen) {
-        let shotUrl = ""
-        if (runId) {
-          try {
-            const buf = await page.screenshot().catch(() => null)
-            if (buf) {
-              const jpg = await sharp(buf).jpeg({ quality: 85 }).toBuffer()
-              shotUrl = await uploadScreenshot(
-                jpg,
-                `${runId}/chatbot_consultation_${Date.now()}.jpg`,
-                { bucket: "evidence", isPublic: true },
-              ).catch(() => "")
+  // 3. Definitive backend proof: are the Basecamp install codes in the source?
+  const source = (await page.content().catch(() => "")) || ""
+  const codes = await getChatbotConsultationCodes(
+    opts?.projectId,
+    opts?.projectName,
+  ).catch(() => null)
+
+  // Cliff Hanger integration script (enables the chatbot + launcher buttons).
+  const INTEGRATION = "chatbot.growth99.com/assets/js/integration.js"
+  const cliffScriptInSource = source.includes(INTEGRATION)
+  const bizId = codes?.cliffhanger.businessId || ""
+  const bizIdInSource = bizId ? new RegExp(`data-id=["']?${bizId}\\b`).test(source) : false
+  const cliffhangerInSource = cliffScriptInSource || bizIdInSource
+  // Virtual Consultation composer (may load in an iframe on click, so this is a
+  // supporting signal, not the gate).
+  const vcInSource =
+    source.includes("app.growth99.com/assets/static/composer.html") ||
+    (!!codes?.vc.fid && source.includes(`fid=${codes.vc.fid}`))
+
+  const buttonsVisible = !!verdict?.buttonsVisible
+  const chatbotVisible = !!verdict?.chatbotVisible
+
+  // 3b. Best-effort self-assessment functional test: click the first (self-
+  // assessment) launcher and vision-confirm a body-model widget opened. Only
+  // worth trying when the script is installed and buttons are visible. Brittle
+  // (injected buttons have no stable selector), so a null result never fails the
+  // check — it just annotates it.
+  let selfAssessmentOpened: boolean | null = null
+  if (cliffhangerInSource && buttonsVisible) {
+    const launcherSelectors = [
+      '[title="Self Assessment" i]',
+      '[aria-label*="Self Assessment" i]',
+      '[class*="self-assessment"]',
+      '[id*="self-assessment"]',
+      ".g99-consultation-btn",
+      "#g99-consultation-btn",
+      '[class*="consultation-btn"]',
+    ]
+    for (const sel of launcherSelectors) {
+      const loc = page.locator(sel).first()
+      const present = (await loc.count().catch(() => 0)) > 0 && (await loc.isVisible().catch(() => false))
+      if (!present) continue
+      try {
+        await loc.click({ timeout: 5000 })
+        await page.waitForTimeout(3000)
+        const shot2 = await page.screenshot().catch(() => null)
+        if (shot2) {
+          const r = await confirmSelfAssessmentWidget(shot2).catch(() => null)
+          if (r) {
+            selfAssessmentOpened = r.opened
+            if (r.opened && runId) {
+              const jpg2 = await sharp(shot2).jpeg({ quality: 85 }).toBuffer()
+              const u = await uploadScreenshot(jpg2, `${runId}/self_assessment_${Date.now()}.jpg`, {
+                bucket: "evidence",
+                isPublic: true,
+              }).catch(() => "")
+              if (u) screenshotUrl = screenshotUrl ? `${screenshotUrl},${u}` : u
             }
-          } catch {}
+            break
+          }
         }
-        findings.push({
-          check_factor: "chatbot_consultation",
-          severity: "medium",
-          title: "Chatbot Widget Unresponsive",
-          description:
-            "Clicked the chatbot launcher button, but the chatbot conversation window failed to open.",
-          screenshot_url: shotUrl || null,
-          status: "open",
-          ai_generated: false,
-        } as Finding)
-      }
-    } catch (err: any) {
-      logger.warn(
-        { error: err.message },
-        "Failed to interact with chatbot widget.",
-      )
+      } catch {}
     }
   }
+  const selfAssessNote =
+    selfAssessmentOpened === true
+      ? " Self-assessment widget opened correctly on click."
+      : selfAssessmentOpened === false
+        ? " Note: clicking the self-assessment button did not open the body-model widget — verify manually."
+        : " (Self-assessment click test was inconclusive — verify manually.)"
 
-  return findings
+  const ctx = `cliffhangerInSource: ${cliffhangerInSource} (script:${cliffScriptInSource}, bizId:${bizIdInSource || "n/a"}); vcInSource: ${vcInSource}; selfAssessmentOpened: ${selfAssessmentOpened}; vision: ${JSON.stringify(verdict || {})}; basecampCodes: ${JSON.stringify(codes || {})}`
+
+  // 4. Verdict.
+  //   • script installed + widgets visibly load  -> PASS
+  //   • script installed but widgets NOT visible  -> MANUAL (contradiction)
+  //   • script NOT installed                      -> FAIL (not implemented)
+  if (cliffhangerInSource) {
+    if (chatbotVisible && buttonsVisible) {
+      return [
+        {
+          check_factor: factor,
+          title: "Chatbot & Virtual Consultation Verified",
+          description: `No chatbot/consultation issues found. The Cliff Hanger integration script is present in the page source and the widgets load correctly — ${verdict?.buttonCount ?? "the"} circular consultation buttons and the chatbot bubble are visible.${vcInSource ? " The Virtual Consultation composer code is also present." : ""}${selfAssessNote}`,
+          context_text: ctx,
+          screenshot_url: screenshotUrl,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+    // Installed in the backend but not visibly loading → needs human eyes.
+    const missing = [
+      !chatbotVisible && "the chatbot bubble is not visible",
+      !buttonsVisible && "the circular consultation buttons are not visible",
+    ].filter(Boolean)
+    return [
+      {
+        check_factor: factor,
+        title: "Chatbot & Virtual Consultation — needs manual review",
+        description: `The install code IS present in the page source (Cliff Hanger integration script), but ${missing.join(" and ")} in the loaded screenshot. This may be a load/timing or rendering issue — please review manually on the live page.${selfAssessNote}`,
+        context_text: ctx,
+        screenshot_url: screenshotUrl,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
+  // No integration script in source → not implemented.
+  return [
+    {
+      check_factor: factor,
+      title: "Chatbot & Virtual Consultation not installed",
+      description: `The Cliff Hanger integration script (${INTEGRATION}) was not found in the page source, so the chatbot and virtual consultation are not installed. No automatic fix — first confirm with the client's requirement whether the chatbot and virtual consultation are meant to be added for this client; if they are required, add the Cliff Hanger + Virtual Consultation codes from Basecamp.${verdict ? ` Vision: buttons ${buttonsVisible ? "visible" : "not visible"}, chatbot ${chatbotVisible ? "visible" : "not visible"}.` : ""}`,
+      context_text: ctx,
+      screenshot_url: screenshotUrl,
+      status: "open",
+      ai_generated: false,
+    } as Finding,
+  ]
 }
 
 /**
@@ -1301,7 +1693,6 @@ export async function checkTextShareMetadata(
       ) {
         findings.push({
           check_factor: "text_share",
-          severity: "medium",
           title: "Text Share Metadata - Default WordPress Value Found",
           description: `The og:title is set to a default value "${metaTags.ogTitle}", which looks like a WordPress boilerplate. Please update this tag before release.`,
           status: "open",
@@ -1311,7 +1702,6 @@ export async function checkTextShareMetadata(
     } else {
       findings.push({
         check_factor: "text_share",
-        severity: "medium",
         title: "Text Share Metadata - Missing og:title Tag",
         description:
           "The Open Graph title tag (og:title) is missing. When users share the link via SMS/WhatsApp, it won't display a proper preview card title.",
@@ -1328,7 +1718,6 @@ export async function checkTextShareMetadata(
       ) {
         findings.push({
           check_factor: "text_share",
-          severity: "medium",
           title: "Text Share Metadata - Default Site Name",
           description: `The og:site_name contains default placeholder text "${metaTags.ogSiteName}" instead of matching the actual business name.`,
           status: "open",
@@ -1341,6 +1730,17 @@ export async function checkTextShareMetadata(
       { error: err.message },
       "Error during text share metadata check",
     )
+    // Don't swallow: returning the empty `findings` here reads as "metadata is
+    // fine". Surface the failure so the check is marked incomplete, not passed.
+    findings.push({
+      check_factor: "text_share",
+      title: "Text Share Metadata Check Failed",
+      description: `The share-metadata check could not complete: ${err.message}. Process aborted gracefully; QACC will retry on the next run.`,
+      context_text: "System Error",
+      screenshot_url: null,
+      status: "open",
+      ai_generated: false,
+    } as Finding)
   }
 
   return findings
@@ -1366,7 +1766,6 @@ export async function checkCallnowLinks(
     return [
       {
         check_factor: "callnow_links",
-        severity: "high",
         title: "Callnow Check Skipped - No Password",
         description:
           "The WordPress admin password was not provided. Skipping Callnow backend checks.",
@@ -1400,16 +1799,50 @@ export async function checkCallnowLinks(
     const passField = adminPage.locator('#user_pass, input[name="pwd"]')
     const submitBtn = adminPage.locator('#wp-submit, input[type="submit"]')
 
+    let loginOk = false
     if ((await userField.count()) > 0 && (await passField.count()) > 0) {
       await userField.fill("onboarding.india@growth99.com")
       await passField.fill(wpPassword)
       await submitBtn.click()
       // Use domcontentloaded instead of networkidle to prevent hangs from WordPress heartbeat/polling
       await adminPage.waitForLoadState("domcontentloaded", { timeout: 15000 })
-      // Wait for the admin bar or dashboard to signal a successful login
+      // Wait for the admin bar to signal a successful login. #wpadminbar only
+      // renders for an authenticated session — the login page (bad password)
+      // does NOT have it, so it's the reliable success signal (unlike ".wrap",
+      // which can appear elsewhere).
       await adminPage
-        .waitForSelector("#wpadminbar, .wrap", { timeout: 15000 })
+        .waitForSelector("#wpadminbar", { timeout: 15000 })
         .catch(() => {})
+      loginOk = (await adminPage.locator("#wpadminbar").count()) > 0
+    }
+
+    // Guard against a fake report: if login failed (bad/expired password), every
+    // subsequent wp-admin navigation redirects back to wp-login.php, and we'd
+    // screenshot the LOGIN PAGE as a normal "Verify Call Now" card — a false
+    // pass. Emit a lapse finding instead.
+    if (!loginOk) {
+      const loginShot = await adminPage.screenshot({ fullPage: false }).catch(() => null)
+      let loginShotUrl = ""
+      if (loginShot) {
+        loginShotUrl = await uploadScreenshot(
+          loginShot,
+          `${runId}/${pageId}/callnow_login_failed.png`,
+        ).catch(() => "")
+      }
+      await adminPage.close().catch(() => {})
+      await adminContext.close().catch(() => {})
+      return [
+        {
+          check_factor: "callnow_links",
+          title: "Call Now & Links Check Failed",
+          description:
+            "Could not log in to WordPress admin (the admin bar never appeared — the password may be incorrect or expired). The Call Now plugin/settings checks require admin access and could not complete.",
+          context_text: `URL: ${url}\nWP admin login: failed`,
+          screenshot_url: loginShotUrl || null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
     }
 
     await adminPage
@@ -1486,7 +1919,6 @@ export async function checkCallnowLinks(
     return [
       {
         check_factor: "callnow_links",
-        severity: "high",
         title: "Call Now & Links Check Failed",
         description: `The check encountered an unexpected error: ${error.message}. Process aborted gracefully.`,
         screenshot_url: null,
@@ -1511,7 +1943,6 @@ export async function checkCallnowLinks(
   return [
     {
       check_factor: "callnow_links",
-      severity: "medium",
       title: "Verify Call Now Button & Links",
       description: `Please verify the Call Now plugin setup and homepage links using the evidence screenshots.`,
       screenshot_url: screenshotUrls,
@@ -1704,13 +2135,10 @@ export async function checkUrlTabComparison(
     })
 
     const totalMissing = missingInDev.length + missingInLive.length
-    const severity =
-      totalMissing >= 10 ? "high" : totalMissing >= 4 ? "medium" : "low"
 
     return [
       {
         check_factor: "url_tab_compare",
-        severity,
         title: `URL & Tab Name Comparison — ${totalMissing} discrepancies found`,
         description: `Compared ${devPages.length} dev site pages with ${livePages.length} live site pages. Found ${missingInDev.length} URLs missing in dev (present in live) and ${missingInLive.length} URLs missing in live (present in dev).`,
         context_text: JSON.stringify(contextData),
@@ -1724,7 +2152,6 @@ export async function checkUrlTabComparison(
     return [
       {
         check_factor: "url_tab_compare",
-        severity: "high",
         title: "URL & Tab Comparison — Check Failed",
         description: `The check encountered an unexpected error: ${err.message}. Process aborted gracefully.`,
         context_text: JSON.stringify({ devPages: [], livePages: [] }),
@@ -1755,7 +2182,6 @@ export async function checkPluginUpdates(
     return [
       {
         check_factor: "verify_plugin_updates",
-        severity: "medium",
         title: "Plugins Update Check Failed",
         description: "WordPress password was not provided.",
         screenshot_url: null,
@@ -1790,6 +2216,7 @@ export async function checkPluginUpdates(
     const passField = newPage.locator('#user_pass, input[name="pwd"]')
     const submitBtn = newPage.locator('#wp-submit, input[type="submit"]')
 
+    let loginOk = false
     if ((await userField.count()) > 0 && (await passField.count()) > 0) {
       await userField.fill("onboarding.india@growth99.com")
       await passField.fill(wpPassword)
@@ -1799,10 +2226,40 @@ export async function checkPluginUpdates(
           .catch(() => {}),
         submitBtn.click(),
       ])
-      // Wait for the admin bar or dashboard to signal a successful login
+      // #wpadminbar only renders for an authenticated session — it's the
+      // reliable login-success signal (unlike ".wrap", which can appear on
+      // other pages). A bad/expired password leaves us on wp-login.php.
       await newPage
-        .waitForSelector("#wpadminbar, .wrap", { timeout: 15000 })
+        .waitForSelector("#wpadminbar", { timeout: 15000 })
         .catch(() => {})
+      loginOk = (await newPage.locator("#wpadminbar").count()) > 0
+    }
+
+    // Guard against a fake report: if login failed, plugins.php redirects to
+    // wp-login.php and we'd screenshot the LOGIN PAGE as a normal "Verify
+    // Plugin Updates" card — a false pass. Emit a lapse finding instead.
+    if (!loginOk) {
+      const loginShot = await newPage.screenshot({ fullPage: false }).catch(() => null)
+      let loginShotUrl = ""
+      if (loginShot) {
+        loginShotUrl = await uploadScreenshot(
+          loginShot,
+          `${runId}/plugins_login_failed.png`,
+        ).catch(() => "")
+      }
+      if (!sharedBrowser) await browser.close().catch(() => {})
+      return [
+        {
+          check_factor: "verify_plugin_updates",
+          title: "Verify Plugin Updates Check Failed",
+          description:
+            "Could not log in to WordPress admin (the admin bar never appeared — the password may be incorrect or expired). The plugin-updates check requires admin access and could not complete.",
+          context_text: `URL: ${url}\nWP admin login: failed`,
+          screenshot_url: loginShotUrl || null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
     }
 
     if (onProgress) await onProgress(60, "Navigating to Plugins page...")
@@ -1833,7 +2290,6 @@ export async function checkPluginUpdates(
     return [
       {
         check_factor: "verify_plugin_updates",
-        severity: "high",
         title: "Verify Plugin Updates Check Failed",
         description: `The check encountered an unexpected error: ${e.message}. Process aborted gracefully.`,
         screenshot_url: null,
@@ -1846,7 +2302,6 @@ export async function checkPluginUpdates(
   return [
     {
       check_factor: "verify_plugin_updates",
-      severity: "medium",
       title: "Verify Plugin Updates",
       description:
         "Please verify if all plugins are in updated state except All-in-Migration, Litespeed Cache, Wp-Rocket, ELEMENTOR, WOO-COMMERCE.",
@@ -1983,7 +2438,6 @@ export async function checkSocialShareHeading(
     return [
       {
         check_factor: "social_share_heading",
-        severity: "high",
         title: "Social Share Heading Check Failed",
         description: `The check encountered an unexpected error: ${err.message}. Process aborted gracefully.`,
         screenshot_url: null,
@@ -2000,7 +2454,6 @@ export async function checkSocialShareHeading(
   return [
     {
       check_factor: "social_share_heading",
-      severity: "medium",
       title: "Social Share Heading Check",
       description:
         "Verify the social sharing preview headings for Facebook, X, and LinkedIn.",
@@ -2143,7 +2596,6 @@ export async function checkLogoOnChatbot(
     return [
       {
         check_factor: "logo_chatbot",
-        severity: "high",
         title: "Logo on Chatbot Check Failed",
         description: `The check encountered an unexpected error: ${e.message}. Process aborted gracefully.`,
         screenshot_url: null,
@@ -2164,7 +2616,6 @@ export async function checkLogoOnChatbot(
   return [
     {
       check_factor: "logo_chatbot",
-      severity: "medium",
       title: "Verify Logo on Chatbot",
       description: isChatbotActive
         ? "Please verify the actual brand logo on the chatbot using the provided screenshots."

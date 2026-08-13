@@ -628,16 +628,11 @@ export const RunDetailPage = () => {
       }
     }
 
-    let severity: "medium" | "high" | "critical" = "medium"
-    if (totalDeadLinksCount >= 10) severity = "critical"
-    else if (totalDeadLinksCount >= 5) severity = "high"
-
     const combinedId = deadLinks.map((f) => f.id).join(",")
 
     const consolidatedDeadLinks: QAFinding = {
       id: combinedId,
       check_factor: "dead_links",
-      severity,
       title: `${totalDeadLinksCount} dead link${totalDeadLinksCount !== 1 ? "s" : ""} found`,
       description: mergedDescription,
       context_text: deadLinks
@@ -703,7 +698,6 @@ export const RunDetailPage = () => {
     const consolidated: QAFinding = {
       id: combinedId,
       check_factor: "learn_more_buttons",
-      severity: "medium",
       title: `${totalButtonsCount} generic CTA button(s) found`,
       description: violations.join("\n"),
       context_text: "Consolidated from all pages.",
@@ -1129,7 +1123,6 @@ export const RunDetailPage = () => {
         project_id: projectId!,
         title: taskTitle,
         description: `Automated multiview screenshots for ${selectedPage.url}`,
-        severity: "medium",
         gallery_images: galleryImages,
       })
 
@@ -1250,8 +1243,6 @@ export const RunDetailPage = () => {
           title: finding.title,
           description:
             (finding.description || "") + (aiResultsMap[finding.id] || ""),
-
-          severity: finding.severity,
           assigned_to: userId,
           gallery_images:
             galleryImages.length > 0 ? galleryImages : finding.gallery_images,
@@ -1278,7 +1269,6 @@ export const RunDetailPage = () => {
         title: finding.title,
         description:
           (finding.description || "") + (aiResultsMap[finding.id] || ""),
-        severity: finding.severity,
         gallery_images:
           galleryImages.length > 0 ? galleryImages : finding.gallery_images,
       })
@@ -1317,7 +1307,9 @@ export const RunDetailPage = () => {
     }
   }
 
-  const isPreRelease = project?.is_pre_release
+  // Internal QA happens within the pre-release stage, so it counts as
+  // pre-release-side everywhere the UI distinguishes pre from post.
+  const isPreRelease = project?.is_pre_release || project?.is_internal_qa
 
   const allRunTasksClosed =
     runTasks.length > 0
@@ -1749,7 +1741,7 @@ export const RunDetailPage = () => {
           (run as any)?.recording_status === "completed" ||
           (run as any)?.recording_video_urls) &&
           (!isQaEngineer ||
-            (!project?.is_pre_release &&
+            (!isPreRelease &&
               safeDisplayProgress === 100 &&
               allRunTasksClosed)) && (
             <button
@@ -1770,7 +1762,7 @@ export const RunDetailPage = () => {
           (run as any)?.recording_status === "completed" ||
           (run as any)?.recording_video_urls) &&
           (!isQaEngineer ||
-            (!project?.is_pre_release &&
+            (!isPreRelease &&
               safeDisplayProgress === 100 &&
               allRunTasksClosed)) && (
             <button
@@ -2862,18 +2854,6 @@ export const RunDetailPage = () => {
                 ).length
                 const open = total - confirmed - falsePositives
                 const resolved = confirmed + falsePositives
-                const critical = runGeneralFindings.filter(
-                  (f) => f.severity === "critical",
-                ).length
-                const high = runGeneralFindings.filter(
-                  (f) => f.severity === "high",
-                ).length
-                const medium = runGeneralFindings.filter(
-                  (f) => f.severity === "medium",
-                ).length
-                const low = runGeneralFindings.filter(
-                  (f) => f.severity === "low",
-                ).length
                 const resolvedPercentage =
                   total > 0 ? Math.round((resolved / total) * 100) : 0
 
@@ -2920,59 +2900,6 @@ export const RunDetailPage = () => {
                             {resolvedPercentage}%
                           </span>
                         </div>
-                      </div>
-                    </div>
-
-                    {/* MANUAL SCAN OVERLAY */}
-                    <div>
-                      <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-                        Audit Summary
-                      </p>
-                      <div className="flex items-center gap-x-3 text-sm">
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-[18px] text-red-600">
-                            {critical}
-                          </span>
-                          <span className="font-bold text-[13px] Capitalize text-slate-500 dark:text-slate-100">
-                            Critical
-                          </span>
-                        </div>
-                        <span className="text-slate-300 dark:text-slate-700">
-                          |
-                        </span>
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-[18px] text-orange-600">
-                            {high}
-                          </span>
-                          <span className="font-bold text-[13px] Capitalize text-slate-500 dark:text-slate-100">
-                            High
-                          </span>
-                        </div>
-                        <span className="text-slate-300 dark:text-slate-700">
-                          |
-                        </span>
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-[18px] text-amber-600">
-                            {medium}
-                          </span>
-                          <span className="font-bold text-[13px] Capitalize text-slate-500 dark:text-slate-100">
-                            Medium
-                          </span>
-                        </div>
-                        <span className="text-slate-300 dark:text-slate-700">
-                          |
-                        </span>
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-[18px] text-sky-600">
-                            {low}
-                          </span>
-                          <span className="font-bold text-[13px] Capitalize text-slate-500 dark:text-slate-100">
-                            Low
-                          </span>
-                        </div>
-                        <span className="font-medium text-[13px] text-slate-400 ml-1">
-                          findings found
-                        </span>
                       </div>
                     </div>
 
@@ -3283,7 +3210,7 @@ export const RunDetailPage = () => {
 
       {activeTab === "recordings" &&
         (!isQaEngineer ||
-          (!project?.is_pre_release &&
+          (!isPreRelease &&
             safeDisplayProgress === 100 &&
             allRunTasksClosed)) && (
           <div className="space-y-8 animate-in fade-in duration-200">
@@ -3617,7 +3544,6 @@ export const RunDetailPage = () => {
                   : prefillFinding.id,
                 title: prefillFinding.title,
                 description: prefillFinding.description || "",
-                severity: prefillFinding.severity,
                 gallery_images: prefillFinding.gallery_images,
               }
             : undefined

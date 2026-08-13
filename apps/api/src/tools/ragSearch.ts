@@ -54,7 +54,7 @@ export function formatRAGResults(results: RAGResult[]): string {
     lines.push(`🔍 **${grouped.finding.length} matching findings:**`);
     grouped.finding.forEach((r, i) => {
       const meta = r.metadata || {};
-      lines.push(`${i + 1}. **${meta.title || 'Finding'}** — ${meta.severity || ''} · ${meta.status || ''}`);
+      lines.push(`${i + 1}. **${meta.title || 'Finding'}** — ${meta.status || ''}`);
       if (meta.page_url) lines.push(`   📄 ${meta.page_url}`);
       lines.push(`   ${r.content.slice(0, 120)}...`);
     });
@@ -64,7 +64,7 @@ export function formatRAGResults(results: RAGResult[]): string {
     lines.push(`\n **${grouped.task.length} matching tasks:**`);
     grouped.task.forEach((r, i) => {
       const meta = r.metadata || {};
-      lines.push(`${i + 1}. **${meta.title || 'Task'}** — ${meta.severity || ''} · ${meta.status || ''}`);
+      lines.push(`${i + 1}. **${meta.title || 'Task'}** — ${meta.status || ''}`);
       lines.push(`   ${r.content.slice(0, 120)}...`);
     });
   }

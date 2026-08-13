@@ -42,7 +42,7 @@ ${params.rebuttalText}`
 
   try {
     const response = await genAI.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.0-flash",
       contents: [{ role: "user", parts: promptParts }],
     })
     const resultText = response.text ?? "{}"

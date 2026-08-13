@@ -28,7 +28,7 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_project_stats',
-    description: 'Get project findings statistics grouped by status and severity.',
+    description: 'Get project findings statistics grouped by status.',
     parameters: {
       type: 'object',
       properties: {
@@ -288,7 +288,6 @@ export const TOOL_DEFINITIONS = [
         project_id: { type: 'string' },
         title: { type: 'string' },
         description: { type: 'string' },
-        severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
         assigned_to: { type: 'string', description: 'User UUID' },
         finding_id: { type: 'string', description: 'Optional finding UUID to link' }
       },
@@ -305,7 +304,6 @@ export const TOOL_DEFINITIONS = [
         project_id: { type: 'string' },
         title: { type: 'string' },
         description: { type: 'string' },
-        severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
         status: { type: 'string', enum: ['open', 'in_progress', 'resolved', 'closed'] },
         assigned_to: { type: 'string' }
       },
@@ -350,14 +348,13 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: 'update_finding',
-    description: 'Update a finding status or severity.',
+    description: 'Update a finding status.',
     parameters: {
       type: 'object',
       properties: {
         finding_id: { type: 'string' },
         run_id: { type: 'string' },
         status: { type: 'string', enum: ['open', 'confirmed', 'false_positive'] },
-        severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
         title: { type: 'string' },
         description: { type: 'string' }
       },

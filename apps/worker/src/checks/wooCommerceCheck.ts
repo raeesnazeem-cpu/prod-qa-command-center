@@ -37,7 +37,6 @@ export async function checkWooCommerce(
         if (!element) {
           findings.push({
             check_factor: 'woocommerce',
-            severity: 'medium',
             title: `Missing WooCommerce element: ${check.name}`,
             description: `${check.name} was not found on product page: ${productUrl}`,
             status: 'open',
@@ -53,7 +52,6 @@ export async function checkWooCommerce(
         if (alt === null || alt.trim() === '') {
           findings.push({
             check_factor: 'woocommerce',
-            severity: 'medium',
             title: 'WooCommerce product image missing alt text',
             description: `Product image on ${productUrl} is missing an alt attribute.`,
             status: 'open',
@@ -79,7 +77,6 @@ export async function checkWooCommerce(
       if (emptyCart) {
         findings.push({
           check_factor: 'woocommerce',
-          severity: 'medium',
           title: 'WooCommerce cart appears empty after adding product',
           description: 'The cart page shows as empty even after clicking "Add to cart".',
           status: 'open',
@@ -92,7 +89,6 @@ export async function checkWooCommerce(
       if (!quantityInput) {
         findings.push({
           check_factor: 'woocommerce',
-          severity: 'medium',
           title: 'Missing WooCommerce element: Quantity input',
           description: 'Quantity input was not found on the cart page.',
           status: 'open',
@@ -105,7 +101,6 @@ export async function checkWooCommerce(
       if (!checkoutButton) {
         findings.push({
           check_factor: 'woocommerce',
-          severity: 'medium',
           title: 'Missing WooCommerce element: Proceed to checkout button',
           description: 'Proceed to checkout button was not found on the cart page.',
           status: 'open',
@@ -129,7 +124,6 @@ export async function checkWooCommerce(
       if (!element) {
         findings.push({
           check_factor: 'woocommerce',
-          severity: 'medium',
           title: `Missing WooCommerce element: ${check.name}`,
           description: `${check.name} was not found on the checkout page.`,
           status: 'open',
@@ -142,7 +136,6 @@ export async function checkWooCommerce(
     if (!page.url().startsWith('https')) {
       findings.push({
         check_factor: 'woocommerce',
-        severity: 'medium',
         title: 'WooCommerce checkout not using HTTPS',
         description: 'The checkout page URL does not start with https://, which is a security risk.',
         status: 'open',
@@ -152,6 +145,17 @@ export async function checkWooCommerce(
 
   } catch (error: any) {
     console.error('Error during WooCommerce check:', error.message);
+    // A thrown error (shop/cart/checkout failed to load) means the check did not
+    // complete. Returning the partial `findings` (usually []) would be reported
+    // as a clean pass. Surface the failure instead.
+    findings.push({
+      check_factor: 'woocommerce',
+      title: 'WooCommerce Check Failed',
+      description: `The WooCommerce check could not complete: ${error.message}. Process aborted gracefully; QACC will retry on the next run.`,
+      context_text: 'System Error',
+      status: 'open',
+      ai_generated: false,
+    } as Finding);
   }
 
   return findings;

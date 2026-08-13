@@ -91,6 +91,7 @@ export async function checkImageQuality(
     page = await context.newPage()
 
     if (onProgress) await onProgress(10, "Loading page for image quality...")
+    let loadOk = true
     try {
       await page.goto(pageUrl, { waitUntil: "load", timeout: 60000 })
     } catch (e: any) {
@@ -103,6 +104,9 @@ export async function checkImageQuality(
       ) {
         throw e
       }
+      // Page did not finish loading. Remember this so we never emit a clean
+      // "no issues" pass over a page that never rendered.
+      loadOk = false
     }
     await page.waitForTimeout(500)
 
@@ -216,7 +220,6 @@ export async function checkImageQuality(
       )
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: wm > 0 ? "high" : "medium",
         title: `${issues.length} image quality issue${issues.length > 1 ? "s" : ""} found — ${wm} watermark, ${blur} blurry`,
         description: `Found ${issues.length} problem image(s) on this page. Reference images are attached below.<br>${descLines.join("<br>")}`,
         // Structured payload the ImageQualityFindingCard parses into a table.
@@ -226,10 +229,32 @@ export async function checkImageQuality(
         status: "open",
         ai_generated: wm > 0,
       } as Finding)
+    } else if (!loadOk) {
+      // Page never finished loading — we cannot claim "no issues".
+      findings.push({
+        check_factor: CHECK_FACTOR,
+        title: "Image Quality Check Failed",
+        description: `The page did not finish loading, so image quality could not be verified. Process aborted gracefully; QACC will retry on the next run.`,
+        context_text: `Page: ${pageUrl}\nSystem Error: page load timeout`,
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
+    } else if (candidates.length > 0 && checked === 0) {
+      // There were images to inspect but none could be downloaded/decoded —
+      // reporting "no issues" here would be a false clean pass.
+      findings.push({
+        check_factor: CHECK_FACTOR,
+        title: "Image Quality Check Failed",
+        description: `Found ${candidates.length} candidate image(s) but none could be downloaded or decoded, so image quality could not be verified. Process aborted gracefully.`,
+        context_text: `Page: ${pageUrl}\nImages found: ${candidates.length}, successfully analyzed: 0`,
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
     } else {
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: "low",
         title: "Image quality: no watermark or blur issues",
         description: `Checked ${checked} content image${checked === 1 ? "" : "s"} on this page (blur on all, watermark vision on up to ${MAX_VISION}). No watermarks or blurry images detected.`,
         context_text: `Page: ${pageUrl}\nImages checked: ${checked}`,
@@ -243,7 +268,6 @@ export async function checkImageQuality(
   } catch (error: any) {
     findings.push({
       check_factor: CHECK_FACTOR,
-      severity: "high",
       title: "Image Quality Check Failed",
       description: `The check encountered an unexpected error: ${error.message}. Process aborted gracefully to prevent stalling the scan.`,
       context_text: `Page: ${pageUrl}\nSystem Error`,

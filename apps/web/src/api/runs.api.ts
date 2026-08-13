@@ -4,7 +4,7 @@ import { CreateRunInput, RunStatus } from "@qacc/shared"
 export interface QARun {
   id: string
   project_id: string
-  run_type: "pre_release" | "post_release"
+  run_type: "pre_release" | "post_release" | "internal_qa"
   site_url: string
   figma_url?: string | null
   enabled_checks: string[]
@@ -31,7 +31,6 @@ export interface CreateFindingInput {
   page_id: string
   run_id: string
   check_factor: string
-  severity: "critical" | "high" | "medium" | "low"
   title: string
   description?: string | null
   screenshot_url?: string | null
@@ -65,7 +64,6 @@ export interface QAFinding {
   page_id: string
   run_id: string
   check_factor: string
-  severity: "critical" | "high" | "medium" | "low"
   title: string
   description?: string | null
   context_text?: string | null
@@ -231,7 +229,7 @@ export const getPageFindings = async (
 export const updateFinding = async (
   axios: AxiosInstance,
   findingId: string,
-  data: Partial<Pick<QAFinding, "severity" | "status">>,
+  data: Partial<Pick<QAFinding, "status">>,
 ): Promise<QAFinding> => {
   // Use the /api/findings/:id/status endpoint if status is provided
   if (data.status) {

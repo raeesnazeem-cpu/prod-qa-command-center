@@ -104,7 +104,6 @@ export const CreateTaskModal = ({
     resolver: zodResolver(CreateTaskSchema),
     defaultValues: {
       project_id: projectId || "",
-      severity: "medium",
       ...prefillData,
     },
   })
@@ -116,7 +115,6 @@ export const CreateTaskModal = ({
       if (prefillData) {
         reset({
           project_id: projectId || "",
-          severity: "medium",
           ...prefillData,
           gallery_images: images,
         } as CreateTaskInput)
@@ -237,26 +235,6 @@ export const CreateTaskModal = ({
               />
             </div>
 
-            {/* Severity */}
-            <div className="grid grid-cols-1 gap-4">
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                  Severity
-                </label>
-                <div className="relative">
-                  <ShieldAlert className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500 pointer-events-none" />
-                  <select
-                    {...register("severity")}
-                    className="w-full bg-slate-50 dark:bg-[#1d2a31] border border-slate-200 dark:border-slate-700 rounded-md pl-10 pr-4 py-2.5 text-slate-900 dark:text-white focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent transition-all appearance-none"
-                  >
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
-                    <option value="critical">Critical</option>
-                  </select>
-                </div>
-              </div>
-            </div>
 
             {/* Image Upload */}
             <div className="space-y-3">

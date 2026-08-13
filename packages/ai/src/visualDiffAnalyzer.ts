@@ -2,7 +2,6 @@ import { genAI } from "./geminiClient"
 
 export interface VisualDiffIssue {
   issue: string
-  severity: "critical" | "high" | "medium" | "low"
   area: string
   type:
     | "layout"
@@ -31,7 +30,7 @@ export async function compareScreenshots(
   const prompt = `You are a QA visual diff tool reviewing the page: ${pageUrl}. 
 Image 1 is the Figma design. Image 2 is the live website screenshot. 
 Compare them precisely. List ALL visual discrepancies as JSON: 
-[{"issue": "string", "severity": "critical"|"high"|"medium"|"low", "area": "string", "type": "layout"|"color"|"typography"|"missing_element"|"extra_element"|"spacing"}]. 
+[{"issue": "string", "area": "string", "type": "layout"|"color"|"typography"|"missing_element"|"extra_element"|"spacing"}].
 Be specific. Return [] if designs match. Return ONLY JSON. Do not include markdown formatting.`
 
   const promptParts: any[] = [
@@ -52,7 +51,7 @@ Be specific. Return [] if designs match. Return ONLY JSON. Do not include markdo
 
   try {
     const response = await genAI.models.generateContent({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.0-flash",
       contents: [{ role: "user", parts: promptParts }],
     })
     const resultText = (response.text ?? "").trim()

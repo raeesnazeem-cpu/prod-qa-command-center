@@ -8,7 +8,6 @@ export async function upsertFindingEmbedding(
     run_id: string;
     title: string;
     description: string;
-    severity: string;
     status: string;
     org_id: string;
     project_id: string;
@@ -29,7 +28,6 @@ export async function upsertFindingEmbedding(
       embedding,
       metadata: {
         title: finding.title,
-        severity: finding.severity,
         status: finding.status,
         page_url: finding.page_url,
         run_id: finding.run_id,
@@ -46,7 +44,6 @@ export async function upsertTaskEmbedding(
     org_id: string;
     title: string;
     description?: string;
-    severity: string;
     status: string;
   }
 ) {
@@ -64,7 +61,6 @@ export async function upsertTaskEmbedding(
       embedding,
       metadata: {
         title: task.title,
-        severity: task.severity,
         status: task.status,
       }
     }, { onConflict: 'source_type,source_id' });

@@ -8,7 +8,6 @@ import 'dotenv/config';
 export declare function analyzeImage(imageBuffer: Buffer | Buffer[], prompt: string): Promise<string>;
 export interface Finding {
     issue: string;
-    severity: 'critical' | 'high' | 'medium' | 'low';
     area: string;
 }
 /**
@@ -18,7 +17,6 @@ export interface Finding {
 export declare function inspectPageScreenshot(screenshotBuffer: Buffer): Promise<Finding[]>;
 export interface VisionIssue {
     issue: string;
-    severity: 'high' | 'medium' | 'low';
     area: string;
 }
 /**

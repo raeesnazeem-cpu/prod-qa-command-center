@@ -2,7 +2,6 @@ import { AxiosInstance } from 'axios';
 
 export interface VisualDiffIssue {
   issue: string;
-  severity: 'critical' | 'high' | 'medium' | 'low';
   area: string;
   type: 'layout' | 'color' | 'typography' | 'missing_element' | 'extra_element' | 'spacing';
 }

@@ -250,6 +250,14 @@ basecamp_elements.json
 # DevOps test files
 cloudbuild.recording.yaml
 
+# Dev probe / one-off scripts (HubSpot + TED API exploration, not production).
+# The worker ships no runtime .mjs — it compiles to dist/ — so any loose .mjs
+# in an app dir is a throwaway probe. Keep hubspotClient.ts / repoContext.ts:
+# those are .ts under src/ and are real runtime modules.
+apps/*/*.mjs
+hs*.mjs
+*.probe.mjs
+
 # Ensure README is never ignored
 !README.md
 !README.md.resolved
@@ -263,11 +271,4 @@ graphify-out/
 **/graphify-out/
 
 # Supabase Blueprint
-supabase-blueprint/
-
-# Trigger Scripts
-trigger-pre-release.sh
-trigger-post-release.sh
-push-last-prerelease-report-old.cjs
-push-last-prerelease-report.cjs
-push-image.cjs
+supabase-blueprint/.git-worktree-pointer.bak

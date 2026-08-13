@@ -8,6 +8,8 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
+      // Headless mode: no browser auth. Alias Clerk to a no-op shim.
+      '@clerk/react': path.resolve(__dirname, './src/lib/clerkShim.tsx'),
     },
   },
   server: {

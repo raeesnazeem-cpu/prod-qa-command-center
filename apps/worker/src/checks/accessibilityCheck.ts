@@ -66,7 +66,6 @@ export async function checkAccessibility(
       return [
         {
           check_factor: "accessibility_check",
-          severity: "low",
           title: "No accessibility issues found",
           description: "No common WCAG issues (alt text, form labels, lang, title, control names, heading order) were detected on this page.",
           context_text: `URL: ${pageUrl}`,
@@ -81,7 +80,6 @@ export async function checkAccessibility(
       (r) =>
         ({
           check_factor: "accessibility_check",
-          severity: "medium",
           title: `Accessibility: ${r.type}`,
           description: r.detail,
           context_text: `URL: ${pageUrl}`,
@@ -94,7 +92,6 @@ export async function checkAccessibility(
     return [
       {
         check_factor: "accessibility_check",
-        severity: "medium",
         title: "Accessibility Check Failed",
         description: `The accessibility check encountered an error: ${e.message}.`,
         context_text: `URL: ${pageUrl}`,

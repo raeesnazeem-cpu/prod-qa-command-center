@@ -15,7 +15,6 @@ import {
 import { useParams, Link } from "react-router-dom"
 import { useQueryClient } from "@tanstack/react-query"
 import { useRole } from "../hooks/useRole"
-import { FindingSeverityEditor } from "./FindingSeverityEditor"
 import { QAFinding } from "../api/runs.api"
 import { useGalleryStore } from "../store/galleryStore"
 import { FindingCardWithScreenshot } from "./FindingCardWithScreenshot"
@@ -351,13 +350,6 @@ export const GsrCheckFindingCard: React.FC<FindingCardProps> = ({
               )}
             </button>
           )}
-          <FindingSeverityEditor
-            findingId={finding.id}
-            pageId={finding.page_id}
-            currentSeverity={finding.severity}
-            canEdit={canAction && !isFalsePositive && !isLocked}
-            symbolOnly={true}
-          />
           <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-[0.1em]">
             <MonitorSmartphone size={14} className="text-accent" />
             GSR Check

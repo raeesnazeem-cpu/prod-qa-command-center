@@ -1,22 +1,32 @@
 import { Finding } from "@qacc/shared"
+import { supabase } from "../lib/supabase"
+import { getClientNotesText } from "../lib/tedClient"
 
 /**
- * QA-Backend Check
- * ----------------
- * Logs into the WordPress backend (reusing the proven wp-login pattern from
- * preReleaseSuite) and verifies the site was cleaned up before release:
- *   1. No leftover DEFAULT/PLACEHOLDER content — default "Twenty*" themes,
- *      the "Hello world!" post, the "Sample Page" page, the default
- *      "Just another WordPress site" tagline.
- *   2. A 404 plugin is installed AND a styled custom 404 page renders on all
- *      views (desktop / tablet / mobile) without a layout break.
+ * QA-Backend Check (login-free)
+ * -----------------------------
+ * Verifies a site was cleaned up before release WITHOUT logging into wp-admin.
+ * All fixes are applied via the blank-theme repo (functions.php / 404.php /
+ * templates) or a WP-CLI/SQL demo-content strip — none of which need a browser
+ * login — so this check only ever *reads* the public surface:
  *
- * Deterministic DOM reads do the detection; screenshots are attached as
- * evidence. Every section is independently guarded so one failure never stalls
- * the rest. Homepage-only, browser-owning check (creates its own context).
+ *   1. Leftover DEFAULT/PLACEHOLDER content — the "Hello world!" post, the
+ *      "Sample Page" page, the default "Just another WordPress site" tagline
+ *      (all read via the public WP REST API).
+ *   2. A styled custom 404 page renders on all views (desktop/tablet/mobile)
+ *      without a layout break (front-end probe).
+ *   3. Comments are closed on published posts (WP REST `comment_status`, DOM
+ *      fallback).
+ *   4. The published contact number matches the client's number in TED
+ *      (front-end scrape vs. clientDetails.notes).
  *
- * Signature mirrors the browser-owning checks in preReleaseSuite:
- *   (url, runId, pageId, wpPassword?, sharedBrowser?, onProgress?)
+ * The one thing that genuinely needed a login — detecting inactive default
+ * "Twenty*" themes still installed — was intentionally dropped: inactive themes
+ * have no public signal, the active theme is the blank repo theme, and it is a
+ * minor hygiene nit. See [[wp-password-runtime-only]].
+ *
+ * Every section is independently guarded so one failure never stalls the rest.
+ * Homepage-only, browser-owning check (creates its own context). No password.
  */
 
 const CHECK_FACTOR = "backend_check"
@@ -27,41 +37,60 @@ const VIEWPORTS = [
   { label: "Mobile", width: 375, height: 812 },
 ]
 
-// Known 404 plugins (name/slug fragments) we accept as "a 404 plugin is installed".
-const KNOWN_404_PLUGINS = [
-  "404page",
-  "404 to 301",
-  "404-to-301",
-  "forty four",
-  "custom 404",
-  "all 404",
-  "redirection",
+// Normalized (digits-only) fragments that mark a placeholder/demo phone number.
+const DEMO_PHONE_FRAGMENTS = [
+  "1234567890",
+  "0000000000",
+  "1112223333",
+  "9999999999",
+  "5550100", // 555-01xx is the reserved fictional US range
 ]
+
+/** Reduce a phone string to its comparable last-10 digits (drops US country code). */
+function normalizePhone(raw: string): string {
+  let d = (raw || "").replace(/\D/g, "")
+  if (d.length === 11 && d.startsWith("1")) d = d.slice(1)
+  return d.length > 10 ? d.slice(-10) : d
+}
+
+/**
+ * Pull the authoritative business phone out of the TED client notes.
+ * Prefers a labelled "Phone/Tel/Contact/Number: …" line, else the first
+ * phone-shaped token. Returns the normalized last-10 digits, or "" if none.
+ */
+function parsePhoneFromNotes(notes: string): string {
+  if (!notes) return ""
+  const labelled = notes.match(
+    /(?:phone|tel(?:ephone)?|contact(?:\s*(?:no\.?|number))?|number)\s*[:\-]?\s*(\+?\d[\d\s().\-]{7,}\d)/i,
+  )
+  const bare = notes.match(/\+?\d[\d\s().\-]{7,}\d/)
+  const candidate = (labelled && labelled[1]) || (bare && bare[0]) || ""
+  const norm = normalizePhone(candidate)
+  return norm.length === 10 ? norm : ""
+}
+
+/** Fetch JSON from a public URL. Returns null on any non-JSON / error response. */
+async function fetchJson(url: string): Promise<any | null> {
+  try {
+    const resp = await fetch(url, { headers: { Accept: "application/json" } })
+    const ctype = resp.headers.get("content-type") || ""
+    if (!resp.ok || !ctype.includes("application/json")) return null
+    return await resp.json()
+  } catch {
+    return null
+  }
+}
 
 export async function checkBackend(
   url: string,
   runId: string,
   pageId: string,
-  wpPassword?: string,
   sharedBrowser?: any,
   onProgress?: (progress: number, message: string) => Promise<void>,
+  projectId?: string,
 ): Promise<Finding[]> {
   const { chromium } = require("playwright")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
-
-  if (!wpPassword) {
-    return [
-      {
-        check_factor: CHECK_FACTOR,
-        severity: "medium",
-        title: "Backend Check Skipped",
-        description: "WordPress password was not provided, so the backend could not be inspected.",
-        screenshot_url: null,
-        status: "open",
-        ai_generated: false,
-      } as Finding,
-    ]
-  }
 
   const origin = (() => {
     try {
@@ -91,173 +120,126 @@ export async function checkBackend(
     const page = await context.newPage()
     await page.setViewportSize({ width: 1920, height: 1080 })
 
-    // --- LOGIN (reuse preReleaseSuite pattern) ---
-    if (onProgress) await onProgress(10, "Logging into WordPress admin...")
-    await page
-      .goto(`${origin}/wp-login.php`, { waitUntil: "networkidle", timeout: 30000 })
-      .catch(() => {})
+    // --- 1. DEFAULT / PLACEHOLDER CONTENT (public WP REST; no login) ---
+    // The "Hello world!" post, "Sample Page", and default tagline are all
+    // readable without authentication: posts/pages by slug, and the tagline
+    // from the REST API index (`description`).
+    try {
+      if (onProgress) await onProgress(20, "Checking for default WordPress content...")
 
-    const userField = page.locator('#user_login, input[name="log"]')
-    const passField = page.locator('#user_pass, input[name="pwd"]')
-    const submitBtn = page.locator('#wp-submit, input[type="submit"]')
+      // 1a/1b/1c fetched together so a total REST outage can be told apart from
+      // a genuine "not present" (clean) result.
+      const helloPosts = await fetchJson(
+        `${origin}/wp-json/wp/v2/posts?slug=hello-world&_fields=id,link,title`,
+      )
+      const samplePages = await fetchJson(
+        `${origin}/wp-json/wp/v2/pages?slug=sample-page&_fields=id,link,title`,
+      )
+      const restIndex = await fetchJson(`${origin}/wp-json/`)
 
-    let loggedIn = false
-    if ((await userField.count()) > 0 && (await passField.count()) > 0) {
-      await userField.fill("onboarding.india@growth99.com")
-      await passField.fill(wpPassword)
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {}),
-        submitBtn.click(),
-      ])
-      await page.waitForSelector("#wpadminbar, .wrap", { timeout: 15000 }).catch(() => {})
-      loggedIn = (await page.locator("#wpadminbar").count()) > 0
-    }
+      const restDown =
+        helloPosts === null && samplePages === null && restIndex === null
+      if (restDown) {
+        // Can't read anything → lapse (not a clean pass) for this whole section.
+        findings.push({
+          check_factor: CHECK_FACTOR,
+          title: "Backend Check Failed — default-content scan",
+          description:
+            "The WordPress REST API was unreachable, so default/placeholder content could not be verified. Process aborted gracefully for this section; QACC will retry on the next run.",
+          context_text: "System Error (default-content section)",
+          screenshot_url: null,
+          status: "open",
+          ai_generated: false,
+        } as Finding)
+      } else {
+        // 1a. "Hello world!" post — individual pass/fail.
+        if (Array.isArray(helloPosts) && helloPosts.length > 0) {
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: 'Default "Hello world!" post present',
+            description:
+              'The default WordPress "Hello world!" post still exists and should be removed.',
+            context_text: `Post: ${helloPosts[0]?.link || `#${helloPosts[0]?.id}`}`,
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        } else {
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: 'No default "Hello world!" post',
+            description:
+              'No issues found. The default WordPress "Hello world!" post is not present.',
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        }
 
-    if (!loggedIn) {
-      const failShot = await shot(page, "login_failed")
+        // 1b. "Sample Page" — individual pass/fail.
+        if (Array.isArray(samplePages) && samplePages.length > 0) {
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: 'Default "Sample Page" present',
+            description:
+              'The default WordPress "Sample Page" still exists and should be removed.',
+            context_text: `Page: ${samplePages[0]?.link || `#${samplePages[0]?.id}`}`,
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        } else {
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: 'No default "Sample Page"',
+            description:
+              'No issues found. The default WordPress "Sample Page" is not present.',
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        }
+
+        // 1c. Default tagline — the REST index exposes it as `description`.
+        const tagline: string = (restIndex?.description || "").trim()
+        if (/just another wordpress site/i.test(tagline)) {
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: "Default WordPress tagline still set",
+            description: `The site tagline is still the default "${tagline}". Update or clear it before release.`,
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        } else {
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: "Site tagline is not the WordPress default",
+            description:
+              "No issues found. The site tagline is not the default \"Just another WordPress site\".",
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        }
+      }
+    } catch (e: any) {
+      // Don't silently drop this dimension — surface a lapse so it's marked
+      // "could not complete" rather than treated as a clean pass.
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: "high",
-        title: "Backend login failed",
-        description: "Could not log into wp-admin with the provided password. Backend content checks were skipped. Verify today's WP password.",
-        screenshot_url: failShot || null,
+        title: "Backend Check Failed — default-content scan",
+        description: `The default/placeholder-content scan could not complete: ${e?.message}. Process aborted gracefully for this section; QACC will retry on the next run.`,
+        context_text: "System Error (default-content section)",
+        screenshot_url: null,
         status: "open",
         ai_generated: false,
       } as Finding)
-      // Still attempt the front-end 404 checks below (they don't need login).
     }
 
-    // --- 1. DEFAULT THEMES ---
-    if (loggedIn) {
-      try {
-        if (onProgress) await onProgress(30, "Checking installed themes...")
-        await page
-          .goto(`${origin}/wp-admin/themes.php`, { waitUntil: "networkidle", timeout: 30000 })
-          .catch(() => {})
-        const themeNames: string[] = await page.evaluate(() =>
-          Array.from(document.querySelectorAll(".theme .theme-name, .theme-name")).map(
-            (el) => (el.textContent || "").trim(),
-          ),
-        )
-        const defaults = themeNames.filter((n) => /twenty\s?twenty|twenty\s?\w+/i.test(n))
-        const themesShot = await shot(page, "themes")
-        if (defaults.length > 0) {
-          findings.push({
-            check_factor: CHECK_FACTOR,
-            severity: "medium",
-            title: "Default WordPress themes still installed",
-            description: `Default placeholder themes should be removed before release. Found: ${defaults.join(", ")}.`,
-            context_text: `All themes: ${themeNames.join(", ")}`,
-            screenshot_url: themesShot || null,
-            status: "open",
-            ai_generated: false,
-          } as Finding)
-        }
-      } catch (e: any) {
-        // section-level guard; continue
-      }
-
-      // --- 2. HELLO WORLD POST ---
-      try {
-        if (onProgress) await onProgress(45, "Checking for placeholder posts...")
-        await page
-          .goto(`${origin}/wp-admin/edit.php`, { waitUntil: "networkidle", timeout: 30000 })
-          .catch(() => {})
-        const hasHelloWorld: boolean = await page.evaluate(() =>
-          Array.from(document.querySelectorAll(".row-title, a.row-title")).some((el) =>
-            /hello world/i.test(el.textContent || ""),
-          ),
-        )
-        if (hasHelloWorld) {
-          const postsShot = await shot(page, "posts")
-          findings.push({
-            check_factor: CHECK_FACTOR,
-            severity: "medium",
-            title: 'Default "Hello world!" post present',
-            description: 'The default WordPress "Hello world!" post still exists and should be removed.',
-            screenshot_url: postsShot || null,
-            status: "open",
-            ai_generated: false,
-          } as Finding)
-        }
-      } catch (e: any) {}
-
-      // --- 3. SAMPLE PAGE ---
-      try {
-        await page
-          .goto(`${origin}/wp-admin/edit.php?post_type=page`, { waitUntil: "networkidle", timeout: 30000 })
-          .catch(() => {})
-        const hasSamplePage: boolean = await page.evaluate(() =>
-          Array.from(document.querySelectorAll(".row-title, a.row-title")).some((el) =>
-            /sample page/i.test(el.textContent || ""),
-          ),
-        )
-        if (hasSamplePage) {
-          const pagesShot = await shot(page, "pages")
-          findings.push({
-            check_factor: CHECK_FACTOR,
-            severity: "medium",
-            title: 'Default "Sample Page" present',
-            description: 'The default WordPress "Sample Page" still exists and should be removed.',
-            screenshot_url: pagesShot || null,
-            status: "open",
-            ai_generated: false,
-          } as Finding)
-        }
-      } catch (e: any) {}
-
-      // --- 4. DEFAULT TAGLINE ---
-      try {
-        if (onProgress) await onProgress(55, "Checking site tagline...")
-        await page
-          .goto(`${origin}/wp-admin/options-general.php`, { waitUntil: "networkidle", timeout: 30000 })
-          .catch(() => {})
-        const tagline: string = await page.evaluate(() => {
-          const el = document.querySelector("#blogdescription") as HTMLInputElement | null
-          return el ? el.value : ""
-        })
-        if (/just another wordpress site/i.test(tagline)) {
-          const tagShot = await shot(page, "tagline")
-          findings.push({
-            check_factor: CHECK_FACTOR,
-            severity: "low",
-            title: "Default WordPress tagline still set",
-            description: `The site tagline is still the default "${tagline}". Update or clear it before release.`,
-            screenshot_url: tagShot || null,
-            status: "open",
-            ai_generated: false,
-          } as Finding)
-        }
-      } catch (e: any) {}
-
-      // --- 5. 404 PLUGIN INSTALLED? ---
-      try {
-        if (onProgress) await onProgress(65, "Checking for a 404 plugin...")
-        await page
-          .goto(`${origin}/wp-admin/plugins.php`, { waitUntil: "networkidle", timeout: 30000 })
-          .catch(() => {})
-        const pluginText: string = (
-          await page.evaluate(() => document.body.innerText).catch(() => "")
-        ).toLowerCase()
-        const has404Plugin = KNOWN_404_PLUGINS.some((p) => pluginText.includes(p))
-        if (!has404Plugin) {
-          const pluginsShot = await shot(page, "plugins")
-          findings.push({
-            check_factor: CHECK_FACTOR,
-            severity: "medium",
-            title: "No 404 plugin detected",
-            description: `Could not find a known 404 plugin (${KNOWN_404_PLUGINS.join(", ")}) in the plugins list. Verify a custom 404 solution is installed.`,
-            screenshot_url: pluginsShot || null,
-            status: "open",
-            ai_generated: false,
-          } as Finding)
-        }
-      } catch (e: any) {}
-    }
-
-    // --- 6. CUSTOM 404 ON ALL VIEWS (front-end; no login needed) ---
+    // --- 2. CUSTOM 404 ON ALL VIEWS (front-end) ---
     try {
-      if (onProgress) await onProgress(80, "Probing custom 404 page on all views...")
+      if (onProgress) await onProgress(45, "Probing custom 404 page on all views...")
       const probeUrl = `${origin}/__qacc_404_probe_${Date.now()}`
       const shotUrls: string[] = []
       let httpStatus: number | null = null
@@ -294,7 +276,6 @@ export async function checkBackend(
       if (!looksCustom) {
         findings.push({
           check_factor: CHECK_FACTOR,
-          severity: "high",
           title: "Custom 404 page not detected on all views",
           description: `Requested a non-existent URL and did not detect a styled custom 404 page (site header/footer + a 404 message). HTTP status: ${httpStatus ?? "unknown"}. Verify the custom 404 renders correctly on desktop, tablet, and mobile.`,
           context_text: `Probe URL: ${probeUrl}\nHTTP status: ${httpStatus ?? "unknown"}`,
@@ -305,7 +286,6 @@ export async function checkBackend(
       } else if (overflowViewport) {
         findings.push({
           check_factor: CHECK_FACTOR,
-          severity: "medium",
           title: `Custom 404 page has a layout break (${overflowViewport})`,
           description: `A styled custom 404 page renders, but it overflows horizontally on the ${overflowViewport} view. Fix the responsive layout of the 404 template.`,
           context_text: `Probe URL: ${probeUrl}\nOverflow viewport: ${overflowViewport}`,
@@ -316,37 +296,228 @@ export async function checkBackend(
       } else {
         findings.push({
           check_factor: CHECK_FACTOR,
-          severity: "low",
           title: "Custom 404 page renders on all views",
-          description: `A styled custom 404 page (with site header/footer and a 404 message) renders on desktop, tablet, and mobile without a layout break. HTTP status: ${httpStatus ?? "unknown"}.`,
+          description: `No issues found. A styled custom 404 page (with site header/footer and a 404 message) renders on desktop, tablet, and mobile without a layout break. HTTP status: ${httpStatus ?? "unknown"}.`,
           context_text: `Probe URL: ${probeUrl}`,
           screenshot_url: joined || null,
           status: "open",
           ai_generated: false,
         } as Finding)
       }
-    } catch (e: any) {}
-
-    if (onProgress) await onProgress(95, "Finalizing backend findings...")
-
-    // If logged in and nothing flagged, emit a clean pass finding (matches UX).
-    if (loggedIn && findings.length === 0) {
+    } catch (e: any) {
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: "low",
-        title: "Backend is clean",
-        description: "No default/placeholder content found and the custom 404 renders correctly.",
+        title: "Backend Check Failed — custom 404 probe",
+        description: `The custom-404 probe could not complete: ${e?.message}. Process aborted gracefully for this section; QACC will retry on the next run.`,
+        context_text: "System Error (custom-404 section)",
         screenshot_url: null,
         status: "open",
         ai_generated: false,
       } as Finding)
     }
 
+    // --- 3. COMMENTS DISABLED (front-end; no login needed) ---
+    // Authoritative signal is the WP REST API: each post carries a
+    // `comment_status` of "open" | "closed". Any "open" post = comments still
+    // enabled. Falls back to a homepage DOM scan if REST is blocked.
+    try {
+      if (onProgress) await onProgress(70, "Checking comments are disabled...")
+      const posts = await fetchJson(
+        `${origin}/wp-json/wp/v2/posts?per_page=20&_fields=id,link,comment_status`,
+      )
+
+      if (Array.isArray(posts)) {
+        const openPosts = posts
+          .filter((p) => p?.comment_status === "open")
+          .map((p) => p?.link || `post #${p?.id}`)
+        if (openPosts.length > 0) {
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: "Comments still enabled on published posts",
+            description: `Comments should be closed before release. The WordPress REST API reports ${openPosts.length} post(s) with comments still open.`,
+            context_text: `Posts with comments open:\n${openPosts.slice(0, 20).join("\n")}`,
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        }
+        else {
+          // REST reachable & none open → explicit pass.
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: "Comments are closed on published posts",
+            description:
+              "No issues found. The WordPress REST API reports comments are closed on all published posts.",
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        }
+      } else {
+        // Fallback: look for a comment form on the homepage.
+        await page.setViewportSize({ width: 1920, height: 1080 })
+        await page
+          .goto(origin, { waitUntil: "networkidle", timeout: 30000 })
+          .catch(() => {})
+        const hasCommentForm: boolean = await page.evaluate(() =>
+          !!document.querySelector(
+            "#respond, #commentform, .comment-form, form.comment-form",
+          ) || /leave a (reply|comment)/i.test(document.body?.innerText || ""),
+        )
+        if (hasCommentForm) {
+          const cShot = await shot(page, "comments")
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: "Comment form present on the homepage",
+            description:
+              "The WordPress REST API was unavailable, but a comment form was detected on the homepage, which suggests comments are still enabled. Verify comments are closed site-wide.",
+            screenshot_url: cShot || null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        } else {
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: "Comments appear closed",
+            description:
+              "No issues found. No comment form was detected on the homepage, so comments appear closed. (The REST API was unavailable, so this could not be confirmed across every post.)",
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        }
+      }
+    } catch (e: any) {
+      findings.push({
+        check_factor: CHECK_FACTOR,
+        title: "Backend Check Failed — comments-disabled scan",
+        description: `The comments-disabled scan could not complete: ${e?.message}. Process aborted gracefully for this section; QACC will retry on the next run.`,
+        context_text: "System Error (comments section)",
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
+    }
+
+    // --- 4. CONTACT NUMBER MATCH (front-end + TED client notes) ---
+    // Authoritative number comes from the TED client record's
+    // clientDetails.notes (resolved via projectId → projects.name), mirroring
+    // gbpCheck. Compared against tel: links + visible phone numbers on the site.
+    try {
+      if (onProgress) await onProgress(88, "Checking contact number matches client record...")
+
+      // Resolve the authoritative number from TED notes (best-effort).
+      let authoritative = ""
+      if (projectId) {
+        try {
+          const { data: project } = await supabase
+            .from("projects")
+            .select("name")
+            .eq("id", projectId)
+            .single()
+          const clientName = project?.name || ""
+          if (clientName) {
+            const notes = await getClientNotesText(clientName)
+            authoritative = parsePhoneFromNotes(notes)
+          }
+        } catch {}
+      }
+
+      // Scrape on-site numbers from the homepage (tel: links + visible text).
+      await page.setViewportSize({ width: 1920, height: 1080 })
+      await page.goto(origin, { waitUntil: "networkidle", timeout: 30000 }).catch(() => {})
+      const rawNumbers: string[] = await page.evaluate(() => {
+        const tel = Array.from(document.querySelectorAll('a[href^="tel:"]')).map((a) =>
+          (a.getAttribute("href") || "").replace(/^tel:/i, ""),
+        )
+        const text = document.body?.innerText || ""
+        const matches = text.match(/\+?\d[\d\s().\-]{7,}\d/g) || []
+        return [...tel, ...matches]
+      })
+
+      const onSite = Array.from(
+        new Set(rawNumbers.map(normalizePhone).filter((d) => d.length === 10)),
+      )
+      const demoHit = onSite.find((d) =>
+        DEMO_PHONE_FRAGMENTS.some((frag) => d.includes(frag)),
+      )
+      const phonesShot = await shot(page, "contact_number", false)
+
+      if (demoHit) {
+        findings.push({
+          check_factor: CHECK_FACTOR,
+          title: "Placeholder/demo contact number on the site",
+          description: `A placeholder-looking phone number (${demoHit}) is still published on the site. Replace it with the client's real number.`,
+          context_text: `Numbers found on site: ${onSite.join(", ") || "none"}`,
+          screenshot_url: phonesShot || null,
+          status: "open",
+          ai_generated: false,
+        } as Finding)
+      } else if (authoritative) {
+        const matched = onSite.includes(authoritative)
+        if (!matched) {
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: "Contact number does not match the client record",
+            description: `The client's number in TED is ${authoritative}, but it was not found on the homepage. Numbers on site: ${onSite.join(", ") || "none"}.`,
+            context_text: `TED (authoritative): ${authoritative}\nOn site: ${onSite.join(", ") || "none"}`,
+            screenshot_url: phonesShot || null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        }
+        else {
+          // matched → explicit pass.
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: "Contact number matches the client record",
+            description: `No issues found. The published contact number matches the client's number in TED (${authoritative}).`,
+            screenshot_url: phonesShot || null,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        }
+      } else if (onSite.length === 0) {
+        findings.push({
+          check_factor: CHECK_FACTOR,
+          title: "No contact number found on the homepage",
+          description:
+            "No tel: link or phone number was detected on the homepage. Verify the business contact number is published.",
+          screenshot_url: phonesShot || null,
+          status: "open",
+          ai_generated: false,
+        } as Finding)
+      } else {
+        // Numbers present but no authoritative source to compare against — not a
+        // defect (a number IS published), so pass and note it couldn't be
+        // cross-checked.
+        findings.push({
+          check_factor: CHECK_FACTOR,
+          title: "Contact number present",
+          description: `No issues found. A contact number is published on the site (${onSite.join(", ")}); it could not be cross-checked because no authoritative number was available in the TED client notes.`,
+          screenshot_url: phonesShot || null,
+          status: "open",
+          ai_generated: false,
+        } as Finding)
+      }
+    } catch (e: any) {
+      findings.push({
+        check_factor: CHECK_FACTOR,
+        title: "Backend Check Failed — contact-number match",
+        description: `The contact-number match could not complete: ${e?.message}. Process aborted gracefully for this section; QACC will retry on the next run.`,
+        context_text: "System Error (contact-number section)",
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
+    }
+
+    if (onProgress) await onProgress(95, "Finalizing backend findings...")
+
     return findings
   } catch (error: any) {
     findings.push({
       check_factor: CHECK_FACTOR,
-      severity: "high",
       title: "Backend Check Failed",
       description: `The check encountered an unexpected error: ${error.message}. Process aborted gracefully to prevent stalling the scan.`,
       context_text: "System Error",

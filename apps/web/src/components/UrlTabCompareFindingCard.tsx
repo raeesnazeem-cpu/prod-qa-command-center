@@ -22,7 +22,6 @@ import { useQueryClient } from "@tanstack/react-query"
 import { useBulkDeleteTasks } from "../hooks/useTasks"
 import { useRole } from "../hooks/useRole"
 import { useParams, Link } from "react-router-dom"
-import { FindingSeverityEditor } from "./FindingSeverityEditor"
 import { QAFinding } from "../api/runs.api"
 import { useGalleryStore } from "../store/galleryStore"
 import { useAuthAxios } from "../lib/useAuthAxios"
@@ -248,12 +247,6 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
     (dp) => !livePaths.includes(getPathname(dp.url)),
   )
 
-  const severityIcons: Record<string, React.ReactNode> = {
-    critical: <ShieldAlert size={20} />,
-    high: <AlertTriangle size={20} />,
-    medium: <AlertCircle size={20} />,
-    low: <Info size={20} />,
-  }
 
   const cardBorder =
     isLocked || isConfirmed || isAssigned
@@ -299,7 +292,7 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
         <div className="absolute inset-0 bg-gradient-to-br from-white via-accent/30 to-white/30 group-hover:opacity-50 transition-opacity duration-700" />
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[300%] aspect-square bg-[conic-gradient(from_0deg,transparent_0_45deg,theme(colors.accent)_135deg,transparent_180deg_225deg,#a3d4c7_315deg,transparent_360deg)] opacity-0 group-hover:opacity-100 group-hover:animate-[spin_4s_linear_infinite]" />
       </div>
-      {/* Top Row: Checkbox + Severity + Check Factor + Date */}
+      {/* Top Row: Checkbox + Check Factor + Date */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           {canAction && (
@@ -328,13 +321,6 @@ export const UrlTabCompareFindingCard: React.FC<FindingCardProps> = ({
               )}
             </button>
           )}
-          <FindingSeverityEditor
-            findingId={finding.id}
-            pageId={finding.page_id}
-            currentSeverity={finding.severity}
-            canEdit={canAction && !isFalsePositive && !isLocked}
-            symbolOnly={true}
-          />
           <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-[0.1em]">
             <Globe size={14} className="text-accent" />
             URL & Tab Compare

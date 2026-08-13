@@ -60,6 +60,71 @@ export async function getClientNotesText(
   return stripHtml(client?.clientDetails?.notes || "")
 }
 
+/**
+ * Resolve the client's reviews-widget identifiers (per-client, dynamic) so the
+ * AI-fix pass can inject the correct footer embed. The id/bid are NOT derivable
+ * from the site (a missing widget leaves nothing to read), so they must come
+ * from the client record. We scan the TED notes for either:
+ *   • a ready-made embed URL: reviews.growth99.com/widget/?id=<id>&bid=<bid>
+ *   • or a labelled line: "Reviews Widget ID: <id>" (+ optional "bid: <bid>")
+ * Returns null when neither is present (fix falls back to a manual instruction).
+ */
+export async function getReviewsWidgetId(
+  clientIdOrName: string | number | null | undefined,
+): Promise<{ id: string; bid: string } | null> {
+  const notes = await getClientNotesText(clientIdOrName).catch(() => "")
+  if (!notes) return null
+  // 1. Full embed URL already pasted in the notes.
+  const url = notes.match(
+    /reviews\.growth99\.com\/widget\/?\?id=([A-Za-z0-9_-]+)(?:&(?:amp;)?bid=(\d+))?/i,
+  )
+  if (url && url[1]) return { id: url[1], bid: url[2] || "" }
+  // 2. Labelled line(s): "Reviews Widget ID: <id>" and optional "bid: <n>".
+  const idLine = notes.match(
+    /Reviews?\s*Widget\s*(?:ID|Id)\s*[:\-]\s*([A-Za-z0-9_-]{8,})/i,
+  )
+  if (idLine && idLine[1]) {
+    const bidLine = notes.match(/\bbid\s*[:\-=]\s*(\d+)/i)
+    return { id: idLine[1], bid: bidLine ? bidLine[1] : "" }
+  }
+  return null
+}
+
+/**
+ * The client's website domain — the join key into HubSpot. Prefers the explicit
+ * clientDetails.website, then the "Client Domain/Website URL: …" line in notes,
+ * then any bare domain in the notes. Returns a bare host (no scheme/path).
+ */
+export function extractDomain(text: string | null | undefined): string | null {
+  if (!text) return null
+  const s = String(text)
+  const labelled = s.match(/(?:Domain|Website(?:\s*URL)?)\s*[:\-]\s*(\S+)/i)
+  const candidate =
+    (labelled && labelled[1]) ||
+    (s.match(/\bhttps?:\/\/\S+/i) || [])[0] ||
+    (s.match(/\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\.[a-z]{2,}\b/i) || [])[0] ||
+    (s.match(/\b[a-z0-9-]+\.[a-z]{2,}\b/i) || [])[0] ||
+    null
+  if (!candidate) return null
+  return candidate
+    .replace(/^https?:\/\//i, "")
+    .replace(/^www\./i, "")
+    .replace(/\/.*$/, "")
+    .replace(/[),.;]+$/, "")
+    .toLowerCase() || null
+}
+
+export async function getClientDomain(
+  clientIdOrName: string | number | null | undefined,
+): Promise<string | null> {
+  const client = await getClient(clientIdOrName)
+  if (!client) return null
+  return (
+    extractDomain(client?.clientDetails?.website) ||
+    extractDomain(stripHtml(client?.clientDetails?.notes || ""))
+  )
+}
+
 async function tedGetJson(pathAndQuery: string): Promise<any | null> {
   const token = process.env.TED_API_TOKEN
   if (!token) return null
@@ -87,6 +152,44 @@ export async function resolveBetaSiteRepo(
   const clientId = client?.id
   if (!clientId) return null
 
+  // Repo always comes from the beta_site.env task's automation.payload. HubSpot
+  // is NOT a repo source (it supplies site URL / plan / GBP / paid-media data —
+  // see hubspotClient.ts). For local testing before the payload is populated,
+  // set AI_FIX_LOCAL_REPO — aiFixRunJob uses it directly and never calls this.
+  return await repoFromTedTimeline(clientId)
+}
+
+/**
+ * Concatenate a TED task's comment bodies into one searchable string. The repo
+ * (and URL) may be written in the automation.payload OR typed as a comment on
+ * the task page, so resolvers search both. Tolerates the several shapes the
+ * comments endpoint may return; returns "" on any miss.
+ */
+export async function tedTaskCommentsText(
+  taskId: string | number,
+): Promise<string> {
+  const c = await tedGetJson(`/tasks/${taskId}/comments`)
+  const arr: any[] = Array.isArray(c)
+    ? c
+    : c?.comments || c?.data || c?.items || []
+  if (!Array.isArray(arr)) return ""
+  return arr
+    .map((x: any) =>
+      typeof x === "string"
+        ? x
+        : x?.text || x?.body || x?.content || x?.comment || "",
+    )
+    .filter(Boolean)
+    .join("\n")
+}
+
+/**
+ * The TED path: timeline → beta_site.env task → `betaSiteRepo=<url>`, read from
+ * the automation.payload first and, failing that, from the task's comments.
+ */
+async function repoFromTedTimeline(
+  clientId: string | number,
+): Promise<string | null> {
   const timeline = await tedGetJson(`/clients/${clientId}/timeline`)
   if (!timeline) return null
 
@@ -102,9 +205,93 @@ export async function resolveBetaSiteRepo(
 
   const task = await tedGetJson(`/tasks/${taskId}`)
   const payload = task?.automation?.payload || task?.task?.automation?.payload
-  if (!payload) return null
+  const payloadText =
+    typeof payload === "string" ? payload : payload ? JSON.stringify(payload) : ""
 
-  const text = typeof payload === "string" ? payload : JSON.stringify(payload)
-  const m = text.match(/betaSiteRepo=(\S+)/i)
-  return m ? m[1].replace(/[),.;]+$/, "") : null
+  // Payload first, then the task's comments (the URL/repo is sometimes typed as
+  // a comment rather than baked into the payload).
+  const matchRepo = (text: string) => {
+    const m = text.match(/betaSiteRepo=(\S+)/i)
+    if (m) return m[1].replace(/[),.;]+$/, "")
+    // Also accept a bare GitHub URL written in a comment ("repo: https://…").
+    const g = text.match(/https?:\/\/(?:www\.)?github\.com\/\S+/i)
+    return g ? g[0].replace(/[),.;]+$/, "") : null
+  }
+
+  const fromPayload = payloadText ? matchRepo(payloadText) : null
+  if (fromPayload) return fromPayload
+
+  const commentsText = await tedTaskCommentsText(taskId)
+  return commentsText ? matchRepo(commentsText) : null
+}
+
+// ---------------------------------------------------------------------------
+// Timeline reads for the project_plan / paid_media checks.
+// TED never populates `automation` in the timeline response (verified across
+// clients), so these route on `departmentName` + title, never templateKey.
+// ---------------------------------------------------------------------------
+
+export interface TedTask {
+  id: string
+  title: string
+  status?: string
+  departmentName?: string
+  completed?: boolean
+}
+
+/** Fetch a client's timeline. Returns activeTasks ∪ timeline, deduped by id. */
+export async function getClientTimeline(
+  clientIdOrName: string | number | null | undefined,
+): Promise<TedTask[]> {
+  const client = await getClient(clientIdOrName)
+  const clientId = client?.id
+  if (!clientId) return []
+
+  const tl = await tedGetJson(`/clients/${clientId}/timeline`)
+  if (!tl) return []
+
+  const seen = new Set<string>()
+  const out: TedTask[] = []
+  for (const t of [...(tl.activeTasks || []), ...(tl.timeline || [])]) {
+    const id = String(t?.id ?? "")
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    out.push({
+      id,
+      title: t?.title || "",
+      status: t?.status || t?.state,
+      departmentName: t?.departmentName,
+      completed:
+        t?.completed === true || /^complete/i.test(String(t?.status || "")),
+    })
+  }
+  return out
+}
+
+/** Tasks whose departmentName matches (case-insensitive substring). */
+export function tasksByDepartment(tasks: TedTask[], dept: string): TedTask[] {
+  const d = dept.toLowerCase()
+  return tasks.filter((t) => (t.departmentName || "").toLowerCase().includes(d))
+}
+
+export interface ParsedPlan {
+  raw: string
+  base: string
+  addOns: string[]
+  hasLeadGen: boolean
+}
+
+/** Parse a TED `plan` string like "Growth99 Elite / Lead Generation". */
+export function parsePlan(plan: string | null | undefined): ParsedPlan | null {
+  if (!plan || !plan.trim()) return null
+  const parts = plan
+    .split("/")
+    .map((p) => p.trim())
+    .filter(Boolean)
+  return {
+    raw: plan.trim(),
+    base: parts[0] || plan.trim(),
+    addOns: parts.slice(1),
+    hasLeadGen: /lead\s*generation/i.test(plan),
+  }
 }

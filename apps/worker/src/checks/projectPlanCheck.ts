@@ -1,451 +1,265 @@
 import { chromium } from "playwright"
 import { Finding } from "@qacc/shared"
+import { describeImage } from "../lib/aiFallback"
 import sharp from "sharp"
 import { uploadScreenshot } from "../lib/supabaseStorage"
+import {
+  getClient,
+  getClientNotesText,
+  getClientDomain,
+  parsePlan,
+} from "../lib/tedClient"
+import { resolveHubspotClientData } from "../lib/hubspotClient"
 import pino from "pino"
-import axios from "axios"
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
-  transport: {
-    target: "pino-pretty",
-    options: { colorize: true },
-  },
+  transport: { target: "pino-pretty", options: { colorize: true } },
 })
 
+// Markers that prove the reviews-widget embed is present in the page markup.
+// The footer embed loads reviews.js and mounts an <iframe id="ReviewsWidget">
+// pointing at reviews.growth99.com/widget — any one of these is proof.
+const WIDGET_MARKERS = [
+  /reviews\.growth99\.com\/reviews\.js/i,
+  /reviews\.growth99\.com\/widget/i,
+  /id=["']?ReviewsWidget/i,
+]
+
+/** True when "somewhat equal to" the Accelerator plan (fuzzy, case-insensitive). */
+function isAcceleratorPlan(plan: string): boolean {
+  return /accelerat/i.test(plan)
+}
+
+/**
+ * Project Plan check.
+ *
+ * Plan resolution precedence (unchanged):
+ *   1. HubSpot company `growth99_plan` (joined by domain)
+ *   2. TED client.plan
+ *   3. "Growth99 Plan: <plan>" line in TED notes
+ *   4. None -> FAIL ("plan not available in notes to check"), no fix possible.
+ *
+ * Then, keyed on the plan:
+ *   • ACCELERATOR plan → the site must have a /reviews page with the reviews
+ *     widget active. We assert this two ways:
+ *       (a) widget code present in the rendered /reviews markup, and
+ *       (b) vision confirmation on a screenshot of that page.
+ *     - code + vision confirmed              → PASS
+ *     - code present, vision unconfirmed/no-shot → PASS, flag "check manually"
+ *     - no code                              → FAIL, fix: inject widget in footer
+ *   • ANY OTHER plan → PASS (plan-confirmation only; no reviews requirement).
+ *
+ * Findings are phrased so the report's pass/fail derivation (tedSync
+ * isCleanPassFinding) reads PASS cases as clean and FAIL cases as real defects.
+ * The themeType is accepted for parity with the theme-aware fix but the check
+ * itself is front-end and theme-agnostic.
+ */
 export async function checkProjectPlan(
-  projectSettings: {
-    basecamp_token: string
-    basecamp_account_id: string | number
-    basecamp_project_id: string | number
+  clientName: string,
+  pageRecord?: {
+    id?: string
+    siteUrl?: string
+    desktopUrl?: string
+    themeType?: string
   },
-  pageRecord?: any,
   onProgress?: (progress: number, message: string) => Promise<void>,
 ): Promise<Finding[]> {
-  const { basecamp_token, basecamp_account_id, basecamp_project_id } =
-    projectSettings
+  if (onProgress) await onProgress(20, "Reading project plan...")
 
-  if (!basecamp_token || !basecamp_account_id || !basecamp_project_id) {
-    logger.warn(
-      "Basecamp integration settings are missing credentials for project plan check.",
-    )
-    return []
-  }
-
-  logger.info(
-    { basecamp_account_id, basecamp_project_id },
-    "Starting Basecamp project plan check",
-  )
-
-  const userAgent = process.env.BASECAMP_USER_AGENT || "QACC (dev@growth99.com)"
-  
-  const headers = {
-    Authorization: `Bearer ${basecamp_token}`,
-    "User-Agent": userAgent,
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  }
-
+  let planRaw = ""
+  let planSource = ""
+  let hs: Awaited<ReturnType<typeof resolveHubspotClientData>> = null
   try {
-    axios.defaults.timeout = 15000
-    if (onProgress) await onProgress(20, "Fetching Basecamp bucket details...")
-    // 1. Fetch project bucket details
-    const bucketUrl = `https://3.basecampapi.com/${basecamp_account_id}/buckets/${basecamp_project_id}.json`
-    logger.info({ bucketUrl }, "Fetching Basecamp bucket via API")
-
-    const bucketResponse = await axios.get(bucketUrl, { headers })
-    const bucketData = bucketResponse.data
-
-    if (onProgress) await onProgress(40, "Locating Message Board tool...")
-
-    // 2. Find Message Board tool
-    const messageBoardTool = bucketData.dock?.find(
-      (tool: any) =>
-        tool.title === "Message Board" ||
-        tool.url?.includes("/message_boards/"),
-    )
-
-    if (!messageBoardTool) {
-      throw new Error(
-        `Message Board tool not found in project dock for bucket: ${bucketData.name || basecamp_project_id}`,
-      )
+    // 1. HubSpot (joined by domain from the TED client record).
+    const domain = await getClientDomain(clientName).catch(() => null)
+    hs = await resolveHubspotClientData(domain, clientName).catch(() => null)
+    if (hs?.plan) {
+      planRaw = hs.plan
+      planSource = "HubSpot"
     }
 
-    if (onProgress)
-      await onProgress(60, "Fetching messages from Message Board...")
-
-    // 3. Fetch messages from Message Board with pagination
-    let messages: any[] = []
-    let nextUrl: string | null = messageBoardTool.url.replace(".json", "/messages.json")
-    let orderDetailsMsg: any = null
-    let pagesFetched = 0
-
-    while (nextUrl && !orderDetailsMsg && pagesFetched < 10) {
-      logger.info({ nextUrl, page: pagesFetched + 1 }, "Fetching messages from Message Board via API")
-      const messagesResponse = await axios.get(nextUrl, { headers })
-      const currentMessages = messagesResponse.data || []
-      messages = messages.concat(currentMessages)
-      pagesFetched++
-
-      orderDetailsMsg = messages.find((msg: any) =>
-        (msg.subject || msg.title || "")
-          .toLowerCase()
-          .includes("order details"),
-      )
-
-      if (orderDetailsMsg) {
-        break
-      }
-
-      // Basecamp uses Link header for pagination
-      const linkHeader = messagesResponse.headers.link
-      if (linkHeader && linkHeader.includes('rel="next"')) {
-        const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/)
-        nextUrl = match ? match[1] : null
-      } else {
-        nextUrl = null
+    // 2-3. TED plan, then the notes line.
+    if (!planRaw) {
+      const client = await getClient(clientName)
+      planRaw = (client?.plan || "").trim()
+      if (planRaw) planSource = "TED"
+    }
+    if (!planRaw) {
+      const notes = await getClientNotesText(clientName)
+      const m = notes.match(/Growth99\s+Plan:\s*([^\n\r<]+)/i)
+      if (m && m[1]) {
+        planRaw = m[1].trim()
+        planSource = "TED notes"
       }
     }
-
-    let contentHtml = ""
-    let planValue = ""
-    let screenshotUrl = null
-
-    if (orderDetailsMsg) {
-      logger.info(
-        { messageId: orderDetailsMsg.id },
-        "Found Project Order Details message",
-      )
-
-      // Fetch the detailed message content
-      const msgUrl = `https://3.basecampapi.com/${basecamp_account_id}/buckets/${basecamp_project_id}/messages/${orderDetailsMsg.id}.json`
-      const msgResponse = await axios.get(msgUrl, { headers })
-      contentHtml = msgResponse.data.content || ""
-
-      // Fetch all comments (replies) on this Message Board post
-      const commentsUrl = `https://3.basecampapi.com/${basecamp_account_id}/buckets/${basecamp_project_id}/recordings/${orderDetailsMsg.id}/comments.json`
-      const commentsResponse = await axios.get(commentsUrl, { headers })
-      const comments = commentsResponse.data || []
-
-      // Extract plan value using regex and fallbacks from main message body
-      const cleanText = contentHtml.replace(/<[^>]*>/g, " ")
-      let match = cleanText.match(/Growth99\s+Plan:\s*([^\n\r<]+)/i)
-      if (match && match[1]) {
-        planValue = match[1].trim()
-      } else {
-        const idx = cleanText.toLowerCase().indexOf("growth99 plan:")
-        if (idx !== -1) {
-          const sub = cleanText.substring(idx + "growth99 plan:".length).trim()
-          planValue = sub.split(/\r?\n/)[0].trim()
-        }
-      }
-
-      // If not in main message, check the comments/replies thread
-      if (!planValue) {
-        for (const comment of comments) {
-          const commentHtml = comment.content || ""
-          const cleanCommentText = commentHtml.replace(/<[^>]*>/g, " ")
-          match = cleanCommentText.match(/Growth99\s+Plan:\s*([^\n\r<]+)/i)
-          if (match && match[1]) {
-            planValue = match[1].trim()
-            contentHtml = commentHtml // Set HTML to show only this reply card!
-            break
-          } else {
-            const idx2 = cleanCommentText
-              .toLowerCase()
-              .indexOf("growth99 plan:")
-            if (idx2 !== -1) {
-              const sub2 = cleanCommentText
-                .substring(idx2 + "growth99 plan:".length)
-                .trim()
-              planValue = sub2.split(/\r?\n/)[0].trim()
-              contentHtml = commentHtml // Set HTML to show only this reply card!
-              break
-            }
-          }
-        }
-      }
-
-      logger.info(
-        { planValue, hasCommentHtml: !!contentHtml },
-        "Extracted plan details from Message post comments",
-      )
-    }
-
-    // 5. Render HTML in local Playwright page and take a screenshot
-    const availableSubjects = messages.map((m: any) => m.subject || m.title || "Untitled").slice(0, 10).join(", ")
-    
-    const browser = await chromium.launch({
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-      ],
-    })
-
-    try {
-      const context = await browser.newContext({
-        userAgent:
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        extraHTTPHeaders: {
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-        bypassCSP: true,
-      })
-
-      // Add stealth script to bypass basic bot detection
-      await context.addInitScript(() => {
-        Object.defineProperty(navigator, "webdriver", {
-          get: () => undefined,
-        })
-      })
-
-      const page = await context.newPage()
-
-      page.setDefaultTimeout(15000)
-      page.setDefaultNavigationTimeout(15000)
-      if (onProgress) await onProgress(80, "Capturing visual evidence...")
-
-      const styledHtml = `
-        <html>
-          <head>
-            <style>
-              body {
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                background-color: #f4f5f7;
-                margin: 0;
-                padding: 40px;
-                color: #2e3033;
-              }
-              .container {
-                background: white;
-                border-radius: 8px;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-                overflow: hidden;
-                max-width: 800px;
-                margin: 0 auto;
-              }
-              .header {
-                background: #f8f9fa;
-                padding: 24px 32px;
-                border-bottom: 1px solid #e1e3e8;
-              }
-              .title {
-                margin: 0 0 8px 0;
-                font-size: 24px;
-                color: #2e3033;
-              }
-              .meta {
-                font-size: 14px;
-                color: #747679;
-              }
-              .content {
-                padding: 32px;
-                font-size: 16px;
-              }
-            </style>
-          </head>
-          <body>
-            <div class="container">
-              <div class="header">
-                <h1 class="title">${orderDetailsMsg ? orderDetailsMsg.subject || orderDetailsMsg.title || "Order Details" : "Message Board Info"}</h1>
-                <div class="meta">Basecamp Integration • QA Command Center</div>
-              </div>
-              <div class="content">
-                ${contentHtml || `<em>No message containing "order details" found. Evaluated ${messages.length} messages. Subjects found: ${availableSubjects || "None"}</em>`}
-              </div>
-            </div>
-          </body>
-        </html>
-      `
-
-      await page.setContent(styledHtml)
-      await page.waitForLoadState("networkidle")
-
-      let screenshotBuffer: Buffer
-
-      // 1st screenshot: Target specifically the section where "Growth99 Plan:" is mentioned
-      const planLocator = page.locator("text=/growth99\\s*plan/i")
-      if ((await planLocator.count()) > 0) {
-        // Grab closest parent paragraph/div/list block to give beautiful, focused context!
-        const contextLocator = planLocator
-          .locator(
-            "xpath=./ancestor::p | ./ancestor::div | ./ancestor::li | ./ancestor::tr",
-          )
-          .first()
-        if ((await contextLocator.count()) > 0) {
-          logger.info("Taking crop screenshot of plan details block")
-          await contextLocator.evaluate((el) => (el.style.padding = "10px"))
-          screenshotBuffer = await contextLocator.screenshot()
-        } else {
-          logger.info("Taking direct text screenshot of plan details")
-          screenshotBuffer = await planLocator.screenshot()
-        }
-      } else {
-        logger.info(
-          "Plan text locator not found; falling back to message card crop",
-        )
-        const container = page.locator(".container")
-        if ((await container.count()) > 0) {
-          screenshotBuffer = await container.screenshot()
-        } else {
-          screenshotBuffer = await page.screenshot()
-        }
-      }
-
-      const compressedBuffer = await sharp(screenshotBuffer)
-        .jpeg({ quality: 85 })
-        .toBuffer()
-
-      const timestamp = Date.now()
-      const storagePath = `evidence/project-plan/${pageRecord?.id || "run"}-${timestamp}.jpg`
-      const firstScreenshotUrl = await uploadScreenshot(
-        compressedBuffer,
-        storagePath,
-        {
-          bucket: "evidence",
-          isPublic: true,
-        },
-      ).catch((err) => {
-        logger.error(
-          { error: err.message },
-          "Failed to upload project plan screenshot to Supabase",
-        )
-        return ""
-      })
-
-      screenshotUrl = firstScreenshotUrl
-
-      // 2nd screenshot: Navigate to site_url/reviews and take viewport screenshot
-      if (pageRecord?.siteUrl && firstScreenshotUrl) {
-        let reviewsUrl = pageRecord.siteUrl
-        if (reviewsUrl.endsWith("/")) {
-          reviewsUrl = `${reviewsUrl}reviews`
-        } else {
-          reviewsUrl = `${reviewsUrl}/reviews`
-        }
-
-        logger.info(
-          { reviewsUrl },
-          "Navigating to reviews page for 2nd screenshot",
-        )
-        const reviewsPage = await context.newPage()
-        await reviewsPage.setViewportSize({ width: 1920, height: 1080 })
-
-        try {
-          await reviewsPage.goto(reviewsUrl, {
-            waitUntil: "networkidle",
-            timeout: 25000,
-          })
-        } catch (e: any) {
-          logger.warn(
-            { error: e.message },
-            "Failed to load reviews page with networkidle, trying domcontentloaded",
-          )
-          try {
-            await reviewsPage.goto(reviewsUrl, {
-              waitUntil: "domcontentloaded",
-              timeout: 15000,
-            })
-          } catch (e2) {
-            logger.error("Failed to load reviews page completely")
-          }
-        }
-
-        logger.info("Waiting 5 seconds for reviews to fully load before screenshot")
-        await reviewsPage.waitForTimeout(5000)
-
-        const reviewsScreenshotBuffer = await reviewsPage
-          .screenshot()
-          .catch(() => null)
-        if (reviewsScreenshotBuffer) {
-          const reviewsCompressed = await sharp(reviewsScreenshotBuffer)
-            .jpeg({ quality: 85 })
-            .toBuffer()
-
-          const reviewsStoragePath = `evidence/project-plan/${pageRecord?.id || "run"}-reviews-${timestamp}.jpg`
-          const reviewsScreenshotUrl = await uploadScreenshot(
-            reviewsCompressed,
-            reviewsStoragePath,
-            {
-              bucket: "evidence",
-              isPublic: true,
-            },
-          ).catch((err) => {
-            logger.error(
-              { error: err.message },
-              "Failed to upload reviews page screenshot to Supabase",
-            )
-            return ""
-          })
-
-          if (reviewsScreenshotUrl) {
-            // Concatenate both urls as comma-separated
-            screenshotUrl = `${firstScreenshotUrl},${reviewsScreenshotUrl}`
-            logger.info("Dual screenshots captured and stored successfully")
-          }
-        }
-      }
-
-      await browser.close()
-    } catch (browserErr: any) {
-      logger.error(
-        { error: browserErr.message },
-        "Failed to capture screenshot via Playwright",
-      )
-      await browser.close()
-    }
-
-    // 6. Return findings
-    let title = "Project Plan Retrieved"
-    let description = ""
-    let severity: "low" | "medium" | "high" = "low"
-    let status: "open" | "failed" = "open"
-
-    if (!orderDetailsMsg) {
-      status = "failed"
-      title = 'Project Plan - "Order Details" message not found'
-      description = `We connected to your Basecamp project "${bucketData.name || basecamp_project_id}", but could not find any message containing "order details" in the Message Board. Evaluated ${messages.length} messages. Subjects found: ${availableSubjects || "None"}`
-    } else if (!planValue) {
-      status = "failed"
-      title = "Project Plan - Content extraction failed"
-      description = `Successfully fetched "${orderDetailsMsg.subject || orderDetailsMsg.title}" from Basecamp, but no "Growth99 Plan: <Plan>" section was found inside the message body.`
-    } else {
-      description = `Successfully fetched project plan from Basecamp: "${planValue}"`
-    }
-
-    const findings: Finding[] = [
+  } catch (error: any) {
+    logger.error({ error: error.message }, "TED read failed for project plan")
+    return [
       {
         check_factor: "project_plan",
-        severity,
-        title,
-        description,
-        context_text: planValue || "No plan details found.",
-        screenshot_url: screenshotUrl || pageRecord?.desktopUrl || null,
+        title: "Project Plan — could not reach TED",
+        description: `Failed to read the plan from TED for client "${clientName}": ${error.message}`,
         status: "open",
         ai_generated: false,
       } as Finding,
     ]
-
-    return findings
-  } catch (error: any) {
-    logger.error(
-      { error: error.message },
-      "Error in Basecamp project plan check",
-    )
-    if (error) {
-      return [
-        {
-          check_factor: "project_plan",
-          severity: "high",
-          title: "Project Plan Check Failed or Timed Out",
-          description: `The check encountered a timeout or error: ${error.message}. Process aborted gracefully to prevent stalling.`,
-          status: "open",
-          ai_generated: false,
-        } as Finding,
-      ]
-    }
-    throw error
   }
+
+  // Scenario 4 — plan not found. FAIL, no fix possible.
+  if (!planRaw) {
+    return [
+      {
+        check_factor: "project_plan",
+        title: "Project Plan not set",
+        description:
+          "No record for the project plan was found. NO fix possible — plan not available in notes to check. Please add the plan to the client notes.",
+        context_text: `Client: ${clientName} — checked HubSpot growth99_plan (by domain), TED client.plan, and the "Growth99 Plan:" line in client notes.`,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
+  const parsed = parsePlan(planRaw)
+  const accelerator = isAcceleratorPlan(planRaw)
+  logger.info({ planRaw, parsed, accelerator }, "Resolved project plan from TED")
+
+  const addOnLine = parsed?.addOns.length
+    ? ` Add-ons: ${parsed.addOns.join(", ")}.`
+    : ""
+  // HubSpot client details folded into every finding for the report/UI.
+  const d = hs?.details
+  const detailBits = d
+    ? [
+        d.projectManager && `PM: ${d.projectManager}`,
+        d.supportLevel && `Support: ${d.supportLevel}`,
+        d.onboardingLevel && `Onboarding: ${d.onboardingLevel}`,
+        d.websiteReleaseDate && `Release: ${d.websiteReleaseDate}`,
+        d.contactEmail && `Contact: ${d.contactEmail}`,
+        d.phone && `Phone: ${d.phone}`,
+        d.industry && `Industry: ${d.industry}`,
+      ].filter(Boolean)
+    : []
+  const detailLine = detailBits.length
+    ? `\n\nClient details (HubSpot): ${detailBits.join(" · ")}.`
+    : ""
+  const ctx = `${planRaw}${d ? `\n${JSON.stringify(d)}` : ""}`
+
+  // Scenario 5 — any non-Accelerator plan. PASS (plan confirmation only).
+  if (!accelerator) {
+    return [
+      {
+        check_factor: "project_plan",
+        title: `Project Plan confirmed: ${planRaw}`,
+        description: `Plan "${planRaw}" confirmed from ${planSource || "TED"} for "${clientName}". This plan has no reviews-widget requirement — plan-confirmation only, no issues found. No fix needed.${addOnLine}${detailLine}`,
+        context_text: ctx,
+        screenshot_url: pageRecord?.desktopUrl || null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
+  // ---- Accelerator plan → verify the /reviews page + widget. -------------
+  if (onProgress) await onProgress(60, "Checking reviews widget...")
+
+  let codePresent = false
+  let screenshotOk = false
+  let visionConfirmed = false
+  let screenshotUrl: string | null = pageRecord?.desktopUrl || null
+  let reviewsUrl = ""
+
+  if (pageRecord?.siteUrl) {
+    const base = pageRecord.siteUrl.replace(/\/$/, "")
+    reviewsUrl = `${base}/reviews`
+    const browser = await chromium.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    })
+    try {
+      const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } })
+      page.setDefaultNavigationTimeout(25000)
+      try {
+        await page.goto(reviewsUrl, { waitUntil: "networkidle", timeout: 25000 })
+      } catch {
+        await page.goto(reviewsUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {})
+      }
+      await page.waitForTimeout(4000)
+
+      // (a) Widget code present in the rendered markup.
+      const html = await page.content().catch(() => "")
+      codePresent = WIDGET_MARKERS.some((re) => re.test(html))
+
+      // (b) Vision confirmation on a screenshot of the page.
+      const buf = await page.screenshot({ fullPage: true }).catch(() => null)
+      if (buf) {
+        screenshotOk = true
+        const jpg = await sharp(buf).jpeg({ quality: 85 }).toBuffer()
+        const url = await uploadScreenshot(
+          jpg,
+          `evidence/project-plan/${pageRecord?.id || "run"}-reviews-${Date.now()}.jpg`,
+          { bucket: "evidence", isPublic: true },
+        ).catch(() => "")
+        if (url) screenshotUrl = url
+        if (onProgress) await onProgress(80, "Analyzing reviews widget (vision)...")
+        const answer = await describeImage(
+          jpg,
+          "This is a screenshot of a medical/aesthetic practice website's reviews page. Does the page display a customer REVIEWS or TESTIMONIALS widget — e.g. star ratings, review cards, patient testimonials, or an embedded reviews feed? Answer strictly with a single word: YES or NO.",
+        ).catch(() => "")
+        visionConfirmed = /\byes\b/i.test(answer)
+        logger.info({ codePresent, visionConfirmed, answer: answer.slice(0, 40) }, "reviews widget vision result")
+      }
+    } catch (e: any) {
+      logger.warn({ error: e.message }, "reviews page probe failed (non-fatal)")
+    } finally {
+      await browser.close().catch(() => {})
+    }
+  }
+
+  const sourceLine = reviewsUrl ? `\n\nURL: ${reviewsUrl}` : ""
+
+  // Scenario 3 — Accelerator plan, no widget code. FAIL + fix.
+  if (!codePresent) {
+    return [
+      {
+        check_factor: "project_plan",
+        title: "Reviews widget missing (Accelerator plan)",
+        description: `Plan "${planRaw}" is an Accelerator plan, which requires an active reviews widget on the /reviews page, but the reviews-widget embed was not detected in the page markup. Fix: add the Growth99 reviews widget script to the site footer.${addOnLine}${detailLine}${sourceLine}`,
+        context_text: ctx,
+        screenshot_url: screenshotUrl,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
+  // Scenario 1 — Accelerator, code + vision confirmed. PASS.
+  if (screenshotOk && visionConfirmed) {
+    return [
+      {
+        check_factor: "project_plan",
+        title: `Project Plan: ${planRaw} — reviews widget present`,
+        description: `Accelerator plan "${planRaw}" confirmed. The reviews widget code is present and vision confirmed the widget is rendering on the /reviews page — no issues found. No fix needed.${addOnLine}${detailLine}${sourceLine}`,
+        context_text: ctx,
+        screenshot_url: screenshotUrl,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
+  // Scenario 2 — Accelerator, code present but no screenshot / vision unconfirmed.
+  // PASS (code is present) but flag for a manual eyeball.
+  return [
+    {
+      check_factor: "project_plan",
+      title: `Project Plan: ${planRaw} — reviews widget code present`,
+      description: `Accelerator plan "${planRaw}" confirmed. The reviews widget code is present in the page, but ${screenshotOk ? "vision could not visually confirm the widget is rendering" : "a screenshot for vision verification could not be captured"} — please check the /reviews page manually once. Passing because the code is present; no blocking issues found. No fix needed.${addOnLine}${detailLine}${sourceLine}`,
+      context_text: ctx,
+      screenshot_url: screenshotUrl,
+      status: "open",
+      ai_generated: false,
+    } as Finding,
+  ]
 }

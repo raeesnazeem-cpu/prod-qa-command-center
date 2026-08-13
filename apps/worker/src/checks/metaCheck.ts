@@ -26,7 +26,6 @@ export async function checkMeta(page: PlaywrightPage, pageRecord: any): Promise<
   if (!metaData.title || metaData.title.trim() === '') {
     findings.push({
       check_factor: 'meta_tags',
-      severity: 'medium',
       title: 'Missing page title',
       description: 'The page is missing a <title> tag or the title is empty. Titles are critical for SEO and browser tab identification.',
       screenshot_url: pageRecord.desktopUrl,
@@ -38,7 +37,6 @@ export async function checkMeta(page: PlaywrightPage, pageRecord: any): Promise<
     if (titleLen < 10 || titleLen > 60) {
       findings.push({
         check_factor: 'meta_tags',
-        severity: 'low',
         title: 'Suboptimal title length',
         description: `The page title is ${titleLen} characters long. Recommended length is between 10 and 60 characters for optimal search engine display.`,
         context_text: `Current Title: "${metaData.title}"`,
@@ -53,7 +51,6 @@ export async function checkMeta(page: PlaywrightPage, pageRecord: any): Promise<
   if (!metaData.description || metaData.description.trim() === '') {
     findings.push({
       check_factor: 'meta_tags',
-      severity: 'medium',
       title: 'Missing meta description',
       description: 'The page is missing a <meta name="description"> tag. Meta descriptions help search engines understand page content and improve click-through rates.',
       screenshot_url: pageRecord.desktopUrl,
@@ -65,7 +62,6 @@ export async function checkMeta(page: PlaywrightPage, pageRecord: any): Promise<
     if (descLen < 50 || descLen > 160) {
       findings.push({
         check_factor: 'meta_tags',
-        severity: 'low',
         title: 'Suboptimal description length',
         description: `The meta description is ${descLen} characters long. Recommended length is between 50 and 160 characters.`,
         context_text: `Current Description: "${metaData.description}"`,
@@ -80,7 +76,6 @@ export async function checkMeta(page: PlaywrightPage, pageRecord: any): Promise<
   if (!metaData.ogTitle) {
     findings.push({
       check_factor: 'meta_tags',
-      severity: 'low',
       title: 'Missing Open Graph title',
       description: 'Missing <meta property="og:title">. This tag controls how your page title appears when shared on social platforms like Facebook or LinkedIn.',
       screenshot_url: pageRecord.desktopUrl,
@@ -91,7 +86,6 @@ export async function checkMeta(page: PlaywrightPage, pageRecord: any): Promise<
   if (!metaData.ogDescription) {
     findings.push({
       check_factor: 'meta_tags',
-      severity: 'low',
       title: 'Missing Open Graph description',
       description: 'Missing <meta property="og:description">. This tag controls the summary text shown when your page is shared on social media.',
       screenshot_url: pageRecord.desktopUrl,
@@ -102,7 +96,6 @@ export async function checkMeta(page: PlaywrightPage, pageRecord: any): Promise<
   if (!metaData.ogImage) {
     findings.push({
       check_factor: 'meta_tags',
-      severity: 'low',
       title: 'Missing Open Graph image',
       description: 'Missing <meta property="og:image">. Without this, social platforms may pick a random image from your page or show no preview at all.',
       screenshot_url: pageRecord.desktopUrl,
@@ -115,7 +108,6 @@ export async function checkMeta(page: PlaywrightPage, pageRecord: any): Promise<
   if (!metaData.canonical) {
     findings.push({
       check_factor: 'meta_tags',
-      severity: 'low',
       title: 'Missing canonical link tag',
       description: 'The page is missing a <link rel="canonical"> tag. Canonical tags prevent duplicate content issues by telling search engines which version of a URL is the master version.',
       screenshot_url: pageRecord.desktopUrl,

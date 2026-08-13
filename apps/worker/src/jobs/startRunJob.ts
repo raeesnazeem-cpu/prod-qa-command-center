@@ -4,6 +4,7 @@ import { qaQueue } from "../lib/queue"
 import { crawlSitemap } from "../crawlers/sitemapCrawler"
 import * as activityService from "../services/activityService"
 import { wpPasswordCache } from "../lib/credentialsCache"
+import { resolveThemeType } from "../lib/themeType"
 
 import pino from "pino"
 
@@ -65,6 +66,35 @@ export async function processStartRunJob(job: Job) {
     )
   }
 
+  // Detect the target theme type ONCE, before any check runs, and persist it on
+  // the run so every check (and later the AI-fix job) can pick the classic- or
+  // block-theme variant. Hybrid: repo peek (local fallback repo / beta_site.env
+  // GitHub repo) → rendered-HTML fallback. Purely best-effort — a miss leaves
+  // theme_type null and everything behaves exactly as before.
+  try {
+    const { data: proj } = await supabase
+      .from("projects")
+      .select("name")
+      .eq("id", run.project_id)
+      .single()
+    const { themeType, source } = await resolveThemeType({
+      projectName: proj?.name || null,
+      siteUrl: run.site_url,
+    })
+    logger.info({ runId, themeType, source }, "Resolved target theme type")
+    if (themeType !== "unknown") {
+      await supabase
+        .from("qa_runs")
+        .update({ theme_type: themeType })
+        .eq("id", runId)
+    }
+  } catch (e: any) {
+    logger.warn(
+      { runId, error: e?.message },
+      "Theme-type detection failed; proceeding with default (block) behaviour",
+    )
+  }
+
   try {
     const ALL_PAGES_CHECKS = [
       "visual_regression",
@@ -122,13 +152,12 @@ export async function processStartRunJob(job: Job) {
       logger.info({ runId }, "Determining URLs to process")
 
       if (hasAllPagesCheck) {
-        // If dead_links check is enabled, ignore user selected_urls filter and check all pages!
-        if (
-          run.selected_urls &&
-          run.selected_urls.length > 0 &&
-          !hasDeadLinks &&
-          !hasLearnMoreButtons
-        ) {
+        // Honor the user's selected_urls whenever they provided any — including
+        // when dead_links / learn_more_buttons are enabled. Those checks used to
+        // force a full-site crawl (ignoring the selection); while the demo override
+        // is in place we keep them confined to the same 2 pages the run was scoped
+        // to, so nothing outside the requested set gets scanned.
+        if (run.selected_urls && run.selected_urls.length > 0) {
           logger.info(
             { runId, count: run.selected_urls.length },
             "Using provided selected_urls",
@@ -180,6 +209,11 @@ export async function processStartRunJob(job: Job) {
         "No page scan checks active; skipping crawl completely",
       )
     }
+
+    // --- DEMO OVERRIDE (restore after demo): cap the crawl to 2 pages
+    // (home + contact, keyword-matched) so the demo run stays small and fast.
+    // Remove this line to crawl normally.
+    if (urls.length > 0) urls = pickDemoPages(urls, run.site_url)
 
     logger.info({ runId, count: urls.length }, "URL collection complete")
 
@@ -377,4 +411,49 @@ export async function processStartRunJob(job: Job) {
 
     throw error
   }
+}
+
+// --- DEMO OVERRIDE helper (restore after demo): from the crawled URL list, pick
+// just 2 pages — home and contact. Matching is by keyword (tolerant of slug
+// variations like /contact-us), not exact paths. Home is always included. If
+// "contact" doesn't match, we backfill from the remaining crawled URLs so the
+// run never shrinks to just the homepage. Capped at 2. Delete along with its
+// call site to revert.
+const DEMO_PAGE_LIMIT = 2
+function pickDemoPages(urls: string[], siteUrl: string): string[] {
+  const pathOf = (u: string): string => {
+    try {
+      return new URL(u).pathname.replace(/\/+$/, "").toLowerCase() || "/"
+    } catch {
+      return u.toLowerCase()
+    }
+  }
+  const used = new Set<string>()
+  const out: string[] = []
+
+  // Home first — always the site root.
+  const home =
+    urls.find((u) => pathOf(u) === "/" || pathOf(u) === "") || siteUrl
+  out.push(home)
+  used.add(home)
+
+  const pick = (keyword: string) => {
+    const hit = urls.find((u) => !used.has(u) && pathOf(u).includes(keyword))
+    if (hit) {
+      out.push(hit)
+      used.add(hit)
+    }
+  }
+  pick("contact")
+
+  // Backfill from any remaining crawled pages so we still get up to 2.
+  for (const u of urls) {
+    if (out.length >= DEMO_PAGE_LIMIT) break
+    if (!used.has(u)) {
+      out.push(u)
+      used.add(u)
+    }
+  }
+
+  return out.slice(0, DEMO_PAGE_LIMIT)
 }

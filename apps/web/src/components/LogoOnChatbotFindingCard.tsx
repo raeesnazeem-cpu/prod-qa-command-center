@@ -12,7 +12,6 @@ import { useBulkDeleteTasks } from "../hooks/useTasks"
 import { useRole } from "../hooks/useRole"
 import { useProject } from "../hooks/useProjects"
 import { useParams, Link } from "react-router-dom"
-import { FindingSeverityEditor } from "./FindingSeverityEditor"
 import { FindingCardWithScreenshot } from "./FindingCardWithScreenshot"
 import { QAFinding } from "../api/runs.api"
 import { BrowserOverlay } from "./BrowserOverlay"
@@ -189,13 +188,6 @@ export const LogoOnChatbotFindingCard: React.FC<FindingCardProps> = ({
             <Square size={20} />
           )}
         </button>
-        <FindingSeverityEditor
-          findingId={finding.id}
-          pageId={finding.page_id}
-          currentSeverity={finding.severity}
-          canEdit={!isFalsePositive && !isLocked}
-          symbolOnly={true}
-        />
         <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-[0.1em]">
           <MonitorSmartphone size={14} className="text-accent" />
           {finding.check_factor.replace(/_/g, " ")}

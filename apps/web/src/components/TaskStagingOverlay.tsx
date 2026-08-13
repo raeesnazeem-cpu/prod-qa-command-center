@@ -114,7 +114,6 @@ export const TaskStagingOverlay: React.FC<TaskStagingOverlayProps> = ({
               : finding.id,
             title: `Issue #${(finding as any).issue_number}: ${finding.title}`,
             description: finding.description || "",
-            severity: finding.severity,
             assigned_to: userId,
             gallery_images: galleryImages,
           })
@@ -229,21 +228,6 @@ export const TaskStagingOverlay: React.FC<TaskStagingOverlayProps> = ({
                       />
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`text-[8px] font-bold px-1.5 py-0.5 rounded uppercase tracking-tighter ${
-                          finding.severity === "critical"
-                            ? "bg-red-100 text-red-600"
-                            : finding.severity === "high"
-                              ? "bg-orange-100 text-orange-600"
-                              : finding.severity === "medium"
-                                ? "bg-amber-100 text-amber-600"
-                                : "bg-blue-100 text-blue-600"
-                        }`}
-                      >
-                        {finding.severity}
-                      </span>
-                    </div>
                   </div>
                   <button
                     onClick={() => removeFromStage(finding.id)}

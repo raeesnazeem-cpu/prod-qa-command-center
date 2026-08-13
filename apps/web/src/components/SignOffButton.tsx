@@ -93,7 +93,11 @@ export const SignOffButton: React.FC<SignOffButtonProps> = ({
                 {isTransitioning ? (
                   <Loader2 className="w-3 h-3 animate-spin inline mr-1" />
                 ) : null}
-                {project.is_pre_release ? "Pre-Release" : "Post-Release"}
+                {project.is_internal_qa
+                  ? "Internal QA"
+                  : project.is_pre_release
+                    ? "Pre-Release"
+                    : "Post-Release"}
               </button>
             </div>
           )}

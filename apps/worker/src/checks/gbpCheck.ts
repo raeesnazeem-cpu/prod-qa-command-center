@@ -99,7 +99,6 @@ export async function checkGbp(
     if (!addonActive) {
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: "low",
         title: "GBP add-on not detected in client notes — skipped",
         description:
           "No Google Business Profile / GMB add-on reference was found in the client notes, so the GBP optimization check was skipped.",
@@ -114,7 +113,6 @@ export async function checkGbp(
       // Hard FAILED finding so GBP always appears in the report.
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: "high",
         title: "GBP Check Failed — GOOGLE_PLACES_API_KEY not configured",
         description:
           "The Google Business Profile add-on is active, but GOOGLE_PLACES_API_KEY is not set in the worker environment, so GBP optimization could not be verified. Configure the key and re-run.",
@@ -132,7 +130,6 @@ export async function checkGbp(
     if (placeIds.length === 0) {
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: "high",
         title: `No Google Business Profile found for "${clientName}"`,
         description: `Google Places returned no results for "${clientName}". Verify the business has a Google Business Profile and that its name matches.`,
         status: "open",
@@ -144,9 +141,11 @@ export async function checkGbp(
     const capped = placeIds.slice(0, 5)
     if (onProgress) await onProgress(60, `Auditing ${capped.length} location(s)...`)
 
+    let audited = 0
     for (let i = 0; i < capped.length; i++) {
       const p = await placeDetails(capped[i], key).catch(() => null)
       if (!p) continue
+      audited++
 
       const gaps: string[] = []
       if (!p.phone) gaps.push("phone number")
@@ -170,7 +169,6 @@ export async function checkGbp(
 
       findings.push({
         check_factor: CHECK_FACTOR,
-        severity: gaps.length === 0 ? "low" : gaps.length >= 3 ? "high" : "medium",
         title:
           gaps.length === 0
             ? `GBP optimized: ${p.name}`
@@ -182,12 +180,25 @@ export async function checkGbp(
       } as Finding)
     }
 
+    // Places returned location(s) but we could not fetch details for ANY of
+    // them → we have no result. Returning the empty `findings` here would be
+    // reported as a clean pass. Emit a lapse so it's marked "could not complete".
+    if (audited === 0) {
+      findings.push({
+        check_factor: CHECK_FACTOR,
+        title: "GBP Check Failed — could not fetch location details",
+        description: `Google Places returned ${capped.length} location(s) for "${clientName}", but the Place Details request failed for every one, so GBP optimization could not be verified. QACC will retry on the next run.`,
+        context_text: `Client: ${clientName}\nLocations found: ${capped.length}\nLocations audited: 0`,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
+    }
+
     if (onProgress) await onProgress(100, "GBP check complete")
     return findings
   } catch (error: any) {
     findings.push({
       check_factor: CHECK_FACTOR,
-      severity: "high",
       title: "GBP Check Failed",
       description: `The GBP check encountered an unexpected error: ${error.message}.`,
       status: "open",

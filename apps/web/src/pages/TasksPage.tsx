@@ -33,12 +33,18 @@ const ProjectCard = ({ project }: { project: any }) => (
     <div className="flex justify-between items-start mb-4">
       <span
         className={`text-[9px] font-bold uppercase tracking-[0.2em] px-2.5 py-1 rounded-full border ${
-          project.is_pre_release
-            ? "bg-amber-50 text-amber-600 border-amber-100"
-            : "bg-emerald-50 text-emerald-600 border-emerald-100"
+          project.is_internal_qa
+            ? "bg-sky-50 text-sky-600 border-sky-100"
+            : project.is_pre_release
+              ? "bg-amber-50 text-amber-600 border-amber-100"
+              : "bg-emerald-50 text-emerald-600 border-emerald-100"
         }`}
       >
-        {project.is_pre_release ? "Pre-release" : "Post-release"}
+        {project.is_internal_qa
+          ? "Internal QA"
+          : project.is_pre_release
+            ? "Pre-release"
+            : "Post-release"}
       </span>
       {project.open_issues_count > 0 && (
         <span className="text-[10px] text-red-500 font-bold flex items-center gap-1">
@@ -125,21 +131,6 @@ const groupTasksForUI = (tasks: any[]) => {
   return Array.from(groups.values())
 }
 
-const getSeverityColor = (severity: string) => {
-  switch (severity) {
-    case "critical":
-      return "bg-red-50 text-red-600 border-red-100"
-    case "high":
-      return "bg-amber-50 text-amber-600 border-amber-100"
-    case "medium":
-      return "bg-amber-50 text-amber-600 border-amber-100"
-    case "low":
-      return "bg-yellow-50 text-yellow-600 border-yellow-100"
-    default:
-      return "bg-slate-50 text-slate-500 border-slate-200"
-  }
-}
-
 const KanbanCard = ({
   task,
   onClick,
@@ -174,11 +165,6 @@ const KanbanCard = ({
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[300%] aspect-square bg-[conic-gradient(from_0deg,transparent_0_45deg,theme(colors.accent)_135deg,transparent_180deg_225deg,#a3d4c7_315deg,transparent_360deg)] opacity-100 dark:opacity-0 group-hover:opacity-100 group-hover:animate-[spin_4s_linear_infinite]"></div>
       </div>
       <div className="flex items-center justify-between mb-2 relative z-10">
-        <span
-          className={`text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-lg border ${getSeverityColor(task.severity)}`}
-        >
-          {task.severity}
-        </span>
         {task.basecamp_url && (
           <div className="text-emerald-600" title="Synced with Basecamp">
             <CheckCircle2 size={12} />

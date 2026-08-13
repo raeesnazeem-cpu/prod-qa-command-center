@@ -48,7 +48,20 @@ export async function checkLearnMoreButtons(
         { pageUrl, error: error.message },
         "Failed to fetch HTML for Learn More Buttons check",
       )
-      return []
+      // A fetch failure means the page was never scanned. Returning [] here is
+      // reported as a clean pass ("check ran, nothing to report"). Surface the
+      // failure instead — mirror the outer catch's shape.
+      return [
+        {
+          check_factor: "learn_more_buttons",
+          title: "Learn More Buttons Check Failed",
+          description: `Could not fetch the page to scan its buttons: ${error.message}. Process aborted gracefully; QACC will retry on the next run.`,
+          context_text: "System Error",
+          screenshot_url: null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
     }
 
     if (foundOccurrences.length === 0) {
@@ -57,10 +70,9 @@ export async function checkLearnMoreButtons(
       return [
         {
           check_factor: "learn_more_buttons",
-          severity: "low",
           title: "No generic See More/Learn More buttons found",
           description:
-            "No buttons/links with text 'Learn More', 'Read More', 'Know More', or 'See More' were found on this page.",
+            "No issues found. No buttons/links with text 'Learn More', 'Read More', 'Know More', or 'See More' were found on this page.",
           status: "open",
           ai_generated: false,
           screenshot_url: null,
@@ -71,25 +83,27 @@ export async function checkLearnMoreButtons(
 
     if (onProgress)
       await onProgress(90, "Finalizing Learn More Buttons findings...")
+    // A generic CTA IS present -> this is the failing case. Show exactly which
+    // button text was found and on which page it occurred. (`source: <pageUrl>`
+    // is added by the report from the finding's page; each bullet names the
+    // element + its exact text so a human can locate it.)
     return [
       {
         check_factor: "learn_more_buttons",
-        severity: "medium",
         title: `${foundOccurrences.length} generic CTA button(s) found`,
         description: foundOccurrences
-          .map((b) => `- **${pageUrl}**\n  * Actual Text: ${b.text}`)
+          .map((b) => `- “${b.text}” (in a <${b.tag}> element)`)
           .join("\n"),
         status: "open",
         ai_generated: false,
         screenshot_url: null,
-        context_text: `Found generic texts that should ideally be more descriptive for SEO and accessibility.`,
+        context_text: `Page: ${pageUrl}\nGeneric CTA text should be more descriptive for SEO and accessibility.`,
       },
     ]
   } catch (error: any) {
     return [
       {
         check_factor: "learn_more_buttons",
-        severity: "high",
         title: "Learn More Buttons Check Failed",
         description: `The check encountered an unexpected error: ${error.message}. Process aborted gracefully.`,
         context_text: "System Error",

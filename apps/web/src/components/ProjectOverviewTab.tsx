@@ -332,6 +332,11 @@ export const ProjectOverviewTab = ({
                           addSuffix: true,
                         })}
                       </p>
+                      {run.site_url && (
+                        <p className="text-xs text-slate-400 mt-0.5 font-mono truncate max-w-[280px] sm:max-w-[360px]">
+                          🔗 {run.site_url}
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -414,17 +419,7 @@ export const ProjectOverviewTab = ({
                     >
                       <td className="px-6 py-4">
                         <div className="flex items-center space-x-3">
-                          <div
-                            className={`w-1.5 h-1.5 rounded-full flex-none ${
-                              task.severity === "critical"
-                                ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.4)]"
-                                : task.severity === "high"
-                                  ? "bg-orange-500"
-                                  : task.severity === "medium"
-                                    ? "bg-amber-500"
-                                    : "bg-blue-500"
-                            }`}
-                          />
+                          <div className="w-1.5 h-1.5 rounded-full flex-none bg-slate-400" />
                           <span className="text-sm font-bold text-slate-900 dark:text-slate-200 group-hover:text-accent transition-colors line-clamp-1">
                             {task.title}
                           </span>

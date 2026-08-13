@@ -9,6 +9,8 @@ export interface Project {
   client_name?: string;
   is_woocommerce: boolean;
   is_pre_release: boolean;
+  is_post_release?: boolean;
+  is_internal_qa?: boolean;
   status: 'active' | 'archived' | 'paused';
   org_id: string;
   created_at: string;

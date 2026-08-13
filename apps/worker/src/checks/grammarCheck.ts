@@ -24,6 +24,7 @@ export async function checkGrammar(
     const user = `Page: ${pageUrl}\n\nCopy:\n"""${snippet}"""\n\nReturn STRICT JSON only: {"issues":[{"excerpt":"<short quote>","issue":"<what is wrong>","suggestion":"<the fix>"}]}. Empty array if the copy is clean. Max 15 issues.`
 
     let issues: any[] = []
+    let aiError: Error | null = null
     try {
       const { text: resp } = await completeText(system, user)
       const m = resp.match(/\{[\s\S]*\}/)
@@ -31,13 +32,31 @@ export async function checkGrammar(
         const o = JSON.parse(m[0])
         if (Array.isArray(o.issues)) issues = o.issues
       }
-    } catch {}
+    } catch (e: any) {
+      aiError = e
+    }
+
+    // If the AI call itself failed, DO NOT report a clean pass — that would be a
+    // false "no issues found". Surface it as a tool lapse (excluded from the
+    // TED defect count, but marks the check as "could not complete").
+    if (aiError) {
+      return [
+        {
+          check_factor: "grammar",
+          title: "Grammar Check Failed",
+          description: `The grammar check could not run (AI error): ${aiError.message}. Process aborted gracefully.`,
+          context_text: `URL: ${pageUrl}`,
+          screenshot_url: null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
 
     if (issues.length === 0) {
       return [
         {
           check_factor: "grammar",
-          severity: "low",
           title: "No grammar issues found",
           description: "No clear grammar, spelling, or punctuation issues were detected in this page's copy.",
           context_text: `URL: ${pageUrl}`,
@@ -52,7 +71,6 @@ export async function checkGrammar(
       (it) =>
         ({
           check_factor: "grammar",
-          severity: "medium",
           title: `Grammar: ${String(it.issue || "issue").slice(0, 80)}`,
           description: `"${it.excerpt || ""}" — ${it.issue || ""}${it.suggestion ? `. Suggestion: ${it.suggestion}` : ""}`,
           context_text: `URL: ${pageUrl}`,
@@ -65,7 +83,6 @@ export async function checkGrammar(
     return [
       {
         check_factor: "grammar",
-        severity: "medium",
         title: "Grammar Check Failed",
         description: `The grammar check encountered an error: ${e.message}.`,
         context_text: `URL: ${pageUrl}`,

@@ -15,7 +15,6 @@ import {
 } from "lucide-react"
 import { useParams, Link } from "react-router-dom"
 import { useRole } from "../hooks/useRole"
-import { FindingSeverityEditor } from "./FindingSeverityEditor"
 import { RebuttalVerdictCard } from "./RebuttalVerdictCard"
 import { FindingCardWithScreenshot } from "./FindingCardWithScreenshot"
 import { QAFinding } from "../api/runs.api"
@@ -60,12 +59,6 @@ export const SpellingFindingCard: React.FC<FindingCardProps> = ({
   const { galleryImages: allGalleryImages, addImage } = useGalleryStore()
   const galleryImages = allGalleryImages[finding.id] || []
 
-  const severityIcons = {
-    critical: <ShieldAlert size={20} />,
-    high: <AlertTriangle size={20} />,
-    medium: <AlertCircle size={20} />,
-    low: <Info size={20} />,
-  }
 
   const isConfirmed = finding.status === "confirmed"
   const isFalsePositive = finding.status === "false_positive"
@@ -142,24 +135,17 @@ export const SpellingFindingCard: React.FC<FindingCardProps> = ({
       {/* Status Indicators */}
 
       <div className="flex items-start gap-4">
-        {/* Severity Icon */}
         <div
           className={`mt-1 p-3 rounded-xl shrink-0 transition-transform group-hover:scale-110 ${
             isFalsePositive
               ? "bg-slate-100 text-slate-400"
-              : finding.severity === "critical"
-                ? "bg-red-50 text-red-600"
-                : finding.severity === "high"
-                  ? "bg-orange-50 text-orange-600"
-                  : finding.severity === "medium"
-                    ? "bg-yellow-50 text-yellow-600"
-                    : "bg-blue-50 text-blue-600"
+              : "bg-blue-50 text-blue-600"
           }`}
         >
           {isFalsePositive ? (
             <XCircle size={20} />
           ) : (
-            severityIcons[finding.severity]
+            <AlertCircle size={20} />
           )}
         </div>
 
@@ -167,13 +153,6 @@ export const SpellingFindingCard: React.FC<FindingCardProps> = ({
           {/* Header Info */}
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
-              <FindingSeverityEditor
-                findingId={finding.id}
-                pageId={finding.page_id}
-                currentSeverity={finding.severity}
-                canEdit={canAction && !isFalsePositive}
-                symbolOnly={true}
-              />
               <div className="flex items-center gap-1.5 text-[9px] font-bold text-slate-400 uppercase tracking-[0.2em]">
                 <FileSearch size={14} />
                 SPELLING
