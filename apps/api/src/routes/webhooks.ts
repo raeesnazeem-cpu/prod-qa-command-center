@@ -84,26 +84,27 @@ const TED_FALLBACK_SITE_URL =
 // ===========================================================================
 // TED-FIRST SCAN-URL RESOLUTION (LIVE).
 //
-// PREMISE: a complete QA→fix→push cycle needs BOTH (a) a site URL to scan AND
-// (b) a repo that is actually clonable to apply + push fixes. So the scan URL
-// is resolved from TED first, and used ONLY when it forms a usable pair with a
-// clonable repo; otherwise we fall back to the local pair
-// (QACC_FALLBACK_SITE_URL + AI_FIX_LOCAL_REPO) for site AND repo together.
+// PREMISE: the SCAN and the FIX are decoupled. The scan needs only a real site
+// URL; the fix additionally needs a clonable repo. So we SCAN the real site
+// whenever its URL resolves from TED — independent of any repo — and only the
+// AI-FIX pass stalls when there's no clonable repo (see aiFixRunJob.ts). Only
+// when NO real URL resolves do we fall back to the demo site
+// (QACC_FALLBACK_SITE_URL).
 //
 //   internal_qa + pre_release → site source: beta_site.env (resolveBetaSiteUrlFromTED)
-//                               repo check:  resolveBetaSiteRepoFromTED + isRepoClonable
-//   post_release              → site source: release.security released URL
-//                               repo check:  resolveBetaSiteRepoFromTED + isRepoClonable
+//   post_release              → site source: release.security released URL,
+//                               else the client-notes canonical domain
 //
 // The run's scan URL is therefore `tedSiteUrl || TED_FALLBACK_SITE_URL` (where
-// tedSiteUrl is non-null only for a usable pair). The project's stored site_url
-// is NOT consulted — what gets scanned is what THIS webhook resolves, so it no
-// longer matters which URL happens to be saved under the project's name.
+// tedSiteUrl is the real URL when one resolved, else null → demo). The project's
+// stored site_url is NOT consulted — what gets scanned is what THIS webhook
+// resolves, so it no longer matters which URL is saved under the project's name.
 //
-// COHERENCE (no migration needed): the worker keys its repo choice off the run's
-// site_url — if site_url === QACC_FALLBACK_SITE_URL it uses AI_FIX_LOCAL_REPO,
-// otherwise it clones the real betaSiteRepo. So the scan target and the fix
-// target always match (both real, or both local). See aiFixRunJob.ts.
+// FIX COHERENCE: the worker keys its repo choice off the run's site_url — if
+// site_url === QACC_FALLBACK_SITE_URL (no real URL resolved) it uses the demo
+// repo AI_FIX_LOCAL_REPO; otherwise it resolves the real betaSiteRepo and, if
+// there is no clonable repo, STALLS the fix (it does NOT fix the unrelated demo
+// repo for a real-site scan). See aiFixRunJob.ts.
 // ===========================================================================
 
 // Resolve the beta site URL that QACC should scan, from TED.
@@ -1105,17 +1106,17 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             `🔍 Looking up QACC project matching name: "${clientName}"`,
           )
 
-          // TED-first resolution (pre-release): scan the REAL beta site only when
-          // beta_site.env yields BOTH a betaSiteUrl and a clonable betaSiteRepo
-          // (either may be in the payload OR a task comment). Otherwise fall back
-          // to the forced demo site (QACC_FALLBACK_SITE_URL + AI_FIX_LOCAL_REPO).
+          // TED-first resolution (pre-release): SCAN the REAL beta site whenever
+          // we can resolve its URL from beta_site.env (payload OR task comment) —
+          // independent of whether a clonable repo exists. The repo only gates
+          // the AI-FIX pass (which stalls when there's no repo, see aiFixRunJob),
+          // NOT the scan. Only when no beta URL resolves do we fall back to the
+          // demo site (QACC_FALLBACK_SITE_URL).
           const betaUrl = await resolveBetaSiteUrlFromTED(task.clientId)
-          const betaRepo = await resolveBetaSiteRepoFromTED(task.clientId)
-          const usablePair = !!betaUrl && (await isRepoClonable(betaRepo))
-          const tedSiteUrl: string | null = usablePair ? betaUrl : null
-          if (!usablePair)
+          const tedSiteUrl: string | null = betaUrl || null
+          if (!tedSiteUrl)
             console.log(
-              `ℹ️ pre-release: beta_site.env pair not usable (url=${betaUrl || "none"}, repo=${betaRepo || "none"}) → forcing demo site.`,
+              `ℹ️ pre-release: no beta site URL on beta_site.env → forcing demo site.`,
             )
 
           // Resolve the release.qa_pre task (client-agnostic, by template key)
@@ -1933,17 +1934,16 @@ webhookRouter.post(
             `🔍 Looking up QACC project matching name: "${clientName}"`,
           )
 
-          // TED-first resolution (internal QA): the scan targets the BETA site,
-          // used only when beta_site.env yields BOTH a betaSiteUrl and a clonable
-          // betaSiteRepo (either may be in the payload OR a task comment).
-          // Otherwise fall back to the forced demo site.
+          // TED-first resolution (internal QA): SCAN the REAL beta site whenever
+          // we can resolve its URL from beta_site.env (payload OR task comment) —
+          // independent of whether a clonable repo exists. The repo only gates
+          // the AI-FIX pass (which stalls when there's no repo), NOT the scan.
+          // Only when no beta URL resolves do we fall back to the demo site.
           const betaUrl = await resolveBetaSiteUrlFromTED(task.clientId)
-          const betaRepo = await resolveBetaSiteRepoFromTED(task.clientId)
-          const usablePair = !!betaUrl && (await isRepoClonable(betaRepo))
-          const tedSiteUrl: string | null = usablePair ? betaUrl : null
-          if (!usablePair)
+          const tedSiteUrl: string | null = betaUrl || null
+          if (!tedSiteUrl)
             console.log(
-              `ℹ️ internal-QA: beta_site.env pair not usable (url=${betaUrl || "none"}, repo=${betaRepo || "none"}) → forcing demo site.`,
+              `ℹ️ internal-QA: no beta site URL on beta_site.env → forcing demo site.`,
             )
 
           // Resolve the beta_site.internal_test target task QACC talks back to.
@@ -2605,24 +2605,21 @@ webhookRouter.post(
             }
 
             // Create the post-release run of the automated General Checks.
-            // Post-release QA matrix (docs/qacc-postrelease-matrix.html), minus
-            // the explicitly-skipped rows (two-way text, speed/perf, client
-            // email, G99 contact form + chatbot/VC, backup size). Everything
-            // below is credential-free / human-free.
-            // TED-first resolution (post-release): the scan URL comes from the
-            // release.security task (payload OR comment); the repo to fix is the
-            // SAME beta_site.env repo (payload OR comment). Go real only when the
-            // pair is usable — a released URL AND a clonable repo. Otherwise fall
-            // back to the forced demo site (+ local fallback repo, no push).
-            const postRepo = await resolveBetaSiteRepoFromTED(task.clientId)
-            const postUsablePair =
-              !!releasedUrl && (await isRepoClonable(postRepo))
-            const runSiteUrl = postUsablePair
-              ? (releasedUrl as string)
-              : TED_FALLBACK_SITE_URL
-            if (!postUsablePair)
+            // Post-release QA matrix (docs/qacc-postrelease-matrix.html).
+            // TED-first resolution (post-release): SCAN the REAL live/main site
+            // whenever we can resolve its URL — the released URL from the
+            // release.security task, or the client-notes canonical domain as a
+            // fallback — independent of whether a clonable repo exists. The repo
+            // only gates the AI-FIX pass (which stalls when there's no repo),
+            // NOT the scan. Only when NO main-site URL resolves do we fall back
+            // to the demo site.
+            const runSiteUrl =
+              (releasedUrl as string | null) ||
+              (liveSiteUrl as string | null) ||
+              TED_FALLBACK_SITE_URL
+            if (runSiteUrl === TED_FALLBACK_SITE_URL)
               console.log(
-                `ℹ️ post-release: pair not usable (releasedUrl=${releasedUrl || "none"}, repo=${postRepo || "none"}) → forcing demo site.`,
+                `ℹ️ post-release: no released/live main-site URL resolved → forcing demo site.`,
               )
             const { data: run, error: runError } = await supabase
               .from("qa_runs")

@@ -183,31 +183,22 @@ export async function processAiFixRunJob(job: Job) {
     !run?.site_url || (!!fallbackSite && run.site_url === fallbackSite)
 
   let betaRepo: string | null = null
-  // When we fall back to the demo repo, this records WHY, so the report can say
-  // so instead of silently pretending everything was real.
+  // When the demo repo is used, this records WHY, so the report can say so
+  // instead of silently pretending the target was real. (Only ever set for a
+  // demo-target run now — a real scan with no repo STALLS instead of falling
+  // back, see below.)
   let fallbackReason = ""
   if (isDemoTarget) {
     logger.info(
       { runId, siteUrl: run?.site_url },
       "AI Fix: scan target is the fallback demo site → using the demo repo (no push).",
     )
-  } else if (run?.run_type === "post_release" && !run?.released_site_url) {
-    fallbackReason =
-      "TED's release.security task has not supplied the new released domain yet, so the live site could not be targeted."
-    logger.warn(
-      { runId },
-      "AI Fix: post-release run has no released domain from TED release.security yet → falling back to the demo repo (no push).",
-    )
   } else {
+    // Real scan (beta site for pre/internal, live/released site for post). The
+    // fix targets this client's beta_site.env repo. We DO NOT fall back to the
+    // demo repo here: a real site was scanned, so if there's no clonable repo
+    // the fix simply STALLS (below) — the demo repo is left out of it entirely.
     betaRepo = await resolveBetaSiteRepo(project?.name).catch(() => null)
-    if (!betaRepo) {
-      fallbackReason =
-        "beta_site.env had no clonable repository (betaSiteRepo) for this client."
-      logger.warn(
-        { runId, project: project?.name },
-        "AI Fix: no clonable betaSiteRepo on beta_site.env → falling back to the demo repo (no push).",
-      )
-    }
   }
 
   let repoUrl: string | null = null
@@ -215,10 +206,11 @@ export async function processAiFixRunJob(job: Job) {
   let usingFallbackRepo = false
   if (betaRepo) {
     repoUrl = betaRepo
-  } else if (localRepo) {
+  } else if (isDemoTarget && localRepo) {
+    // Demo/test loop ONLY: fix the local repo that backs the fallback site.
     repoUrl = localRepo
     useLocal = true
-    usingFallbackRepo = true // beta_site.env had no repo → use fallback repo
+    usingFallbackRepo = true
   }
 
   const ownerRepo = useLocal ? null : repoUrl ? ownerRepoFromUrl(repoUrl) : null
@@ -228,19 +220,38 @@ export async function processAiFixRunJob(job: Job) {
   const canClone = useLocal ? true : !!repoUrl && !!ownerRepo && !!token
   const willPush = !useLocal && canClone && !dryRun
 
-  // Only truly fail when there's NEITHER a beta_site.env repo NOR a local mock
-  // fallback — otherwise the flow always has something to fix (real or mock).
+  // No usable repo → the fix pass can't run. The scan + QA report have already
+  // posted, so this STALLS the fix only (by design: scan the real site whenever
+  // its URL resolved; stall the fix when there's no repo to correct).
   if (!repoUrl) {
-    logger.warn(
-      { runId, project: project?.name },
-      "AI Fix: no beta_site.env repo and no local fallback — reporting failure.",
-    )
-    await postTedComment(
-      tedTaskId,
-      "❌ <strong>AI Fix not run — no repository available.</strong> This beta site has no repo on <code>beta_site.env</code> (no <code>betaSiteRepo</code>) and no local fallback (<code>AI_FIX_LOCAL_REPO</code>) is configured, so there is nothing to fix.",
-      `ext:qacc-aifix-norepo-${runId}`,
-    ).catch(() => {})
-    // Even when the fix pass can't run, don't leave TED tasks pending.
+    if (!isDemoTarget) {
+      // Real site scanned, but beta_site.env has no clonable repo for this
+      // client — there is nothing to push a fix to, so stall the fix pass. We
+      // deliberately do NOT fall back to the demo repo (it doesn't back this
+      // real site, so fixing it would be meaningless).
+      logger.warn(
+        { runId, project: project?.name, siteUrl: run?.site_url },
+        "AI Fix stalled: real site scanned but no clonable betaSiteRepo — skipping the fix pass (no demo fallback).",
+      )
+      await postTedComment(
+        tedTaskId,
+        "⏸️ <strong>AI Fix stalled — no repository available.</strong> The site was scanned and the QA report posted, but <code>beta_site.env</code> has no clonable repository (<code>betaSiteRepo</code>) for this client, so there is no code to fix yet. The fix pass will run once the repository is wired up.",
+        `ext:qacc-aifix-norepo-${runId}`,
+      ).catch(() => {})
+    } else {
+      // Demo target, but no AI_FIX_LOCAL_REPO configured either — nothing at all.
+      logger.warn(
+        { runId, project: project?.name },
+        "AI Fix: demo target but no AI_FIX_LOCAL_REPO configured — reporting failure.",
+      )
+      await postTedComment(
+        tedTaskId,
+        "❌ <strong>AI Fix not run — no repository available.</strong> The scan targeted the demo fallback site but no local fallback (<code>AI_FIX_LOCAL_REPO</code>) is configured, so there is nothing to fix.",
+        `ext:qacc-aifix-norepo-${runId}`,
+      ).catch(() => {})
+    }
+    // Even when the fix pass can't run, don't leave TED tasks pending — the
+    // per-check QA results were already posted to each subtask.
     await markAllTedTasksCompleted(runId, tedTaskId)
     return
   }
