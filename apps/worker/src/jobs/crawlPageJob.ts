@@ -26,6 +26,7 @@ import { checkFalseBreakpoints } from "../checks/falseBreakpointCheck"
 import { checkBackend } from "../checks/backendCheck"
 import { checkReviewReputation } from "../checks/reviewReputationCheck"
 import { checkFunctionality } from "../checks/functionalityCheck"
+import { checkHamburgerMenu } from "../checks/hamburgerMenuCheck"
 import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
@@ -632,6 +633,24 @@ export async function processCrawlPageJob(job: Job) {
             }).catch((e) => {
               logger.error("Footer logo check failed:", e)
               return lapse("footer_logo")(e)
+            }),
+          )
+        }
+
+        await Promise.all(checkPromises)
+        if (enabledChecks.includes("hamburger_menu")) {
+          checkPromises.push(
+            checkHamburgerMenu(
+              pageUrl,
+              runId,
+              browser,
+              async (p, m) => {
+                await updateCheckProgress("hamburger_menu", p, m)
+              },
+              themeType,
+            ).catch((e) => {
+              logger.error("Hamburger menu check failed:", e)
+              return lapse("hamburger_menu")(e)
             }),
           )
         }

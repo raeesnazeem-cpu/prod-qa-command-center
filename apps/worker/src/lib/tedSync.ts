@@ -410,8 +410,15 @@ export async function markAllTedTasksCompleted(
     if (parent) await postTedStatus(parent, TED_STATUS_COMPLETED, runId)
 
     if (run?.run_type === "internal_qa") {
-      const map: Record<string, string> = (run?.ted_subtask_map as any) || {}
-      for (const subtaskId of Object.values(map)) {
+      const map: Record<string, string | string[]> = (run?.ted_subtask_map as any) || {}
+      // A check can map to several subtasks; flatten + de-dupe. Tolerates the
+      // legacy one-to-one shape ({check: subtaskId}) too.
+      const subtaskIds = [
+        ...new Set(
+          Object.values(map).flatMap((v) => (Array.isArray(v) ? v : [v])),
+        ),
+      ]
+      for (const subtaskId of subtaskIds) {
         await postTedStatus(subtaskId, TED_STATUS_COMPLETED, runId).catch(
           () => {},
         )
@@ -1412,7 +1419,7 @@ export async function postSectionedReport(opts: {
     enabled_checks?: string[] | null
     site_url?: string | null
     run_type?: string | null
-    ted_subtask_map?: Record<string, string> | null
+    ted_subtask_map?: Record<string, string | string[]> | null
     project_id?: string | null
   } | null
   fixMap?: Map<string, FixReportInfo>
@@ -1523,8 +1530,12 @@ export async function postSectionedReport(opts: {
     // is silently dropped.
     const leftovers: typeof sections = []
     for (const sec of sections) {
-      const target = subtaskMap[sec.factor]
-      if (!target) {
+      const raw = subtaskMap[sec.factor]
+      // A check can belong to several section subtasks (e.g. false_breakpoint →
+      // Browser & Device AND Header & Breakpoints). Tolerate the legacy
+      // one-to-one shape ({check: subtaskId}) as well.
+      const targets = Array.isArray(raw) ? raw : raw ? [raw] : []
+      if (!targets.length) {
         leftovers.push(sec)
         continue
       }
@@ -1553,18 +1564,23 @@ export async function postSectionedReport(opts: {
           `(${breakdown}). ${opts.perTargetFix.pushClause}` +
           `${opts.perTargetFix.usingFallbackRepo ? " <em>(fallback repo)</em>" : ""}</p>`
       }
-      await postTedComment(
-        target,
-        header + sec.html,
-        `ext:${opts.eventKeyPrefix}-subtask-${runId}-${sec.factor}`,
-        {
-          runId,
-          projectId: runMeta?.project_id,
-          targetKind: "subtask",
-          checkFactor: sec.factor,
-          ...reportCtx,
-        },
-      ).catch(() => {})
+      // Post the section (results + fix banner) to EACH owning subtask. The
+      // idempotency key includes the subtask id so the same section landing on
+      // two subtasks isn't deduped into one.
+      for (const target of targets) {
+        await postTedComment(
+          target,
+          header + sec.html,
+          `ext:${opts.eventKeyPrefix}-subtask-${runId}-${sec.factor}-${target}`,
+          {
+            runId,
+            projectId: runMeta?.project_id,
+            targetKind: "subtask",
+            checkFactor: sec.factor,
+            ...reportCtx,
+          },
+        ).catch(() => {})
+      }
     }
     if (leftovers.length) {
       let body = titleHtml + (opts.summaryHeaderHtml || "") + `<br>`

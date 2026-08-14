@@ -1342,6 +1342,7 @@ const INTERNAL_QA_TARGET_TEMPLATE_KEY = "beta_site.internal_test"
 // parent task's subtasks (so the scan still runs the intended checks).
 const INTERNAL_QA_DEFAULT_CHECKS = [
   "functionality_check",
+  "hamburger_menu",
   "spelling",
   "grammar",
   "accessibility_check",
@@ -1350,19 +1351,48 @@ const INTERNAL_QA_DEFAULT_CHECKS = [
   "cross_browser",
 ]
 
-// Maps a beta_site.internal_test SUBTASK (by title) to a QACC check_factor.
-// Subtasks have no template key of their own and their ids vary per client, so
-// we match on the (normalized) title. Order matters: first matcher hit wins.
-// `matchers` are compared against the title lowercased with all non-alphanumeric
-// characters stripped (e.g. "Image Blur/Watermark" -> "imageblurwatermark").
-const INTERNAL_QA_SUBTASK_CHECKS: { check: string; matchers: string[] }[] = [
-  { check: "functionality_check", matchers: ["functionality"] },
-  { check: "spelling", matchers: ["spelling"] },
-  { check: "grammar", matchers: ["grammar"] },
-  { check: "accessibility_check", matchers: ["accessibility"] },
-  { check: "image_quality", matchers: ["imageblur", "watermark", "imagequality"] },
-  { check: "false_breakpoint", matchers: ["layout", "responsive", "breakpoint"] },
-  { check: "cross_browser", matchers: ["crossbrowser", "browsercompat"] },
+// The 7 Internal QA SECTION subtasks → the QACC checks that report into each.
+// Subtasks have no template key and their ids vary per client, so we match on
+// the normalized title (lowercased, all non-alphanumerics stripped, e.g.
+// "Functional & UI Testing" -> "functionaluitesting"). A check may belong to
+// more than one section (e.g. false_breakpoint → Browser&Device AND Header&
+// Breakpoints), so a single check can post back to MULTIPLE subtasks. Only
+// login-free checks appropriate for a beta-site scan are listed here
+// (backend_check etc. that need the WP admin password are intentionally omitted).
+const INTERNAL_QA_SECTIONS: { matchers: string[]; checks: string[] }[] = [
+  {
+    matchers: ["browserdeviceview", "browserdevice", "deviceview", "browser"],
+    checks: ["cross_browser", "false_breakpoint"],
+  },
+  {
+    matchers: ["functionaluitesting", "functionalui", "functional"],
+    checks: [
+      "functionality_check",
+      "hamburger_menu",
+      "spelling",
+      "grammar",
+      "accessibility_check",
+      "image_quality",
+      "dead_links",
+      "learn_more_buttons",
+      "favicon",
+      "callnow_links",
+      "top_bar_sticky",
+      "privacy_policy",
+      "footer_logo",
+    ],
+  },
+  {
+    matchers: ["urlmetadatasharing", "urlmetadata", "metadata", "sharing"],
+    checks: ["url_tab_compare", "text_share", "meta"],
+  },
+  { matchers: ["blogverification", "blog"], checks: ["url_tab_compare"] },
+  { matchers: ["mapaddress", "map"], checks: ["gbp_check"] },
+  { matchers: ["herosection", "hero"], checks: ["hero_media"] },
+  {
+    matchers: ["headerbreakpoints", "headerbreakpoint", "breakpoint"],
+    checks: ["false_breakpoint"],
+  },
 ]
 
 const normalizeTitle = (s: unknown): string =>
@@ -1479,28 +1509,35 @@ async function resolveInternalTestSubtasksFromTED(
   }
 }
 
-// Map discovered subtasks to QACC checks by title. Returns the
-// { check_factor: subtaskId } map plus the matched check list. Unmatched
-// subtask titles are logged (a renamed subtask must never fail silently).
+// Map discovered subtasks → QACC checks by SECTION title. Returns:
+//   • map:  check_factor -> [subtaskId, ...]  (a check may report to several
+//           subtasks; a subtask owns many checks)
+//   • matchedChecks: the de-duplicated union of all mapped checks — exactly the
+//           set the internal-QA scan runs, so it mirrors TED's checklist.
+//   • unmatched: subtask titles that matched no section (logged, never silent —
+//           a renamed section must be visible, not swallowed).
 function mapSubtasksToChecks(
   subtasks: { id: string; title: string }[],
-): { map: Record<string, string>; matchedChecks: string[]; unmatched: string[] } {
-  const map: Record<string, string> = {}
+): { map: Record<string, string[]>; matchedChecks: string[]; unmatched: string[] } {
+  const map: Record<string, string[]> = {}
   const unmatched: string[] = []
   for (const st of subtasks) {
     const norm = normalizeTitle(st.title)
-    const hit = INTERNAL_QA_SUBTASK_CHECKS.find((c) =>
-      c.matchers.some((m) => norm.includes(m)),
+    const section = INTERNAL_QA_SECTIONS.find((s) =>
+      s.matchers.some((m) => norm.includes(m)),
     )
-    if (hit) {
-      map[hit.check] = st.id
-    } else {
+    if (!section) {
       unmatched.push(st.title)
+      continue
+    }
+    for (const check of section.checks) {
+      if (!map[check]) map[check] = []
+      if (!map[check].includes(st.id)) map[check].push(st.id)
     }
   }
   if (unmatched.length) {
     console.log(
-      `⚠️ ${unmatched.length} internal-test subtask(s) did not map to a QACC check: ${unmatched.join(", ")}`,
+      `⚠️ ${unmatched.length} internal-test subtask(s) did not map to a section: ${unmatched.join(", ")}`,
     )
   }
   return { map, matchedChecks: Object.keys(map), unmatched }
@@ -1567,7 +1604,7 @@ webhookRouter.post(
     let targetTaskId: string | null = null
     // { check_factor: ted_subtask_id } for the parent's subtasks, and the
     // checks to actually run (defaults to the full suite until discovery runs).
-    let tedSubtaskMap: Record<string, string> = {}
+    let tedSubtaskMap: Record<string, string[]> = {}
     let internalQaChecks: string[] = INTERNAL_QA_DEFAULT_CHECKS
 
     try {
@@ -2014,7 +2051,8 @@ webhookRouter.post(
         // reflects that QACC picked it up. Per-subtask results + final status
         // are written by the worker when the run completes (tedSync).
         if (createdRunId && apiToken) {
-          const subtaskIds = Object.values(tedSubtaskMap)
+          // A check can map to several subtasks, so flatten + de-dupe the ids.
+          const subtaskIds = [...new Set(Object.values(tedSubtaskMap).flat())]
           for (const subId of subtaskIds) {
             await setTedTaskStatus(subId, "In Progress", apiToken, createdRunId)
           }

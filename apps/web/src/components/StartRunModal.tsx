@@ -293,6 +293,13 @@ export const StartRunModal = ({
         "Verify phone, email, social links in top bar, and ensure header remains sticky on scroll",
     },
     {
+      id: "hamburger_menu",
+      label: "Mobile Hamburger Menu Check",
+      description:
+        "At mobile width, open the hamburger menu and verify tabs are clickable, social/phone links are valid, and Book Now / Virtual Consultation buttons (if present) open. A passing criterion of Functional & UI Testing.",
+      category: "general",
+    },
+    {
       id: "favicon",
       label: "Favicon Check",
       description: "Verify favicon link is present in head and loads correctly",
