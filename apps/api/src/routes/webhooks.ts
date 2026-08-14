@@ -779,6 +779,147 @@ webhookRouter.post("/clerk", async (req: Request, res: Response) => {
   }
 })
 
+// =====================================================================
+// PRE-RELEASE (release.qa_pre) SUBTASK ROUTING
+// ---------------------------------------------------------------------
+// The pre-release checklist lives as SUBTASKS of the `release.qa_pre` parent
+// task ("Complete QA pre-release testing"). Their ids vary per client, so —
+// exactly like internal QA — we route ID-FREE: match each subtask by its
+// normalized title to a QACC check, remember the id we discovered at runtime,
+// and post that check's result back to it. Only the parent template key
+// (release.qa_pre) is fixed; nothing is hardcoded per client.
+const PRE_RELEASE_TARGET_TEMPLATE_KEY = "release.qa_pre"
+
+// The full pre-release suite, used as the FALLBACK when subtask discovery fails
+// (TED unreachable / no subtasks) so the scan still runs and reports to the
+// parent task only — i.e. the pre-release behavior that shipped before subtask
+// routing. When discovery succeeds, enabled_checks is derived from the map below.
+const PRE_RELEASE_DEFAULT_CHECKS = [
+  "project_plan",
+  "hero_media",
+  "dead_links",
+  "learn_more_buttons",
+  "paid_media",
+  "privacy_policy",
+  "footer_logo",
+  "single_script",
+  "url_tab_compare",
+  "top_bar_sticky",
+  "favicon",
+  "contact_form",
+  "chatbot_consultation",
+  "logo_chatbot",
+  "callnow_links",
+  "verify_plugin_updates",
+  "social_share_heading",
+  "false_breakpoint",
+  "backend_check",
+  "review_reputation_check",
+  "functionality_check",
+  "gbp_check",
+  "image_quality",
+  "cross_browser",
+]
+
+// The `release.qa_pre` SUBTASKS → the QACC check(s) that report into each.
+// Subtasks have no template key and their ids vary per client, so we match on
+// the normalized title (lowercased, all non-alphanumerics stripped — see
+// normalizeTitle). Matchers are deliberately SPECIFIC substrings so each
+// subtask matches exactly one section (first match wins, so order matters where
+// titles overlap — e.g. logo_chatbot before chatbot_consultation, since the
+// "logo on the chatbot" title also contains "chatbot"). A check may map to more
+// than one subtask (e.g. gbp_check → "Map address" AND "GBP"; false_breakpoint →
+// "smaller resolution" AND "false breaking point"); postSectionedReport posts
+// that check's section to every owning subtask. Subtasks with no automated
+// check (Video, Blogs, Accelerator reviews) are intentionally absent — a human
+// still owns those. Mirrors INTERNAL_QA_SECTIONS.
+const PRE_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
+  // Logo-on-chatbot MUST precede chatbot_consultation: its title also says
+  // "chatbot", so it would otherwise be swallowed by the chatbot section.
+  { matchers: ["websitelogo", "addedtothechatbot"], checks: ["logo_chatbot"] },
+  { matchers: ["chatbot", "virtualconsultation"], checks: ["chatbot_consultation"] },
+  { matchers: ["functionalitytesting"], checks: ["functionality_check"] },
+  // "Smaller resolution screen" is briefed to cover BOTH a false breakpoint and
+  // the sticky top bar at that width.
+  {
+    matchers: ["smallerresolution", "resolutionscreen"],
+    checks: ["false_breakpoint", "top_bar_sticky"],
+  },
+  { matchers: ["breakingpoint", "falsebreaking"], checks: ["false_breakpoint"] },
+  { matchers: ["topbar", "stickyheader"], checks: ["top_bar_sticky"] },
+  { matchers: ["contactform"], checks: ["contact_form"] },
+  { matchers: ["tabname", "urlismatching"], checks: ["url_tab_compare"] },
+  { matchers: ["contactdetails"], checks: ["callnow_links"] },
+  { matchers: ["businessname", "sharingwebsiteontext"], checks: ["text_share"] },
+  { matchers: ["watermark", "notblurry"], checks: ["image_quality"] },
+  { matchers: ["favicon"], checks: ["favicon"] },
+  { matchers: ["hamburger"], checks: ["hamburger_menu"] },
+  { matchers: ["learnmore", "readmore"], checks: ["learn_more_buttons"] },
+  { matchers: ["reputation"], checks: ["review_reputation_check"] },
+  { matchers: ["backend"], checks: ["backend_check"] },
+  { matchers: ["plugin"], checks: ["verify_plugin_updates"] },
+  { matchers: ["singlescript"], checks: ["single_script"] },
+  { matchers: ["paidmedia"], checks: ["paid_media"] },
+  { matchers: ["mapaddress", "gmb", "gbp"], checks: ["gbp_check"] },
+  { matchers: ["deadlink"], checks: ["dead_links"] },
+  { matchers: ["footerlogo"], checks: ["footer_logo"] },
+  { matchers: ["privacypolicy"], checks: ["privacy_policy"] },
+  { matchers: ["herosection", "fallbackimage"], checks: ["hero_media"] },
+]
+
+// =====================================================================
+// POST-RELEASE (release.qa_post) SUBTASK ROUTING
+// ---------------------------------------------------------------------
+// Same ID-free, title-based routing as pre-release / internal QA, but for the
+// `release.qa_post` parent's checklist subtasks. Post-release scans the client's
+// LIVE site, so its check set differs (GSR, ADA/accessibility, Grammarly,
+// PageSpeed, live-site-link, plugin count, etc.).
+const POST_RELEASE_TARGET_TEMPLATE_KEY = "release.qa_post"
+
+// The full post-release suite, used as the FALLBACK when subtask discovery
+// fails — i.e. the exact suite that shipped before subtask routing, reporting to
+// the parent task only. When discovery succeeds, enabled_checks is derived from
+// the map below (+ always-on cross_browser).
+const POST_RELEASE_DEFAULT_CHECKS = [
+  "gsr_check",
+  "accessibility_check",
+  "spelling",
+  "grammar",
+  "live_site_link",
+  "functionality_check",
+  "cross_browser",
+  "plugin_number",
+  "verify_plugin_updates",
+  "page_speed",
+]
+
+// The `release.qa_post` SUBTASKS → the QACC check(s) that report into each,
+// matched on normalized title (see normalizeTitle). Matchers are SPECIFIC so
+// each subtask matches exactly one section. Subtasks with no safe automated
+// check are intentionally absent — a human owns those: "Desktop & Mobile View
+// Video", "Send email to client", "Verify backup size", and "Two-Way Text
+// Setup". #21985 ("G99 Contact form, ChatBot and VC") maps to chatbot_consultation
+// ONLY — the contact_form check submits a real test lead, which is unsafe on a
+// live production site, so form verification stays a human check. Mirrors
+// PRE_RELEASE_SECTIONS.
+const POST_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
+  { matchers: ["testthelive", "livewebsite"], checks: ["functionality_check"] },
+  { matchers: ["gsr"], checks: ["gsr_check"] },
+  { matchers: ["grammarly"], checks: ["grammar", "spelling"] },
+  { matchers: ["ada", "accessibility"], checks: ["accessibility_check"] },
+  { matchers: ["speedoptimization"], checks: ["page_speed"] },
+  // "total number of plugins" → informational count; keep BEFORE any generic
+  // plugin matcher and distinct from "all plug-ins are updated".
+  { matchers: ["numberofplugins", "totalnumber"], checks: ["plugin_number"] },
+  { matchers: ["pluginsareupdated"], checks: ["verify_plugin_updates"] },
+  // "Cross verify the live site link (Domain Name)" → the live_site_link check
+  // asserts the released URL matches the client-notes domain.
+  { matchers: ["livesitelink", "domainname"], checks: ["live_site_link"] },
+  // "G99 Contact form, ChatBot and VC" → chatbot/VC detection only (no live
+  // contact-form submission — see header note).
+  { matchers: ["chatbot"], checks: ["chatbot_consultation"] },
+]
+
 // --- TED Webhook Receiver ---
 // This endpoint will be available at POST /webhooks/ted
 webhookRouter.post("/ted", async (req: Request, res: Response) => {
@@ -948,6 +1089,16 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
         )
         console.log("Task Data:", task)
 
+        // The release.qa_pre task QACC routes results back to, and the
+        // { check_factor: [subtaskId, ...] } map for its checklist subtasks.
+        // Hoisted here so the talk-back block below (outside `if (clientName)`)
+        // can mark the parent + each mapped subtask "In Progress". Defaults to
+        // the task TED handed us; refined by template-key resolution below.
+        let preReleaseTaskId: string | null = actionableTaskId
+          ? String(actionableTaskId)
+          : null
+        let preReleaseSubtaskMap: Record<string, string[]> = {}
+
         // --- MATCH PROJECT & START QA RUN ---
         if (clientName) {
           console.log(
@@ -966,6 +1117,44 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             console.log(
               `ℹ️ pre-release: beta_site.env pair not usable (url=${betaUrl || "none"}, repo=${betaRepo || "none"}) → forcing demo site.`,
             )
+
+          // Resolve the release.qa_pre task (client-agnostic, by template key)
+          // that owns the pre-release checklist subtasks; fall back to the task
+          // TED handed us. TED's pre_dev trigger doesn't always include the
+          // qa_pre sibling, so resolving by template key is what makes the
+          // routing reliable across clients.
+          preReleaseTaskId =
+            (await resolveTaskIdByTemplateKeyFromTED(
+              task.clientId,
+              PRE_RELEASE_TARGET_TEMPLATE_KEY,
+              /pre-?release/i,
+            )) || preReleaseTaskId
+
+          // Discover that task's subtasks and map each to a QACC check by title
+          // (same ID-free routing as internal QA). QACC then runs exactly the
+          // checks that map to a subtask (mirroring TED's checklist) plus
+          // always-on cross_browser, and remembers which subtask each check
+          // reports back to. If nothing is discovered, fall back to the full
+          // pre-release suite and report to the parent task only (no regression).
+          let preReleaseChecks: string[] = PRE_RELEASE_DEFAULT_CHECKS
+          const preSubtasks = await resolveTaskSubtasksFromTED(
+            payload,
+            preReleaseTaskId,
+          )
+          const preMapped = mapSubtasksToChecks(preSubtasks, PRE_RELEASE_SECTIONS)
+          if (preMapped.matchedChecks.length) {
+            preReleaseSubtaskMap = preMapped.map
+            preReleaseChecks = preMapped.matchedChecks.includes("cross_browser")
+              ? preMapped.matchedChecks
+              : [...preMapped.matchedChecks, "cross_browser"]
+            console.log(
+              `🧭 Pre-release subtask map: ${JSON.stringify(preMapped.map)} — running checks: ${preReleaseChecks.join(", ")}`,
+            )
+          } else {
+            console.log(
+              "ℹ️ No pre-release subtasks mapped — running the default suite and reporting to the parent task only.",
+            )
+          }
 
           // 1. Look for a project in QACC where the name exactly matches the TED clientName
           let { data: project } = await supabase
@@ -1141,7 +1330,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             // this webhook (status is in the accept list) — without this, that
             // re-entry spawns a duplicate run, report, AI-fix pass and PR.
             // Window via TED_RUN_DEDUPE_HOURS (default 6).
-            if (actionableTaskId) {
+            if (preReleaseTaskId) {
               const dedupeHours = Number(process.env.TED_RUN_DEDUPE_HOURS || 6)
               const since = new Date(
                 Date.now() - dedupeHours * 3600 * 1000,
@@ -1149,12 +1338,12 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
               const { data: recentRuns } = await supabase
                 .from("qa_runs")
                 .select("id, created_at")
-                .eq("ted_task_id", String(actionableTaskId))
+                .eq("ted_task_id", String(preReleaseTaskId))
                 .gte("created_at", since)
                 .limit(1)
               if (recentRuns && recentRuns.length > 0) {
                 console.log(
-                  `[TED webhook] Duplicate suppressed: run ${recentRuns[0].id} already exists for TED task ${actionableTaskId} within ${dedupeHours}h`,
+                  `[TED webhook] Duplicate suppressed: run ${recentRuns[0].id} already exists for TED task ${preReleaseTaskId} within ${dedupeHours}h`,
                 )
                 return res.status(200).json({
                   status: "duplicate_suppressed",
@@ -1175,37 +1364,18 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 // what gets scanned is what THIS webhook resolves, independent of
                 // whatever URL happens to be saved under the project's name.
                 site_url: tedSiteUrl || TED_FALLBACK_SITE_URL,
-                enabled_checks: [
-                  "project_plan",
-                  "hero_media",
-                  "dead_links",
-                  "learn_more_buttons",
-                  "paid_media",
-                  "privacy_policy",
-                  "footer_logo",
-                  "single_script",
-                  "url_tab_compare",
-                  "top_bar_sticky",
-                  "favicon",
-                  "contact_form",
-                  "chatbot_consultation",
-                  "logo_chatbot",
-                  "callnow_links",
-                  "verify_plugin_updates",
-                  "social_share_heading",
-                  // New QACC checks (added to the automated pre-release suite)
-                  "false_breakpoint",
-                  "backend_check",
-                  "review_reputation_check",
-                  "functionality_check",
-                  "gbp_check",
-                  "image_quality",
-                  "cross_browser",
-                ],
+                // Checks the discovered release.qa_pre subtasks mapped to
+                // (mirroring TED's checklist) + always-on cross_browser, or the
+                // full pre-release suite as a fallback when nothing was mapped.
+                enabled_checks: preReleaseChecks,
+                // { check_factor: [subtaskId, ...] } so the worker posts each
+                // check's result back to its own subtask. Empty {} when no
+                // subtasks were discovered → the worker reports to the parent only.
+                ted_subtask_map: preReleaseSubtaskMap,
                 device_matrix: ["desktop", "mobile"],
                 status: "running",
                 created_by: runCreatorId, // Assigns to the actual person from TED, or the Ghost User
-                ted_task_id: actionableTaskId ? String(actionableTaskId) : null,
+                ted_task_id: preReleaseTaskId ? String(preReleaseTaskId) : null,
               })
               .select()
               .single()
@@ -1234,20 +1404,34 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
           }
         }
 
-        // Talk back to the target QA task (e.g. release.qa_pre / 9081) when TED
-        // provided one, otherwise the trigger task itself.
-        const taskId = actionableTaskId
+        // Talk back to the resolved release.qa_pre task (client-agnostic),
+        // falling back to whatever task TED handed us.
+        const taskId = preReleaseTaskId
         const apiToken = process.env.TED_API_TOKEN
 
         // --- MARK THE TARGET QA TASK "In Progress" ---
         // Only when the scan actually started (createdRunId set). QACC never
-        // marks it Complete — a human closes it out after the remaining manual
-        // work, so it deliberately stays "In Progress" once the scan finishes.
+        // marks the PARENT Complete here — a human closes it out after the
+        // remaining manual work, so it deliberately stays "In Progress".
         if (createdRunId && taskId && apiToken) {
           console.log(
             `🔄 Marking TED Task #${taskId} as "In Progress" (QACC scan started)...`,
           )
           await setTedTaskStatus(taskId, "In Progress", apiToken, createdRunId)
+        }
+
+        // Mark each mapped checklist subtask "In Progress" too, so the whole
+        // release.qa_pre checklist reflects that QACC picked it up. Per-subtask
+        // results + the final Completed status are written by the worker when
+        // the run finishes (tedSync). Mirrors internal QA.
+        if (createdRunId && apiToken) {
+          // A check can map to several subtasks, so flatten + de-dupe the ids.
+          const subtaskIds = [
+            ...new Set(Object.values(preReleaseSubtaskMap).flat()),
+          ]
+          for (const subId of subtaskIds) {
+            await setTedTaskStatus(subId, "In Progress", apiToken, createdRunId)
+          }
         }
 
         if (taskId) {
@@ -1386,7 +1570,7 @@ const INTERNAL_QA_SECTIONS: { matchers: string[]; checks: string[] }[] = [
     matchers: ["urlmetadatasharing", "urlmetadata", "metadata", "sharing"],
     checks: ["url_tab_compare", "text_share", "meta"],
   },
-  { matchers: ["blogverification", "blog"], checks: ["url_tab_compare"] },
+  { matchers: ["blogverification", "blog"], checks: ["blog_verification", "url_tab_compare"] },
   { matchers: ["mapaddress", "map"], checks: ["gbp_check"] },
   { matchers: ["herosection", "hero"], checks: ["hero_media"] },
   {
@@ -1431,11 +1615,12 @@ function findSubtaskArray(root: any): any[] | null {
   return best.length ? best : null
 }
 
-// Resolve the subtasks of the beta_site.internal_test parent, client-agnostic.
+// Resolve the subtasks of a parent task, client-agnostic. Shared by internal QA
+// (beta_site.internal_test) and pre-release (release.qa_pre).
 // Primary: scan the webhook payload (TED's "Include all subtasks in payload"
-// toggle). Fallback: GET /api/tasks/{parentTaskId} and scan that. When nothing
-// is found we log the actual shape (truncated) so the payload key can be seen.
-async function resolveInternalTestSubtasksFromTED(
+// toggle). Fallback: GET /api/tasks/{parentTaskId}/subtasks and scan that. When
+// nothing is found we log the actual shape (truncated) so the payload key can be seen.
+async function resolveTaskSubtasksFromTED(
   payload: any,
   parentTaskId: string | null,
 ): Promise<{ id: string; title: string; status: string | null }[]> {
@@ -1449,7 +1634,7 @@ async function resolveInternalTestSubtasksFromTED(
     }[]
     if (subs.length) {
       console.log(
-        `📋 Found ${subs.length} internal-test subtask(s) in the webhook payload: ${subs
+        `📋 Found ${subs.length} subtask(s) in the webhook payload: ${subs
           .map((s) => `#${s.id} "${s.title}"`)
           .join(", ")}`,
       )
@@ -1497,14 +1682,14 @@ async function resolveInternalTestSubtasksFromTED(
       )
     } else {
       console.log(
-        `📋 Fetched ${subs.length} internal-test subtask(s) from TED /api/tasks/${parentTaskId}/subtasks: ${subs
+        `📋 Fetched ${subs.length} subtask(s) from TED /api/tasks/${parentTaskId}/subtasks: ${subs
           .map((s) => `#${s.id} "${s.title}"`)
           .join(", ")}`,
       )
     }
     return subs
   } catch (err) {
-    console.error("❌ Error fetching internal-test subtasks from TED:", err)
+    console.error("❌ Error fetching subtasks from TED:", err)
     return []
   }
 }
@@ -1518,12 +1703,13 @@ async function resolveInternalTestSubtasksFromTED(
 //           a renamed section must be visible, not swallowed).
 function mapSubtasksToChecks(
   subtasks: { id: string; title: string }[],
+  sections: { matchers: string[]; checks: string[] }[],
 ): { map: Record<string, string[]>; matchedChecks: string[]; unmatched: string[] } {
   const map: Record<string, string[]> = {}
   const unmatched: string[] = []
   for (const st of subtasks) {
     const norm = normalizeTitle(st.title)
-    const section = INTERNAL_QA_SECTIONS.find((s) =>
+    const section = sections.find((s) =>
       s.matchers.some((m) => norm.includes(m)),
     )
     if (!section) {
@@ -1776,11 +1962,14 @@ webhookRouter.post(
           // mirrors TED's checklist) and remembers which subtask each check
           // reports back to. If nothing is discovered, fall back to the full
           // internal-QA suite and report only to the parent task (no regression).
-          const subtasks = await resolveInternalTestSubtasksFromTED(
+          const subtasks = await resolveTaskSubtasksFromTED(
             payload,
             targetTaskId,
           )
-          const { map, matchedChecks } = mapSubtasksToChecks(subtasks)
+          const { map, matchedChecks } = mapSubtasksToChecks(
+            subtasks,
+            INTERNAL_QA_SECTIONS,
+          )
           if (matchedChecks.length) {
             tedSubtaskMap = map
             internalQaChecks = matchedChecks
@@ -2143,6 +2332,9 @@ webhookRouter.post(
     // The scan task QACC operates on for post-release = release.qa_post (NOT the
     // release.security trigger). Resolved from the client's tasks below.
     let scanTaskId: string | null = null
+    // { check_factor: [subtaskId, ...] } for the release.qa_post checklist
+    // subtasks. Hoisted so the talk-back block can mark each subtask In Progress.
+    let postReleaseSubtaskMap: Record<string, string[]> = {}
 
     try {
       // 1. Read the body safely (Express may hand us a Buffer, object, or string)
@@ -2295,10 +2487,39 @@ webhookRouter.post(
           scanTaskId =
             (await resolveTaskIdByTemplateKeyFromTED(
               task.clientId,
-              "release.qa_post",
+              POST_RELEASE_TARGET_TEMPLATE_KEY,
               /post-?release testing/i,
             )) ||
             (targetTask?.id ? String(targetTask.id) : null)
+
+          // Discover the release.qa_post checklist subtasks and map each to a
+          // QACC check by title (same ID-free routing as pre-release / internal
+          // QA). QACC runs exactly the checks that map to a subtask (mirroring
+          // TED's checklist) + always-on cross_browser, and remembers which
+          // subtask each check reports back to. Falls back to the full
+          // post-release suite → parent-only report when nothing is discovered.
+          let postReleaseChecks: string[] = POST_RELEASE_DEFAULT_CHECKS
+          const postSubtasks = await resolveTaskSubtasksFromTED(
+            payload,
+            scanTaskId,
+          )
+          const postMapped = mapSubtasksToChecks(
+            postSubtasks,
+            POST_RELEASE_SECTIONS,
+          )
+          if (postMapped.matchedChecks.length) {
+            postReleaseSubtaskMap = postMapped.map
+            postReleaseChecks = postMapped.matchedChecks.includes("cross_browser")
+              ? postMapped.matchedChecks
+              : [...postMapped.matchedChecks, "cross_browser"]
+            console.log(
+              `🧭 Post-release subtask map: ${JSON.stringify(postMapped.map)} — running checks: ${postReleaseChecks.join(", ")}`,
+            )
+          } else {
+            console.log(
+              "ℹ️ No post-release subtasks mapped — running the default suite and reporting to the parent task only.",
+            )
+          }
 
           // The project must already exist in QACC (per requirement).
           const { data: project } = await supabase
@@ -2409,18 +2630,13 @@ webhookRouter.post(
                 project_id: project.id,
                 run_type: "post_release",
                 site_url: runSiteUrl,
-                enabled_checks: [
-                  "gsr_check", // row 01
-                  "accessibility_check", // row 02
-                  "spelling", // row 05 (Grammarly)
-                  "grammar", // row 05 (Grammarly)
-                  "live_site_link", // row 06
-                  "functionality_check", // row 07
-                  "cross_browser", // row 07 (live-site smoke)
-                  "plugin_number", // row 12
-                  "verify_plugin_updates", // row 13
-                  "page_speed", // PageSpeed Insights (speed optimization)
-                ],
+                // Checks the discovered release.qa_post subtasks mapped to
+                // (mirroring TED's checklist) + always-on cross_browser, or the
+                // full post-release suite as a fallback when nothing was mapped.
+                enabled_checks: postReleaseChecks,
+                // { check_factor: [subtaskId, ...] } so the worker posts each
+                // check's result back to its own subtask; empty {} → parent only.
+                ted_subtask_map: postReleaseSubtaskMap,
                 device_matrix: ["desktop"],
                 status: "running",
                 created_by: runCreatorId,
@@ -2477,6 +2693,18 @@ webhookRouter.post(
             `🔄 Marking TED Task #${taskId} as "In Progress" (post-release scan started)...`,
           )
           await setTedTaskStatus(taskId, "In Progress", apiToken, createdRunId)
+        }
+
+        // Mark each mapped checklist subtask "In Progress" too. Per-subtask
+        // results + the final Completed status are written by the worker when
+        // the run finishes (tedSync). Mirrors pre-release / internal QA.
+        if (createdRunId && apiToken) {
+          const subtaskIds = [
+            ...new Set(Object.values(postReleaseSubtaskMap).flat()),
+          ]
+          for (const subId of subtaskIds) {
+            await setTedTaskStatus(subId, "In Progress", apiToken, createdRunId)
+          }
         }
 
         if (taskId) {

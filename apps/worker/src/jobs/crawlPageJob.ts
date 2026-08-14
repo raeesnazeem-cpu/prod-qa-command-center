@@ -27,6 +27,7 @@ import { checkBackend } from "../checks/backendCheck"
 import { checkReviewReputation } from "../checks/reviewReputationCheck"
 import { checkFunctionality } from "../checks/functionalityCheck"
 import { checkHamburgerMenu } from "../checks/hamburgerMenuCheck"
+import { checkBlogVerification } from "../checks/blogVerificationCheck"
 import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
@@ -651,6 +652,16 @@ export async function processCrawlPageJob(job: Job) {
             ).catch((e) => {
               logger.error("Hamburger menu check failed:", e)
               return lapse("hamburger_menu")(e)
+            }),
+          )
+        }
+
+        await Promise.all(checkPromises)
+        if (enabledChecks.includes("blog_verification")) {
+          checkPromises.push(
+            checkBlogVerification(pageUrl, runId).catch((e) => {
+              logger.error("Blog verification check failed:", e)
+              return lapse("blog_verification")(e)
             }),
           )
         }

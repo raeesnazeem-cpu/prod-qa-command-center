@@ -409,20 +409,23 @@ export async function markAllTedTasksCompleted(
     const parent = parentTaskId || (run?.ted_task_id as string | undefined)
     if (parent) await postTedStatus(parent, TED_STATUS_COMPLETED, runId)
 
-    if (run?.run_type === "internal_qa") {
-      const map: Record<string, string | string[]> = (run?.ted_subtask_map as any) || {}
-      // A check can map to several subtasks; flatten + de-dupe. Tolerates the
-      // legacy one-to-one shape ({check: subtaskId}) too.
-      const subtaskIds = [
-        ...new Set(
-          Object.values(map).flatMap((v) => (Array.isArray(v) ? v : [v])),
-        ),
-      ]
-      for (const subtaskId of subtaskIds) {
-        await postTedStatus(subtaskId, TED_STATUS_COMPLETED, runId).catch(
-          () => {},
-        )
-      }
+    // Close out every mapped checklist subtask, for ANY run that carries a
+    // subtask map — internal QA (beta_site.internal_test) and pre-release
+    // (release.qa_pre) both do; post-release has no map, so this is a no-op
+    // there. Keying off the map (not run_type) keeps this correct as more
+    // run types adopt subtask routing.
+    const map: Record<string, string | string[]> = (run?.ted_subtask_map as any) || {}
+    // A check can map to several subtasks; flatten + de-dupe. Tolerates the
+    // legacy one-to-one shape ({check: subtaskId}) too.
+    const subtaskIds = [
+      ...new Set(
+        Object.values(map).flatMap((v) => (Array.isArray(v) ? v : [v])),
+      ),
+    ]
+    for (const subtaskId of subtaskIds) {
+      await postTedStatus(subtaskId, TED_STATUS_COMPLETED, runId).catch(
+        () => {},
+      )
     }
     logger.info({ runId, parent }, "Marked TED tasks Completed for finished run.")
   } catch (e: any) {

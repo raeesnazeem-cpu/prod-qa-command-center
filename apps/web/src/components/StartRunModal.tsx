@@ -300,6 +300,13 @@ export const StartRunModal = ({
       category: "general",
     },
     {
+      id: "blog_verification",
+      label: "Blog Verification",
+      description:
+        "Verify the beta site's blogs against the live site (all live blogs present, sidebar widget, matching URLs). Placeholder: currently reports FAILED — no live site URL available to compare against yet.",
+      category: "general",
+    },
+    {
       id: "favicon",
       label: "Favicon Check",
       description: "Verify favicon link is present in head and loads correctly",
