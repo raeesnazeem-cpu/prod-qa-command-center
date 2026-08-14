@@ -2466,8 +2466,22 @@ export async function checkSocialShareHeading(
 
 /**
  * =========================================================================
- * CHECK: Logo on Chatbot Check
+ * CHECK: Logo on Chatbot Check (homepage, AI-vision)
  * =========================================================================
+ * The chatbot launcher is a circular toggle pinned to the bottom-right/left of
+ * the homepage; it carries the client's brand logo. This check:
+ *   1. loads the homepage (only) with Playwright and locates that circular
+ *      toggle in a bottom corner,
+ *   2. also captures the site's MAIN header logo (the reference),
+ *   3. screenshots JUST the toggle and uploads a thumbnail,
+ *   4. asks an AI vision model whether the toggle icon is the SAME BRAND as the
+ *      header logo — allowing variations (icon/symbol only, wordmark only, or a
+ *      simplified mark of the full logo). The client name is supplementary
+ *      context only.
+ *
+ * PASS only when vision judges the toggle shows the same brand as the header
+ * logo. No toggle / no logo → FAIL. A different company's logo → FAIL. Toggle
+ * and header-logo thumbnails are attached in every case.
  */
 export async function checkLogoOnChatbot(
   url: string,
@@ -2475,154 +2489,191 @@ export async function checkLogoOnChatbot(
   pageId: string,
   sharedBrowser?: any,
   onProgress?: (progress: number, message: string) => Promise<void>,
+  projectId?: string,
 ): Promise<Finding[]> {
   const { chromium } = require("playwright")
+  const sharp = require("sharp")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
+  const { describeImage } = require("../lib/aiFallback")
+  const { supabase } = require("../lib/supabase")
 
-  let codeScreenshotUrl = ""
-  let homepageScreenshotUrl = ""
-  let openChatbotScreenshotUrl = ""
-  let isChatbotActive = false
+  const CHECK_FACTOR = "logo_chatbot"
+  // Circular launcher toggles vary per embed; cover the Growth99 ids/classes
+  // plus generic "chat/bot launcher/widget/button" hooks.
+  const LAUNCHER_SELECTOR =
+    "#g99-chatbot-launcher, .g99-chatbot-launcher, #g99-chatbot-button, #cliffhanger-button, [class*='chatbot-launcher'], #chatbot-icon-div-tracker, .chat-bot-icon, [class*='chat'][class*='launcher'], [id*='chat'][id*='launcher'], [class*='chatbot'], [id*='chatbot'], [aria-label*='chat' i]"
 
+  // Resolve the client's name so vision can judge "is this THAT client's logo".
+  let clientName = ""
+  if (projectId) {
+    try {
+      const { data: project } = await supabase
+        .from("projects")
+        .select("name")
+        .eq("id", projectId)
+        .single()
+      clientName = project?.name || ""
+    } catch {}
+  }
+
+  // Shrink any buffer to a thumbnail (attached in every outcome).
+  const thumb = async (buf: Buffer, name: string): Promise<string> => {
+    try {
+      const t = await sharp(buf)
+        .resize({ width: 240, height: 240, fit: "inside", withoutEnlargement: true })
+        .png()
+        .toBuffer()
+      return await uploadScreenshot(t, `${runId}/${pageId}/${name}.png`).catch(() => "")
+    } catch {
+      return ""
+    }
+  }
+
+  let browser: any = null
+  let context: any = null
   try {
-    const browser = sharedBrowser || (await chromium.launch({ headless: true }))
-    const context = await browser.newContext({
+    browser = sharedBrowser || (await chromium.launch({ headless: true }))
+    context = await browser.newContext({
       viewport: { width: 1920, height: 1080 },
       userAgent:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     })
-
     const page = await context.newPage()
-    if (onProgress)
-      await onProgress(
-        10,
-        "Navigating to homepage for Logo on Chatbot check...",
-      )
 
-    await page
-      .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-      .catch(() => {})
-    await page.evaluate(() => window.scrollBy(0, 500)).catch(() => {})
-    await page.waitForTimeout(5000)
+    if (onProgress) await onProgress(10, "Loading homepage for chatbot logo check...")
+    await page.goto(url, { waitUntil: "networkidle", timeout: 30000 }).catch(() => {})
+    // Let a lazily-injected launcher mount.
+    await page.waitForTimeout(6000)
 
-    if (onProgress)
-      await onProgress(30, "Checking if chatbot script is present...")
+    if (onProgress) await onProgress(40, "Locating the chatbot toggle...")
+    const launcher = page.locator(LAUNCHER_SELECTOR).first()
+    const found = await launcher
+      .waitFor({ state: "visible", timeout: 12000 })
+      .then(() => true)
+      .catch(() => false)
 
-    // Check script
-    const codeSnippet = await page.evaluate(() => {
-      const scriptEl = document.querySelector(
-        'script[src*="chatbot.growth99.com/assets/js/integration.js"]',
-      )
-      if (scriptEl) {
-        const prevEl = scriptEl.previousElementSibling
-        return (prevEl ? prevEl.outerHTML + "\n" : "") + scriptEl.outerHTML
-      }
-      return null
-    })
-
-    if (codeSnippet) {
-      isChatbotActive = true
-      if (onProgress)
-        await onProgress(40, "Taking screenshot of the chatbot script...")
-
-      const codeContext = await browser.newContext()
-      const renderPage = await codeContext.newPage()
-      await renderPage.setContent(
-        `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
-      )
-      const codeBuffer = await renderPage.screenshot({ fullPage: false })
-      codeScreenshotUrl = await uploadScreenshot(
-        codeBuffer,
-        `${runId}/${pageId}/logo_chatbot_code.png`,
-      )
-      await codeContext.close()
-    } else {
-      isChatbotActive = false
+    // No toggle → FAIL, with a bottom-corner homepage thumbnail as evidence.
+    if (!found) {
+      const hp = await page.screenshot({ fullPage: false }).catch(() => null)
+      const shot = hp ? await thumb(hp, "logo_chatbot_none") : ""
+      return [
+        {
+          check_factor: CHECK_FACTOR,
+          title: "No chatbot logo found",
+          description:
+            "No chatbot toggle was found in the bottom corner of the homepage, so the client's logo could not be verified on it.",
+          context_text: `Homepage: ${url}\nChatbot toggle: not found`,
+          screenshot_url: shot || null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
     }
 
-    if (onProgress)
-      await onProgress(60, "Taking screenshot of the homepage for chatbot...")
-    const hpBuffer = await page.screenshot({ fullPage: false })
-    homepageScreenshotUrl = await uploadScreenshot(
-      hpBuffer,
-      `${runId}/${pageId}/logo_chatbot_homepage.png`,
-    )
+    if (onProgress) await onProgress(60, "Capturing the chatbot toggle...")
+    await launcher.scrollIntoViewIfNeeded().catch(() => {})
+    const iconBuf: Buffer | null = await launcher.screenshot().catch(() => null)
+    const iconShot = iconBuf ? await thumb(iconBuf, "logo_chatbot_icon") : ""
 
-    if (isChatbotActive) {
-      if (onProgress)
-        await onProgress(
-          75,
-          "Waiting for chatbot icon to appear and clicking...",
-        )
-
-      const chatbotLauncher = page.locator(
-        "#g99-chatbot-launcher, .g99-chatbot-launcher, #g99-chatbot-button, #cliffhanger-button, [class*='chatbot-launcher'], #chatbot-icon-div-tracker, .chat-bot-icon",
-      )
-
-      try {
-        // Actively wait for the element to appear in the DOM (up to 15 seconds)
-        await chatbotLauncher
-          .first()
-          .waitFor({ state: "attached", timeout: 15000 })
-
-        // Click the launcher to open the chatbot
-        await chatbotLauncher
-          .first()
-          .click({ timeout: 5000 })
-          .catch(() => {})
-
-        // Wait 5 seconds for the chatbot animation/modal to fully open
-        await page.waitForTimeout(5000)
-
-        // Take the screenshot of the open chatbot
-        const openBuffer = await page.screenshot({ fullPage: false })
-        openChatbotScreenshotUrl = await uploadScreenshot(
-          openBuffer,
-          `${runId}/${pageId}/logo_chatbot_open.png`,
-        )
-      } catch (e) {
-        console.error(
-          "Chatbot launcher did not appear in time or could not be clicked",
-          e,
-        )
-      }
+    if (!iconBuf) {
+      return [
+        {
+          check_factor: CHECK_FACTOR,
+          title: "Logo on Chatbot Check Failed",
+          description:
+            "The chatbot toggle was located but its screenshot could not be captured. Process aborted gracefully; QACC will retry on the next run.",
+          context_text: "System Error (toggle capture)",
+          screenshot_url: null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
     }
 
-    if (onProgress) await onProgress(90, "Finalizing findings...")
-    await context.close()
-    if (!sharedBrowser) await browser.close()
-  } catch (e: any) {
-    console.error("Logo on chatbot screenshot failed", e)
+    // Capture the site's MAIN header logo as the reference to compare against.
+    // Ordered specific → generic; first selector with a visible match wins so a
+    // hero/nav image doesn't get mistaken for the logo.
+    if (onProgress) await onProgress(70, "Capturing the header logo (reference)...")
+    const HEADER_LOGO_SELECTORS = [
+      ".custom-logo",
+      ".wp-block-site-logo img",
+      "header a[href='/'] img, header a[href$='/'] img",
+      "[role='banner'] img[alt*='logo' i], header img[alt*='logo' i]",
+      "img[class*='logo' i], [class*='logo' i] img",
+      "header img, [role='banner'] img, .site-header img, #masthead img, nav img",
+    ]
+    let headerBuf: Buffer | null = null
+    for (const sel of HEADER_LOGO_SELECTORS) {
+      const loc = page.locator(sel).first()
+      const vis = await loc.isVisible().catch(() => false)
+      if (!vis) continue
+      headerBuf = await loc.screenshot().catch(() => null)
+      if (headerBuf) break
+    }
+    const headerShot = headerBuf ? await thumb(headerBuf, "logo_chatbot_header") : ""
+
+    if (onProgress) await onProgress(85, "Comparing chatbot logo to the header logo (AI vision)...")
+    // Prefer the two-image comparison (header logo vs toggle); fall back to a
+    // name-based judgment when the header logo couldn't be captured.
+    const buffers: Buffer[] = headerBuf ? [headerBuf, iconBuf] : [iconBuf]
+    const nameCtx = clientName ? ` The business is "${clientName}".` : ""
+    const prompt = headerBuf
+      ? `Image 1 is a website's MAIN header logo. Image 2 is the circular chatbot toggle icon from the same site.${nameCtx} Do they represent the SAME brand? The chatbot icon may be a VARIATION of the main logo — the symbol/icon alone, the wordmark alone, or a simplified mark — and that still counts as a match. It is NOT a match if image 2 is a generic chat/speech-bubble icon, empty, or a DIFFERENT company's logo. Answer on the FIRST line with exactly MATCH or NO_MATCH, then a second line with a one-sentence reason.`
+      : `This is the circular chatbot toggle from a website's homepage.${nameCtx} Does it show the website owner's own brand logo/mark (or a variation of it — icon or wordmark alone), as opposed to no logo, a generic chat/speech-bubble icon, or a different company's logo? Answer on the FIRST line with exactly MATCH or NO_MATCH, then a second line with a one-sentence reason.`
+
+    let verdictRaw = ""
+    try {
+      verdictRaw = (await describeImage(buffers, prompt)) || ""
+    } catch {
+      verdictRaw = ""
+    }
+    const isMatch = /\bMATCH\b/i.test(verdictRaw) && !/\bNO[_\s-]?MATCH\b/i.test(verdictRaw)
+    const reason = verdictRaw.replace(/\s+/g, " ").trim().slice(0, 400)
+    const shots = [iconShot, headerShot].filter(Boolean).join(",")
+    const refNote = headerBuf ? "" : " (header logo could not be captured — judged from the toggle alone)"
+
+    if (isMatch) {
+      return [
+        {
+          check_factor: CHECK_FACTOR,
+          title: "Chatbot logo matches the site logo",
+          description: `No issues found. AI vision confirmed the chatbot toggle shows the same brand as the site's header logo${headerBuf ? " (a variation is allowed)" : ""}.`,
+          context_text: `AI vision: ${reason || "match"}${refNote}`,
+          screenshot_url: shots || iconShot || null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+
     return [
       {
-        check_factor: "logo_chatbot",
+        check_factor: CHECK_FACTOR,
+        title: "Chatbot logo does not match the site logo",
+        description: `The chatbot toggle is not the same brand as the site's header logo (it appears to be missing, a generic chat icon, or a different company's logo). Replace it with the client's brand logo.`,
+        context_text: `AI vision: ${reason || "no match"}${refNote}`,
+        screenshot_url: shots || iconShot || null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  } catch (e: any) {
+    console.error("Logo on chatbot check failed", e)
+    return [
+      {
+        check_factor: CHECK_FACTOR,
         title: "Logo on Chatbot Check Failed",
         description: `The check encountered an unexpected error: ${e.message}. Process aborted gracefully.`,
+        context_text: "System Error",
         screenshot_url: null,
         status: "open",
         ai_generated: false,
       } as Finding,
     ]
+  } finally {
+    try {
+      if (context) await context.close().catch(() => {})
+      if (browser && !sharedBrowser) await browser.close().catch(() => {})
+    } catch {}
   }
-
-  const screenshotUrls = [
-    codeScreenshotUrl,
-    homepageScreenshotUrl,
-    openChatbotScreenshotUrl,
-  ]
-    .filter(Boolean)
-    .join(",")
-
-  return [
-    {
-      check_factor: "logo_chatbot",
-      title: "Verify Logo on Chatbot",
-      description: isChatbotActive
-        ? "Please verify the actual brand logo on the chatbot using the provided screenshots."
-        : "The chatbot script was not found on the homepage.",
-      screenshot_url: screenshotUrls,
-      status: "open",
-      ai_generated: false,
-    } as Finding,
-  ]
 }

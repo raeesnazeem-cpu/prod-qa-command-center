@@ -736,7 +736,7 @@ export function isCleanPassFinding(f: any): boolean {
 // reports the detected plugin count for a human to eyeball). It is not a defect
 // and not a "no issues found" sentinel — treat it as a pass that surfaces the
 // fact (the count), never as an issue.
-const INFORMATIONAL_CHECKS = new Set(["plugin_number"])
+const INFORMATIONAL_CHECKS = new Set(["plugin_number", "video_recording"])
 export function isInformationalFinding(f: any): boolean {
   return INFORMATIONAL_CHECKS.has(f?.check_factor) && !isToolLapseFinding(f)
 }
@@ -1123,12 +1123,11 @@ function renderFixLine(fx?: FixReportInfo, usedAi?: boolean): string {
     if (fx.manual) return `<br>${renderNeedsLabel(fx)}`
     return ""
   }
+  // The correction is stated in the PAST TENSE as done — whether it was pushed
+  // to a repo or (with no repo this run) simply determined from the finding. The
+  // repo/PR push status is reported ONCE at the run level (status line), not per
+  // finding, so a missing repo never turns a known fix into a mere "proposal".
   const label = usedAi ? "AI Fix" : "Fixed"
-  const icon = fx.applied ? "✅" : "🔧"
-  // `applied` = the edit is live (pushed to a branch/PR, or pushed straight to
-  // main of the local fallback repo). `proposed` = it applied + verified on a
-  // throwaway clone but was held back (dry run against a real repo), not live.
-  const note = fx.applied ? "" : " (proposed — verified on a clone, not pushed)"
   const pairs: { before: string; after: string }[] = []
   for (const e of fx.edits || []) {
     const before = String(e.find || "").replace(/\s+/g, " ").trim()
@@ -1140,18 +1139,14 @@ function renderFixLine(fx?: FixReportInfo, usedAi?: boolean): string {
   }
   const detail = pairs.length
     ? pairs
-        .map((p) =>
-          usedAi
-            ? `Corrected from “${esc(p.before)}” to “${esc(p.after)}”`
-            : `Changed “${esc(p.before)}” to “${esc(p.after)}”`,
-        )
+        .map((p) => `Corrected “${esc(p.before)}” to “${esc(p.after)}”`)
         .join("; ")
     : esc(fx.fix || "")
   const files = (fx.filesChanged || []).length
     ? ` <em>(${esc((fx.filesChanged || []).join(", "))})</em>`
     : ""
   return detail
-    ? `<br>${icon} <strong>Fix Applied — ${label}${note}:</strong> ${detail}${files}`
+    ? `<br>✅ <strong>${label}:</strong> ${detail}${files}`
     : ""
 }
 
@@ -1556,15 +1551,11 @@ export async function postSectionedReport(opts: {
       const total = applied + proposed
       let header = ""
       if (opts.perTargetFix && total > 0) {
-        const breakdown =
-          applied && proposed
-            ? `${applied} applied, ${proposed} proposed`
-            : proposed
-              ? `${proposed} proposed`
-              : `${applied} applied`
+        // Fixes are reported as DONE (past tense); the push destination is the
+        // run-level status line, so the per-check banner just states the count.
         header =
-          `<p>🤖 <strong>AI Fix</strong> — ${total} fix${total > 1 ? "es" : ""} for this check ` +
-          `(${breakdown}). ${opts.perTargetFix.pushClause}` +
+          `<p>🤖 <strong>AI Fix</strong> — ${total} fix${total > 1 ? "es" : ""} done for this check. ` +
+          `${opts.perTargetFix.pushClause}` +
           `${opts.perTargetFix.usingFallbackRepo ? " <em>(fallback repo)</em>" : ""}</p>`
       }
       // Post the section (results + fix banner) to EACH owning subtask. The
@@ -1585,8 +1576,12 @@ export async function postSectionedReport(opts: {
         ).catch(() => {})
       }
     }
-    if (leftovers.length) {
-      let body = titleHtml + (opts.summaryHeaderHtml || "") + `<br>`
+    // Always post a summary on the PARENT (main thread) when there's a summary
+    // header (the AI-fix run-level summary) OR checks with no subtask to route
+    // to. This guarantees the run summary lands on the main thread even when
+    // every check mapped cleanly to its own subtask.
+    if (opts.summaryHeaderHtml || leftovers.length) {
+      let body = titleHtml + (opts.summaryHeaderHtml || "") + `<br>` + overview
       for (const sec of leftovers) body += sec.html
       await postTedComment(
         tedTaskId,

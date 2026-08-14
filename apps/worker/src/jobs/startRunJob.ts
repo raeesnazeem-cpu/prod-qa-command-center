@@ -133,6 +133,8 @@ export async function processStartRunJob(job: Job) {
       "backend_check",
       "review_reputation_check",
       "gbp_check",
+      "blog_verification",
+      "video_recording",
     ]
 
     const PAGE_CHECKS = [...ALL_PAGES_CHECKS, ...HOMEPAGE_ONLY_CHECKS]
@@ -414,11 +416,11 @@ export async function processStartRunJob(job: Job) {
 }
 
 // --- DEMO OVERRIDE helper (restore after demo): from the crawled URL list, pick
-// just 2 pages — home and contact. Matching is by keyword (tolerant of slug
-// variations like /contact-us), not exact paths. Home is always included. If
-// "contact" doesn't match, we backfill from the remaining crawled URLs so the
-// run never shrinks to just the homepage. Capped at 2. Delete along with its
-// call site to revert.
+// UP TO 2 pages — home and contact. Matching is by keyword (tolerant of slug
+// variations like /contact-us), not exact paths. Home is always included (the
+// hard minimum). 2 is the MAX, not mandatory: if "contact" doesn't match we
+// don't force a second page from junk — a lone homepage is a valid run. Delete
+// along with its call site to revert.
 const DEMO_PAGE_LIMIT = 2
 function pickDemoPages(urls: string[], siteUrl: string): string[] {
   const pathOf = (u: string): string => {
@@ -446,14 +448,7 @@ function pickDemoPages(urls: string[], siteUrl: string): string[] {
   }
   pick("contact")
 
-  // Backfill from any remaining crawled pages so we still get up to 2.
-  for (const u of urls) {
-    if (out.length >= DEMO_PAGE_LIMIT) break
-    if (!used.has(u)) {
-      out.push(u)
-      used.add(u)
-    }
-  }
-
+  // No backfill: 2 is the max, not a quota. If contact didn't match, the run
+  // stays at just the homepage rather than padding with an arbitrary page.
   return out.slice(0, DEMO_PAGE_LIMIT)
 }

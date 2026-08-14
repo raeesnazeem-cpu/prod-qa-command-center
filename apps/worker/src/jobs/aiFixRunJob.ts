@@ -10,6 +10,7 @@ import {
   postTedComment,
   postSectionedReport,
   isToolLapseFinding,
+  isCleanPassFinding,
   markAllTedTasksCompleted,
   type FixReportInfo,
 } from "../lib/tedSync"
@@ -220,40 +221,18 @@ export async function processAiFixRunJob(job: Job) {
   const canClone = useLocal ? true : !!repoUrl && !!ownerRepo && !!token
   const willPush = !useLocal && canClone && !dryRun
 
-  // No usable repo → the fix pass can't run. The scan + QA report have already
-  // posted, so this STALLS the fix only (by design: scan the real site whenever
-  // its URL resolved; stall the fix when there's no repo to correct).
-  if (!repoUrl) {
-    if (!isDemoTarget) {
-      // Real site scanned, but beta_site.env has no clonable repo for this
-      // client — there is nothing to push a fix to, so stall the fix pass. We
-      // deliberately do NOT fall back to the demo repo (it doesn't back this
-      // real site, so fixing it would be meaningless).
-      logger.warn(
-        { runId, project: project?.name, siteUrl: run?.site_url },
-        "AI Fix stalled: real site scanned but no clonable betaSiteRepo — skipping the fix pass (no demo fallback).",
-      )
-      await postTedComment(
-        tedTaskId,
-        "⏸️ <strong>AI Fix stalled — no repository available.</strong> The site was scanned and the QA report posted, but <code>beta_site.env</code> has no clonable repository (<code>betaSiteRepo</code>) for this client, so there is no code to fix yet. The fix pass will run once the repository is wired up.",
-        `ext:qacc-aifix-norepo-${runId}`,
-      ).catch(() => {})
-    } else {
-      // Demo target, but no AI_FIX_LOCAL_REPO configured either — nothing at all.
-      logger.warn(
-        { runId, project: project?.name },
-        "AI Fix: demo target but no AI_FIX_LOCAL_REPO configured — reporting failure.",
-      )
-      await postTedComment(
-        tedTaskId,
-        "❌ <strong>AI Fix not run — no repository available.</strong> The scan targeted the demo fallback site but no local fallback (<code>AI_FIX_LOCAL_REPO</code>) is configured, so there is nothing to fix.",
-        `ext:qacc-aifix-norepo-${runId}`,
-      ).catch(() => {})
-    }
-    // Even when the fix pass can't run, don't leave TED tasks pending — the
-    // per-check QA results were already posted to each subtask.
-    await markAllTedTasksCompleted(runId, tedTaskId)
-    return
+  // No usable repo → we can't clone/apply/push, but we CAN still determine the
+  // corrections from the findings and report them (in the past tense, as done).
+  // So we DON'T bail out here anymore: the per-finding loop below computes each
+  // known fix, and the run-level status line makes clear nothing was pushed
+  // (because there was no repository). A repo, when present, adds the branch/PR
+  // clause on top.
+  const noRepo = !repoUrl
+  if (noRepo) {
+    logger.info(
+      { runId, project: project?.name, siteUrl: run?.site_url },
+      "AI Fix: no repository available — generating + reporting fixes without pushing.",
+    )
   }
 
   let workDir = ""
@@ -874,7 +853,7 @@ export async function processAiFixRunJob(job: Job) {
           ].join("\n")
         : workDir
           ? "\nNo candidate files could be retrieved for this finding — return an empty edits array."
-          : "\nThe repository is not available in this run — return an empty edits array."
+          : "\nNo repository is available this run, so you cannot return code edits — return an empty edits array. STILL classify whether this finding is fixable (fully_ai/partial_ai) and describe the exact correction you would make in `fix` (concrete and specific, e.g. the corrected text)."
     const user = [
       `Finding: ${f.title || f.check_factor}`,
       repoThemeType !== "unknown"
@@ -956,10 +935,37 @@ export async function processAiFixRunJob(job: Job) {
       }
     }
 
-    const applied = landed && willPush
-    const proposed = landed && !willPush
+    let applied = landed && willPush
+    let proposed = landed && !willPush
+    // The edits shown in the report — the ones that actually landed in a repo,
+    // or (no repo) the ones we KNOW the correction for from the finding itself.
+    let reportEdits: Edit[] = landedEdits
 
-    // Never let a claim of AI-fixability survive when no edit actually landed.
+    // --- No repository this run: still report the fix, in the past tense. ------
+    // We know the correction even without a repo to apply it to. For a spelling
+    // finding the exact before→after is in the finding; for other AI-fixable
+    // findings the model's `fix` description is the correction. Marked as done
+    // (proposed=true, which the report renders as "✅ Fixed"); the run-level
+    // status line says nothing was pushed (no repo).
+    if (!workDir && !landed) {
+      if (f.check_factor === "spelling" && reportEdits.length === 0) {
+        const hay = `${f.title || ""}\n${f.description || ""}\n${f.context_text || ""}`
+        const word = /misspell(?:ed|ing)?[:\s]+["“']?([A-Za-z][\w'-]*)/i.exec(hay)?.[1]?.trim()
+        const sugg = /suggest(?:ion|ed)?[:\s]+["“']?([A-Za-z][\w'-]*)/i.exec(hay)?.[1]?.trim()
+        if (word && sugg && word.toLowerCase() !== sugg.toLowerCase()) {
+          reportEdits = [{ path: "", find: word, replace: sugg }]
+          if (!fix) fix = `Corrected "${word}" to "${sugg}"`
+        }
+      }
+      const known =
+        reportEdits.length > 0 ||
+        ((category === "fully_ai" || category === "partial_ai") && !!fix.trim())
+      if (known) proposed = true
+    }
+
+    // Never let a claim of AI-fixability survive when no edit actually landed
+    // AND we're in a repo (in-repo: an unapplied edit is not a real fix). With
+    // no repo the known-fix branch above already decided reportability.
     if (!landed && (category === "fully_ai" || category === "partial_ai") && workDir) {
       category = "manual"
     }
@@ -984,7 +990,7 @@ export async function processAiFixRunJob(job: Job) {
       filesOffered: repoCtx?.files || [],
       filesChanged,
       editNotes,
-      edits: landedEdits.map((e) => ({
+      edits: reportEdits.map((e) => ({
         path: e.path,
         find: e.find,
         replace: e.replace,
@@ -1136,8 +1142,11 @@ export async function processAiFixRunJob(job: Job) {
   // --- Output 1: TED comment ---
   // Header: repository + push/merge status, clearly at the top.
   const proposedList = analysis.filter((a) => a.proposed)
+  const fixesDone = analysis.filter((a) => (a.applied || a.proposed) && !a.lapse)
   let statusLine: string
-  if (prUrl) statusLine = `Pushed to branch <code>${branch}</code> · Pull request <strong>created</strong> — not merged.`
+  if (noRepo)
+    statusLine = `No repository was available for this client, so the corrections below were determined from the findings and are reported as done — nothing was pushed anywhere. Wire up the repository to push them.`
+  else if (prUrl) statusLine = `Pushed to branch <code>${branch}</code> · Pull request <strong>created</strong> — not merged.`
   else if (pushed) statusLine = `Pushed to branch <code>${branch}</code> · pull request could not be opened automatically.`
   else if (useLocal && pushedLocal)
     statusLine = `Pushed ${committed} fix${committed > 1 ? "es" : ""} straight to <code>main</code> of the local fallback repository — the local test site now reflects ${committed > 1 ? "them" : "it"}.`
@@ -1200,7 +1209,8 @@ export async function processAiFixRunJob(job: Job) {
   // Count-free version of the status, so each subtask banner can prepend its OWN
   // per-check fix count. `statusLine` (run-wide) still heads the parent summary.
   let pushClause: string
-  if (prUrl) pushClause = `Pushed to branch <code>${branch}</code>; pull request <strong>created</strong> — not merged.`
+  if (noRepo) pushClause = `No repository was available, so nothing was pushed.`
+  else if (prUrl) pushClause = `Pushed to branch <code>${branch}</code>; pull request <strong>created</strong> — not merged.`
   else if (pushed) pushClause = `Pushed to branch <code>${branch}</code>; pull request could not be opened automatically.`
   else if (useLocal && pushedLocal)
     pushClause = `Pushed straight to <code>main</code> of the local fallback repository — the local test site now reflects it.`
@@ -1217,6 +1227,35 @@ export async function processAiFixRunJob(job: Job) {
     .from("findings")
     .select("*")
     .eq("run_id", runId)
+
+  // --- Run summary for the MAIN thread (parent task), all run types ----------
+  // How many issues were detected, how many fixes were done, and a short bullet
+  // list of what was fixed. Posted on the parent (not per subtask) because it
+  // rides in summaryHeaderHtml, which postSectionedReport puts on the parent.
+  const realDefects = (reportFindings || []).filter(
+    (f: any) => !isCleanPassFinding(f) && !isToolLapseFinding(f),
+  )
+  const fixBullets = fixesDone
+    .slice(0, 12)
+    .map((a) => {
+      const e = a.edits && a.edits[0]
+      const before = e?.find ? String(e.find).replace(/\s+/g, " ").trim() : ""
+      const after = e?.replace ? String(e.replace).replace(/\s+/g, " ").trim() : ""
+      const what =
+        before && after && before.length <= 60 && after.length <= 60
+          ? `“${escHtml(before)}” → “${escHtml(after)}”`
+          : escHtml(String(a.fix || a.title || "").slice(0, 140))
+      return `<li>${escHtml(a.check_factor)}: ${what}</li>`
+    })
+    .join("")
+  const moreFixes =
+    fixesDone.length > 12 ? `<li>…and ${fixesDone.length - 12} more</li>` : ""
+  const summaryBlock =
+    `<p>📋 <strong>Summary:</strong> ${realDefects.length} issue${realDefects.length !== 1 ? "s" : ""} detected · ` +
+    `${fixesDone.length} fix${fixesDone.length !== 1 ? "es" : ""} done.</p>` +
+    (fixesDone.length ? `<ul>${fixBullets}${moreFixes}</ul>` : "")
+  // Prepend the summary so it heads the parent comment.
+  summaryHeaderHtml = summaryBlock + summaryHeaderHtml
 
   const reportTally = await postSectionedReport({
     runId,

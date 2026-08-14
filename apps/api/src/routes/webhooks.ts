@@ -819,6 +819,8 @@ const PRE_RELEASE_DEFAULT_CHECKS = [
   "functionality_check",
   "gbp_check",
   "image_quality",
+  "blog_verification",
+  "video_recording",
   "cross_browser",
 ]
 
@@ -831,9 +833,9 @@ const PRE_RELEASE_DEFAULT_CHECKS = [
 // "logo on the chatbot" title also contains "chatbot"). A check may map to more
 // than one subtask (e.g. gbp_check → "Map address" AND "GBP"; false_breakpoint →
 // "smaller resolution" AND "false breaking point"); postSectionedReport posts
-// that check's section to every owning subtask. Subtasks with no automated
-// check (Video, Blogs, Accelerator reviews) are intentionally absent — a human
-// still owns those. Mirrors INTERNAL_QA_SECTIONS.
+// that check's section to every owning subtask. "Accelerator reviews" →
+// project_plan, "Blog" → blog_verification, and the "Video recording" reminder
+// → video_recording are wired below. Mirrors INTERNAL_QA_SECTIONS.
 const PRE_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   // Logo-on-chatbot MUST precede chatbot_consultation: its title also says
   // "chatbot", so it would otherwise be swallowed by the chatbot section.
@@ -857,6 +859,12 @@ const PRE_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   { matchers: ["hamburger"], checks: ["hamburger_menu"] },
   { matchers: ["learnmore", "readmore"], checks: ["learn_more_buttons"] },
   { matchers: ["reputation"], checks: ["review_reputation_check"] },
+  // "Check if reviews are added for Accelerator plan" → the project_plan check
+  // (it resolves the client's plan tier + deliverables, so it's the same
+  // signal). Keyed on the "accelerator" token, which is unique to this subtask
+  // and never appears in the review_reputation ("reputation") subtask above, so
+  // the two stay distinct regardless of order.
+  { matchers: ["accelerator"], checks: ["project_plan"] },
   { matchers: ["backend"], checks: ["backend_check"] },
   { matchers: ["plugin"], checks: ["verify_plugin_updates"] },
   { matchers: ["singlescript"], checks: ["single_script"] },
@@ -865,6 +873,11 @@ const PRE_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   { matchers: ["deadlink"], checks: ["dead_links"] },
   { matchers: ["footerlogo"], checks: ["footer_logo"] },
   { matchers: ["privacypolicy"], checks: ["privacy_policy"] },
+  // "Blog" subtask → blog_verification (beta blogs vs the client's live blogs).
+  { matchers: ["blogverification", "blog"], checks: ["blog_verification"] },
+  // "Desktop/Tablet/Mobile video recording" subtask → video_recording, a
+  // hardcoded manual-reminder pass (no automation).
+  { matchers: ["videorecording", "video", "recording"], checks: ["video_recording"] },
   { matchers: ["herosection", "fallbackimage"], checks: ["hero_media"] },
 ]
 

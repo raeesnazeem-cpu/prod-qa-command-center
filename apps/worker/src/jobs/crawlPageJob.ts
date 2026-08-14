@@ -28,6 +28,7 @@ import { checkReviewReputation } from "../checks/reviewReputationCheck"
 import { checkFunctionality } from "../checks/functionalityCheck"
 import { checkHamburgerMenu } from "../checks/hamburgerMenuCheck"
 import { checkBlogVerification } from "../checks/blogVerificationCheck"
+import { checkVideoRecording } from "../checks/videoRecordingCheck"
 import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
@@ -659,9 +660,27 @@ export async function processCrawlPageJob(job: Job) {
         await Promise.all(checkPromises)
         if (enabledChecks.includes("blog_verification")) {
           checkPromises.push(
-            checkBlogVerification(pageUrl, runId).catch((e) => {
+            checkBlogVerification(
+              pageUrl,
+              runId,
+              run.live_site_url,
+              run.project_id,
+              async (p, m) => {
+                await updateCheckProgress("blog_verification", p, m)
+              },
+            ).catch((e) => {
               logger.error("Blog verification check failed:", e)
               return lapse("blog_verification")(e)
+            }),
+          )
+        }
+
+        await Promise.all(checkPromises)
+        if (enabledChecks.includes("video_recording")) {
+          checkPromises.push(
+            checkVideoRecording(pageUrl, runId).catch((e) => {
+              logger.error("Video recording check failed:", e)
+              return lapse("video_recording")(e)
             }),
           )
         }
@@ -736,6 +755,7 @@ export async function processCrawlPageJob(job: Job) {
               async (p, m) => {
                 await updateCheckProgress("logo_chatbot", p, m)
               },
+              run.project_id,
             ).catch((e) => {
               logger.error("Logo on chatbot check failed:", e)
               return lapse("logo_chatbot")(e)
