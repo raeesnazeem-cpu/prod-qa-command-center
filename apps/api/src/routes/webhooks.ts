@@ -926,15 +926,25 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
 
     // 5. If the password is correct, we check what kind of event happened.
     if (eventType === "TASK_UPDATED" || eventType === "TASK_STATUS_CHANGED") {
+      // Gate: act on the release.pre_dev trigger task → Complete/Completed
+      // (the old trigger, now scoped to its template key to match internal QA
+      // and post-release), OR on the release.qa_pre target task itself while
+      // still "Not Started" — a manual/test kick-off (direct run trigger).
+      // The target is scoped to release.qa_pre so a random Not Started task
+      // never launches a pre-release run.
+      const isPreDevTrigger = task.templateKey === "release.pre_dev"
+      const isComplete =
+        task.status === "Complete" || task.status === "Completed"
+      const isPreQaTarget = task.templateKey === "release.qa_pre"
+      const isNotStarted = task.status === "Not Started"
       if (
-        task.status === "Ready to Release" ||
-        task.status === "Ready for Release" ||
-        task.status === "In Progress" ||
-        task.status === "Complete" ||
-        task.status === "Completed"
+        (isPreDevTrigger && isComplete) ||
+        (isPreQaTarget && isNotStarted)
       ) {
         console.log(
-          "✅ Trigger task is Complete / Ready to Release / In Progress! Triggering QACC pre-release workflow...",
+          isPreQaTarget && isNotStarted
+            ? "✅ release.qa_pre direct trigger (Not Started)! Triggering QACC pre-release workflow..."
+            : "✅ release.pre_dev is Complete! Triggering QACC pre-release workflow...",
         )
         console.log("Task Data:", task)
 
@@ -1665,11 +1675,19 @@ webhookRouter.post(
         )
       }
 
-      // 3. Gate: only act on beta_site.seo transitioning to Complete/Completed.
+      // 3. Gate: act on beta_site.seo → Complete/Completed, OR on the
+      //    beta_site.internal_test target itself while still "Not Started"
+      //    (a direct manual/test trigger — touch the internal-test task to
+      //    kick off the scan without waiting on the SEO task).
       const isSeoTemplate =
         task.templateKey === INTERNAL_QA_TRIGGER_TEMPLATE_KEY
       const isComplete =
         task.status === "Complete" || task.status === "Completed"
+
+      // Direct trigger: the internal_test task (the target) at Not Started.
+      const isInternalTestTemplate =
+        task.templateKey === INTERNAL_QA_TARGET_TEMPLATE_KEY
+      const isNotStarted = task.status === "Not Started"
 
       // TED labels a status change as TASK_UPDATED (the record event); the
       // "Task Status Changed" trigger is a TED-side filter, not the delivered
@@ -1678,11 +1696,13 @@ webhookRouter.post(
       if (
         (eventType === "TASK_UPDATED" ||
           eventType === "TASK_STATUS_CHANGED") &&
-        isSeoTemplate &&
-        isComplete
+        ((isSeoTemplate && isComplete) ||
+          (isInternalTestTemplate && isNotStarted))
       ) {
         console.log(
-          "✅ beta_site.seo is Complete! Starting internal QA scan of the beta site...",
+          isInternalTestTemplate
+            ? "✅ beta_site.internal_test direct trigger (Not Started)! Starting internal QA scan of the beta site..."
+            : "✅ beta_site.seo is Complete! Starting internal QA scan of the beta site...",
         )
 
         if (clientName) {
@@ -2013,7 +2033,7 @@ webhookRouter.post(
         }
       } else {
         console.log(
-          `ℹ️ Internal-QA endpoint ignored event (templateKey="${task.templateKey}", status="${task.status}"). Only ${INTERNAL_QA_TRIGGER_TEMPLATE_KEY} → Complete/Completed acts.`,
+          `ℹ️ Internal-QA endpoint ignored event (templateKey="${task.templateKey}", status="${task.status}"). Acts only on ${INTERNAL_QA_TRIGGER_TEMPLATE_KEY} → Complete/Completed, or ${INTERNAL_QA_TARGET_TEMPLATE_KEY} → Not Started.`,
         )
       }
 
@@ -2195,19 +2215,27 @@ webhookRouter.post(
         )
       }
 
-      // 3. Gate: only act on release.security transitioning to Complete/Completed.
+      // 3. Gate: act on release.security → Complete/Completed, OR on the
+      //    release.qa_post target task itself while still "Not Started" (a
+      //    manual/test kick-off, same setting as internal QA / pre-release).
       const isSecurityTemplate = task.templateKey === "release.security"
       const isComplete =
         task.status === "Complete" || task.status === "Completed"
 
+      // Direct trigger: the release.qa_post target task at Not Started.
+      const isPostQaTarget = task.templateKey === "release.qa_post"
+      const isNotStarted = task.status === "Not Started"
+
       if (
         (eventType === "TASK_UPDATED" ||
           eventType === "TASK_STATUS_CHANGED") &&
-        isSecurityTemplate &&
-        isComplete
+        ((isSecurityTemplate && isComplete) ||
+          (isPostQaTarget && isNotStarted))
       ) {
         console.log(
-          "✅ release.security is Complete! Shifting project to post-release and starting General Checks...",
+          isPostQaTarget && isNotStarted
+            ? "✅ release.qa_post direct trigger (Not Started)! Shifting project to post-release and starting General Checks..."
+            : "✅ release.security is Complete! Shifting project to post-release and starting General Checks...",
         )
 
         if (clientName) {
@@ -2426,7 +2454,7 @@ webhookRouter.post(
         }
       } else {
         console.log(
-          `ℹ️ Post-release endpoint ignored event (templateKey="${task.templateKey}", status="${task.status}"). Only release.security → Complete/Completed acts.`,
+          `ℹ️ Post-release endpoint ignored event (templateKey="${task.templateKey}", status="${task.status}"). Acts only on release.security → Complete/Completed, or release.qa_post → Not Started.`,
         )
       }
 
