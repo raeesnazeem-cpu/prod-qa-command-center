@@ -16,6 +16,7 @@ import {
   Trash2,
 } from "lucide-react"
 import { useAuthAxios } from "../lib/useAuthAxios"
+import { displaySiteUrl } from "../lib/siteUrl"
 import { useRole } from "../hooks/useRole"
 import toast from "react-hot-toast"
 import { EditProjectModal } from "./EditProjectModal"
@@ -124,9 +125,7 @@ export const ProjectCard = ({ project }: ProjectCardProps) => {
             )}
             <div className="flex items-center text-slate-500 dark:text-slate-400 text-sm">
               <span className="truncate text-sky-500 dark:text-sky-400 group-hover:text-sky-600 dark:group-hover:text-sky-300 transition-colors lowercase text-[11px] font-bold tracking-tight">
-                {project.site_url
-                  .replace(/^https?:\/\/(www\.)?/, "")
-                  .replace(/\/$/, "")}
+                {displaySiteUrl(project.site_url)}
               </span>
             </div>
           </div>

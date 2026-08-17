@@ -21,6 +21,7 @@ import { QAFinding } from "../api/runs.api"
 import { BrowserOverlay } from "./BrowserOverlay"
 import { useAuthAxios } from "../lib/useAuthAxios"
 import { useGalleryStore } from "../store/galleryStore"
+import { findingBorderClass } from "../lib/findingVerdict"
 
 interface FindingCardProps {
   finding: QAFinding
@@ -113,11 +114,7 @@ export const SpellingFindingCard: React.FC<FindingCardProps> = ({
   return (
     <div
       className={`group p-6 bg-slate-200/10 dark:bg-[#1D2A31] rounded-md border transition-all duration-300 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.05)] hover:shadow-md relative overflow-hidden flex flex-col gap-6 ${
-        isConfirmed || isAssigned
-          ? "border-emerald-500 ring-1 ring-emerald-500/20"
-          : isFalsePositive
-            ? "opacity-60 border-slate-200 dark:border-slate-800"
-            : "border-slate-200 dark:border-slate-800 hover:border-accent/40"
+        findingBorderClass(finding)
       }`}
     >
       <div
@@ -277,94 +274,6 @@ export const SpellingFindingCard: React.FC<FindingCardProps> = ({
                 </div>
               </div>
             )}
-
-          {/* Action Buttons */}
-          {canAction && !isFalsePositive && (
-            <div className="flex items-center justify-between pt-4 border-t border-slate-100">
-              <div className="flex items-center gap-2 flex-wrap">
-                {!isConfirmed && (
-                  <button
-                    onClick={() => onConfirm?.(finding.id)}
-                    className="flex items-center gap-1.5 px-3 py-1 bg-emerald-500 text-white text-[9px] font-bold uppercase tracking-widest rounded-[10px] hover:bg-emerald-600 transition-colors"
-                  >
-                    <CheckCircle2 size={12} />
-                    Confirm
-                  </button>
-                )}
-                {!(hasTask || isAssigned) && (
-                  <button
-                    onClick={() => onFalsePositive?.(finding.id)}
-                    className="flex items-center gap-1.5 px-3 py-1 bg-slate-50 border border-slate-200 text-slate-500 text-[9px] font-bold uppercase tracking-widest rounded-[10px] hover:bg-slate-50 transition-colors"
-                  >
-                    <XCircle size={12} />
-                    False Positive
-                  </button>
-                )}
-                <button
-                  onClick={() => onAssign?.(finding.id)}
-                  className="flex items-center gap-1.5 px-3 py-1 bg-slate-50 border border-slate-200 text-slate-500 text-[9px] font-bold uppercase tracking-widest rounded-[10px] hover:bg-slate-50 transition-colors"
-                >
-                  <UserPlus size={12} />
-                  Assign
-                </button>
-                {misspelledWord && (
-                  <button
-                    onClick={handleAllowlist}
-                    disabled={isAddingAllowlist}
-                    className="flex items-center gap-1.5 px-3 py-1 bg-indigo-50 text-indigo-600 border border-indigo-200 text-[9px] font-bold uppercase tracking-widest rounded-[10px] hover:bg-indigo-100 transition-colors disabled:opacity-50"
-                  >
-                    <Plus size={12} />
-                    {isAddingAllowlist ? "Adding..." : "Add to Allowlist"}
-                  </button>
-                )}
-
-                {/* Assigned Users Avatars */}
-                {assignedUsers.length > 0 && (
-                  <div className="flex items-center ml-4 -space-x-2">
-                    {assignedUsers.map((user: any, i: number) => (
-                      <div
-                        key={user.id || i}
-                        className="w-6 h-6 rounded-full bg-slate-100 border-2 border-white flex items-center justify-center text-[10px] font-bold text-slate-600 shadow-sm"
-                        title={user.full_name}
-                      >
-                        {user.full_name?.charAt(0) || "U"}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() =>
-                    onCreateTask?.({
-                      ...finding,
-                      gallery_images: galleryImages,
-                    })
-                  }
-                  disabled={hasTask || isAssigned}
-                  className={`flex items-center gap-1.5 px-3 py-1 text-[9px] font-bold uppercase tracking-widest rounded-[10px] transition-colors shrink-0 ${
-                    hasTask || isAssigned
-                      ? "bg-accent text-white cursor-not-allowed"
-                      : "bg-black text-accent hover:bg-slate-800"
-                  }`}
-                >
-                  <Plus size={12} />
-                  {hasTask || isAssigned ? "Task Linked" : "Create Task"}
-                </button>
-                {(hasTask || isAssigned) &&
-                  assignedTaskIds &&
-                  assignedTaskIds.length > 0 && (
-                    <Link
-                      to={`/projects/${projectId}?tab=tasks&taskId=${assignedTaskIds[0]}`}
-                      className="p-2 text-slate-400 hover:text-accent transition-colors"
-                      title="View Task"
-                    >
-                      <ExternalLink size={14} />
-                    </Link>
-                  )}
-              </div>
-            </div>
-          )}
 
           {isFalsePositive && (
             <div className="pt-4 border-t border-slate-100 flex justify-end">

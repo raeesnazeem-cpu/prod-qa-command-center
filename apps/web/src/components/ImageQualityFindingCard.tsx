@@ -16,6 +16,7 @@ import { useRole } from "../hooks/useRole"
 import { useParams, Link } from "react-router-dom"
 import { QAFinding } from "../api/runs.api"
 import { useAuthAxios } from "../lib/useAuthAxios"
+import { findingBorderClass } from "../lib/findingVerdict"
 
 interface FindingCardProps {
   finding: QAFinding
@@ -147,11 +148,7 @@ export const ImageQualityFindingCard: React.FC<FindingCardProps> = ({
   return (
     <div
       className={`group p-6 bg-slate-200/10 dark:bg-[#1D2A31] rounded-md border transition-all duration-300 shadow-sm hover:shadow-md relative overflow-hidden flex flex-col gap-6 ${
-        isConfirmed || isAssigned
-          ? "border-emerald-500 ring-1 ring-emerald-500/20"
-          : isFalsePositive
-            ? "opacity-60 border-slate-200 dark:border-slate-800"
-            : "border-slate-200 dark:border-slate-800 hover:border-accent/40"
+        findingBorderClass(finding)
       }`}
     >
       <div className="flex items-center gap-3">
@@ -219,93 +216,6 @@ export const ImageQualityFindingCard: React.FC<FindingCardProps> = ({
         <p className="text-[11px] text-slate-500 dark:text-slate-400">{finding.description}</p>
       )}
 
-      {/* Actions */}
-      {canAction && (
-        <div className="flex items-center justify-between pt-4 border-t border-slate-50 dark:border-slate-700/50 mt-auto">
-          <div className="flex items-center gap-2">
-            {!(hasTask || isAssigned) && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  if (isPushed && commentUrl) window.open(commentUrl, "_blank", "noopener,noreferrer")
-                  else if (!isPushed) handlePushToBasecamp()
-                }}
-                disabled={isPushing}
-                className={`btn-unified px-3 ${isPushed ? "bg-emerald-100 text-emerald-800 border border-emerald-200" : "bg-[#0b1016] text-white"}`}
-              >
-                {isPushing ? "..." : isPushed ? "View in Basecamp" : "Push to Basecamp"}
-              </button>
-            )}
-            {isFalsePositive ? (
-              <button onClick={() => onConfirm?.(finding.id)} className="btn-unified">
-                Re-flag as genuine
-              </button>
-            ) : (
-              <>
-                {!(hasTask || isAssigned || isPushed) && (
-                  <button onClick={() => onFalsePositive?.(finding.id)} className="btn-unified">
-                    False Positive
-                  </button>
-                )}
-                {!isPushed && (
-                  <button
-                    onClick={() => onCreateTask?.({ ...finding, title: localTitle })}
-                    disabled={hasTask || isAssigned}
-                    className={`btn-unified ${hasTask || isAssigned ? "bg-accent text-white border-accent cursor-not-allowed" : ""}`}
-                  >
-                    {hasTask || isAssigned ? "Task Linked" : "Add to Tasks"}
-                  </button>
-                )}
-                {(hasTask || isAssigned) &&
-                  assignedTaskIds.length > 0 &&
-                  assignedTaskIds[0] !== finding.id && (
-                    <div className="ml-1 flex items-center gap-1">
-                      <Link
-                        to={`/projects/${projectId}?tab=tasks&taskId=${assignedTaskIds[0]}`}
-                        target="_blank"
-                        className="text-slate-400 hover:text-accent"
-                        title="View Task"
-                      >
-                        <Eye size={14} />
-                      </Link>
-                      <button
-                        onClick={(e) => {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          bulkDeleteTasks(assignedTaskIds)
-                        }}
-                        disabled={isDeleting}
-                        className="ml-1 text-slate-400 hover:text-red-500"
-                        title="Unlink Task"
-                      >
-                        <Unlink2 size={14} />
-                      </button>
-                    </div>
-                  )}
-              </>
-            )}
-          </div>
-          {allAssignees.length > 0 && (
-            <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-[#131d22] border border-slate-100 dark:border-slate-700 p-1.5 rounded-full pl-3 pr-2">
-              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Assigned</span>
-              <div className="flex -space-x-1.5">
-                {allAssignees.map((u, idx) => (
-                  <div
-                    key={u?.id || idx}
-                    className="w-6 h-6 rounded-full bg-slate-200 dark:bg-[#1d2a31] border-2 border-white dark:border-[#1D2A31] flex items-center justify-center text-[8px] font-bold text-slate-500 dark:text-slate-300"
-                  >
-                    {u?.avatar_url ? (
-                      <img src={u.avatar_url} alt="" className="w-full h-full rounded-full object-cover" />
-                    ) : (
-                      (u?.full_name || u?.name)?.[0]?.toUpperCase() || "U"
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
 
       {/* View-all modal */}
       {isModalOpen && (
