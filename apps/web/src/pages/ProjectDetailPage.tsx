@@ -30,6 +30,7 @@ import { CanDo } from "../components/CanDo"
 import { useRole } from "../hooks/useRole"
 import { StartRunModal } from "../components/StartRunModal"
 import { Skeleton } from "../components/Skeleton"
+import { cleanSiteUrl, displaySiteUrl } from "../lib/siteUrl"
 
 export const ProjectDetailPage = () => {
   const { id } = useParams<{ id: string }>()
@@ -250,12 +251,12 @@ export const ProjectDetailPage = () => {
               <div className="flex items-center text-slate-500 dark:text-slate-400">
                 <Globe className="w-3 h-3 mr-2 text-accent" />
                 <a
-                  href={project.site_url}
+                  href={cleanSiteUrl(project.site_url)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-sky-600 dark:text-sky-400 font-semibold hover:text-accent transition-colors flex items-center hover:text-sky-500"
                 >
-                  {project.site_url.replace(/^https?:\/\//, "")}
+                  {displaySiteUrl(project.site_url)}
                   <ExternalLink className="w-3 h-3 ml-1 opacity-50" />
                 </a>
               </div>
