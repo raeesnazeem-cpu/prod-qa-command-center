@@ -68,6 +68,24 @@ async function run() {
 
   const page = await context.newPage()
 
+  // Signal that recording has ACTUALLY begun for this viewport. The QACC barrier
+  // (video_recording_check job) polls qa_runs.recording_status for this exact
+  // flip to confirm a real cloud start — not merely that the trigger was
+  // accepted. One process runs per viewport; setting the same value from each is
+  // harmless. Best-effort: a failure here must not stop the recording itself.
+  try {
+    await supabase
+      .from("qa_runs")
+      .update({
+        recording_status: "recording",
+        recording_updated_at: new Date().toISOString(),
+      })
+      .eq("id", runId)
+    console.log(`recording_status set to 'recording' for RUN ${runId} [${viewportType}]`)
+  } catch (e) {
+    console.error("Failed to set recording_status='recording' at boot:", e)
+  }
+
   try {
     // 1. Fetch all scanned pages/URLs for this runId directly
     const { data: pages, error: fetchError } = await supabase

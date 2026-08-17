@@ -1014,6 +1014,15 @@ const POST_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   // "G99 Contact form, ChatBot and VC" → chatbot/VC detection only (no live
   // contact-form submission — see header note).
   { matchers: ["chatbot"], checks: ["chatbot_consultation"] },
+  // "Desktop & Mobile View Video" (or any video-recording subtask) → the
+  // video_recording post-verification barrier. Recording is fired only after
+  // every other post-release check passes; the barrier owns this subtask's
+  // status. Distinctive tokens ("video"/"recording" don't appear in any other
+  // post-release subtask title above), so first-match-wins is safe.
+  {
+    matchers: ["videorecording", "desktopmobileview", "video", "recording"],
+    checks: ["video_recording"],
+  },
 ]
 
 // --- TED Webhook Receiver ---

@@ -5,6 +5,7 @@ import { crawlSitemap } from "../crawlers/sitemapCrawler"
 import * as activityService from "../services/activityService"
 import { wpPasswordCache } from "../lib/credentialsCache"
 import { resolveThemeType } from "../lib/themeType"
+import { postTedComment } from "../lib/tedSync"
 
 import pino from "pino"
 
@@ -33,7 +34,9 @@ export async function processStartRunJob(job: Job) {
   // Step 1: Fetch run from Supabase
   const { data: run, error: fetchError } = await supabase
     .from("qa_runs")
-    .select("id, site_url, project_id, selected_urls, status, enabled_checks")
+    .select(
+      "id, site_url, project_id, selected_urls, status, enabled_checks, ted_task_id, ted_subtask_map",
+    )
     .eq("id", runId)
     .single()
 
@@ -64,6 +67,34 @@ export async function processStartRunJob(job: Job) {
       { runId, error: updateError.message },
       "Failed to update run status to running",
     )
+  }
+
+  // If this run carries a video-recording subtask, tell it up front that it is
+  // deliberately waiting: recording is the final verification step and runs only
+  // AFTER every other check has passed (handled by the video_recording_check
+  // barrier at closeout). Best-effort — never blocks the scan.
+  try {
+    const map: Record<string, any> = (run.ted_subtask_map as any) || {}
+    const videoIds = Array.isArray(map["video_recording"])
+      ? map["video_recording"]
+      : map["video_recording"]
+        ? [map["video_recording"]]
+        : []
+    for (const subId of videoIds) {
+      await postTedComment(
+        String(subId),
+        "<p>⏳ <strong>Waiting for all other checks to finish successfully</strong> before starting the video recording.</p>",
+        `ext:video-waiting-${runId}-${subId}`,
+        {
+          runId,
+          projectId: run.project_id,
+          targetKind: "subtask",
+          checkFactor: "video_recording",
+        },
+      ).catch(() => {})
+    }
+  } catch (e: any) {
+    logger.warn({ runId, error: e?.message }, "Failed to post video-recording waiting comment.")
   }
 
   // Detect the target theme type ONCE, before any check runs, and persist it on
@@ -134,8 +165,11 @@ export async function processStartRunJob(job: Job) {
       "review_reputation_check",
       "gbp_check",
       "blog_verification",
-      "video_recording",
     ]
+
+    // NOTE: video_recording is intentionally NOT a page check. It is a
+    // post-verification barrier (video_recording_check) that runs after every
+    // other check passes — see apps/worker/src/jobs/videoRecordingJob.ts.
 
     const PAGE_CHECKS = [...ALL_PAGES_CHECKS, ...HOMEPAGE_ONLY_CHECKS]
     const needsPageScan = run.enabled_checks?.some((c: string) =>

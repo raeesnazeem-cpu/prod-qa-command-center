@@ -1,5 +1,6 @@
 import { supabase } from "./supabase"
 import { getClientDomain } from "./tedClient"
+import { qaQueue } from "./queue"
 import pino from "pino"
 import sharp from "sharp"
 
@@ -187,6 +188,23 @@ async function recordLocalTedComment(
     )
     return false
   }
+}
+
+// Record a QACC-INTERNAL note that must NEVER reach the client's real TED —
+// e.g. the detailed video-recording error. It is written only to the local
+// `ted_comments` table (the QACC "TED Comments" tab), regardless of preview
+// mode, so operators can see the detail while the client sees only the short
+// sanitized message. Best-effort.
+export async function postQaccInternalNote(
+  tedTaskId: string,
+  bodyHtml: string,
+  eventKey: string,
+  ctx: LocalTedCtx = {},
+): Promise<boolean> {
+  return recordLocalTedComment(String(tedTaskId), bodyHtml, eventKey, {
+    ...ctx,
+    source: "manual",
+  })
 }
 
 // Post a comment to a TED task, preferring the newer /comments/ai endpoint
@@ -423,19 +441,51 @@ export async function markAllTedTasksCompleted(
     // there. Keying off the map (not run_type) keeps this correct as more
     // run types adopt subtask routing.
     const map: Record<string, string | string[]> = (run?.ted_subtask_map as any) || {}
+    // The video-recording subtask is NOT closed here. It is the final
+    // verification step and is owned entirely by the video_recording_check
+    // barrier (it must run AFTER every other check has passed, then decide the
+    // subtask's fate). Exclude its id(s) from the blanket close so the barrier
+    // sets its status, and hand the barrier off below.
+    const videoSubtaskIds = new Set(
+      (Array.isArray(map["video_recording"])
+        ? map["video_recording"]
+        : map["video_recording"]
+          ? [map["video_recording"]]
+          : []
+      ).map((v) => String(v)),
+    )
     // A check can map to several subtasks; flatten + de-dupe. Tolerates the
     // legacy one-to-one shape ({check: subtaskId}) too.
     const subtaskIds = [
       ...new Set(
         Object.values(map).flatMap((v) => (Array.isArray(v) ? v : [v])),
       ),
-    ]
+    ].filter((id) => !videoSubtaskIds.has(String(id)))
     for (const subtaskId of subtaskIds) {
       await postTedStatus(subtaskId, TED_STATUS_COMPLETED, runId).catch(
         () => {},
       )
     }
     logger.info({ runId, parent }, "Marked TED tasks Completed for finished run.")
+
+    // Hand off to the video-recording barrier: it evaluates whether every other
+    // check passed and then either records or reports why it couldn't. Enqueued
+    // from this single, idempotent (ted_completed_at-claimed) funnel so it fires
+    // exactly once per run. Only when the run actually carries a video subtask.
+    if (videoSubtaskIds.size > 0) {
+      await qaQueue
+        .add(
+          "video_recording_check",
+          { runId, tedTaskId: parent },
+          { removeOnComplete: true, attempts: 2 },
+        )
+        .catch((e) =>
+          logger.error(
+            { runId, error: e?.message },
+            "Failed to enqueue video_recording_check.",
+          ),
+        )
+    }
   } catch (e: any) {
     logger.error(
       { runId, error: e?.message },
@@ -757,8 +807,9 @@ export function isInformationalFinding(f: any): boolean {
 
 // A finding counts as a real site defect only if it is not a QACC tool lapse, a
 // clean-pass sentinel, or a purely informational finding. Used for accurate
-// per-check pass/fail.
-function isRealDefect(f: any): boolean {
+// per-check pass/fail (and by the video_recording barrier to decide whether all
+// other checks passed).
+export function isRealDefect(f: any): boolean {
   return (
     !isToolLapseFinding(f) &&
     !isCleanPassFinding(f) &&
@@ -1647,6 +1698,10 @@ export async function postSectionedReport(opts: {
     const resultFactors = new Set(sections.map((s) => s.factor))
     for (const [factor, raw] of Object.entries(subtaskMap)) {
       if (resultFactors.has(factor)) continue
+      // The video-recording subtask is owned by the video_recording_check
+      // barrier, not the report — never post a no-result "marked complete"
+      // comment to it here (that would race the barrier's own verdict).
+      if (factor === "video_recording") continue
       const targets = Array.isArray(raw) ? raw : raw ? [raw] : []
       if (!targets.length) continue
       const label = FRIENDLY[factor] || titleCase(factor)

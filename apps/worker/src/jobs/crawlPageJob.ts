@@ -28,7 +28,6 @@ import { checkReviewReputation } from "../checks/reviewReputationCheck"
 import { checkFunctionality } from "../checks/functionalityCheck"
 import { checkHamburgerMenu } from "../checks/hamburgerMenuCheck"
 import { checkBlogVerification } from "../checks/blogVerificationCheck"
-import { checkVideoRecording } from "../checks/videoRecordingCheck"
 import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
@@ -676,14 +675,9 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         await Promise.all(checkPromises)
-        if (enabledChecks.includes("video_recording")) {
-          checkPromises.push(
-            checkVideoRecording(pageUrl, runId).catch((e) => {
-              logger.error("Video recording check failed:", e)
-              return lapse("video_recording")(e)
-            }),
-          )
-        }
+        // video_recording is NOT a per-page check. It is a post-verification
+        // barrier (video_recording_check) that runs after every other check
+        // passes — see apps/worker/src/jobs/videoRecordingJob.ts.
 
         await Promise.all(checkPromises)
         if (

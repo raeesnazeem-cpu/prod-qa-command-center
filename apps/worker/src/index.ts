@@ -9,6 +9,10 @@ import { processCrawlBatchJob } from "./jobs/crawlBatchJob"
 import { processCheckProjectPlanJob } from "./jobs/checkProjectPlanJob"
 import { processCheckPaidMediaJob } from "./jobs/checkPaidMediaJob"
 import { processAiFixRunJob } from "./jobs/aiFixRunJob"
+import {
+  processVideoRecordingJob,
+  processVideoUrlVerifyJob,
+} from "./jobs/videoRecordingJob"
 import { qaQueue, connection } from "./lib/queue"
 import { processCaptureMultiviewScreenshotsJob } from "./jobs/captureMultiviewScreenshotsJob"
 
@@ -54,6 +58,12 @@ const worker = new Worker(
           break
         case "ai_fix_run":
           await processAiFixRunJob(job)
+          break
+        case "video_recording_check":
+          await processVideoRecordingJob(job)
+          break
+        case "video_url_verify":
+          await processVideoUrlVerifyJob(job)
           break
         case "capture_screenshot":
           return await processCaptureScreenshotJob(job)
