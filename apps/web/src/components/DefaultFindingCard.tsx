@@ -28,6 +28,7 @@ import { QAFinding } from "../api/runs.api"
 import { BrowserOverlay } from "./BrowserOverlay"
 import { useGalleryStore } from "../store/galleryStore"
 import { useAuthAxios } from "../lib/useAuthAxios"
+import { findingBorderClass } from "../lib/findingVerdict"
 
 interface FindingCardProps {
   finding: QAFinding
@@ -272,11 +273,7 @@ export const DefaultFindingCard: React.FC<FindingCardProps> = ({
   return (
     <div
       className={`group p-6 bg-slate-200/10 dark:bg-[#1D2A31] rounded-md border transition-all duration-300 shadow-[0_10px_15px_-3px_rgba(0,0,0,0.05)] hover:shadow-md relative overflow-hidden flex flex-col gap-6 ${
-        isConfirmed || isAssigned
-          ? "border-emerald-500 ring-1 ring-emerald-500/20"
-          : isFalsePositive
-            ? "opacity-60 border-slate-200 dark:border-slate-800"
-            : "border-slate-200 dark:border-slate-800 hover:border-accent/40"
+        findingBorderClass(finding)
       }`}
     >
       <div
@@ -360,14 +357,6 @@ export const DefaultFindingCard: React.FC<FindingCardProps> = ({
             )}
           </div>
 
-          <div className="pt-2 flex flex-col items-start gap-3">
-            <button
-              onClick={() => setIsContextModalOpen(true)}
-              className="text-[9px] font-bold text-slate-500 uppercase tracking-widest hover:text-accent transition-colors text-left"
-            >
-              Click to open contextual data
-            </button>
-          </div>
         </div>
 
         {!isFullWidth && (
@@ -386,101 +375,6 @@ export const DefaultFindingCard: React.FC<FindingCardProps> = ({
         )}
       </div>
 
-      <div className="flex items-center justify-between pt-4 border-t border-slate-50 dark:border-slate-700/50 mt-auto">
-        <div className="flex items-center gap-2">
-          {isFalsePositive ? (
-            <button
-              onClick={() => onConfirm?.(finding.id)}
-              className="btn-unified"
-            >
-              Re-flag as genuine
-            </button>
-          ) : (
-            <>
-              {!(hasTask || isAssigned) && (
-                <button
-                  onClick={() => onFalsePositive?.(finding.id)}
-                  className="btn-unified"
-                >
-                  False Positive
-                </button>
-              )}
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() =>
-                    onCreateTask?.({
-                      ...finding,
-                      title: localTitle,
-                      gallery_images: galleryImages,
-                    })
-                  }
-                  disabled={hasTask || isAssigned}
-                  className={`btn-unified ${hasTask || isAssigned ? "bg-accent text-white cursor-not-allowed" : ""}`}
-                >
-                  {hasTask || isAssigned ? "Task Linked" : "Add to Tasks"}
-                </button>
-
-                {(hasTask || isAssigned) &&
-                  assignedTaskIds &&
-                  assignedTaskIds.length > 0 &&
-                  assignedTaskIds[0] !== finding.id && (
-                    <div className="ml-1 flex items-center gap-1">
-                      <Link
-                        to={`/projects/${projectId}?tab=tasks&taskId=${assignedTaskIds[0]}`}
-                        target="_blank"
-                        className="text-slate-400 hover:text-accent transition-colors"
-                        title="View Task"
-                      >
-                        <Eye size={14} />
-                      </Link>
-                      <button
-                        onClick={(e) => {
-                          e.preventDefault()
-                          e.stopPropagation()
-                          bulkDeleteTasks(assignedTaskIds)
-                        }}
-                        disabled={isDeleting}
-                        className="ml-1 text-slate-400 hover:text-red-500 transition-colors"
-                        title="Unlink Task"
-                      >
-                        <Unlink size={14} />
-                      </button>
-                    </div>
-                  )}
-              </div>
-            </>
-          )}
-        </div>
-
-        {assignedUsers.length > 0 && (
-          <div className="flex items-center gap-1.5 bg-slate-50 dark:bg-[#131d22] border border-slate-100 dark:border-slate-700 p-1.5 rounded-full pl-3 pr-2">
-            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest leading-none">
-              Assigned
-            </span>
-            <div className="flex -space-x-1.5 overflow-hidden">
-              {assignedUsers.map((u, idx) => (
-                <div
-                  key={u.id || idx}
-                  className="w-6 h-6 rounded-full bg-slate-200 dark:bg-[#1d2a31] border-2 border-white dark:border-[#1D2A31] flex items-center justify-center text-[8px] font-bold text-slate-500 dark:text-slate-300 relative group/avatar"
-                >
-                  {u.avatar_url ? (
-                    <img
-                      src={u.avatar_url}
-                      alt={u.full_name || ""}
-                      className="w-full h-full rounded-full object-cover"
-                    />
-                  ) : (
-                    u.full_name?.[0] || ""
-                  )}
-                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-slate-900 text-white text-[10px] rounded opacity-0 group-hover/avatar:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-10">
-                    {u.full_name}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
 
       {isContextModalOpen && (
         <div
