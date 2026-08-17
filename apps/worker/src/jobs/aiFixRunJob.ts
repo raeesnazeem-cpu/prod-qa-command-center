@@ -115,8 +115,39 @@ function parseTriage(text: string): { category: string; fix: string; edits: Edit
 }
 
 function ownerRepoFromUrl(repoUrl: string): { owner: string; repo: string } | null {
-  const m = repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)(?:\.git)?/i)
+  // Repo names can contain dots (e.g. nuvoaestheticsclinic.gogroth.com), so we
+  // must NOT stop the repo capture at the first dot — only strip a trailing
+  // `.git` and any trailing slash / query / fragment.
+  const m = repoUrl.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?(?:[?#].*)?$/i)
   return m ? { owner: m[1], repo: m[2] } : null
+}
+
+// Per-project push token override. Some clients' beta_site.env repos live under
+// a GitHub org/account the shared GIT_FIX_TOKEN cannot push to (e.g. TED client
+// 1534 → G99agency/nuvoaestheticsclinic.gogroth.com, which has its own
+// repo-scoped PAT). This maps a beta repo (owner/repo) to the env var holding
+// its dedicated token, so the correct token is used ONLY for that one repo and
+// falls back to GIT_FIX_TOKEN everywhere else.
+//
+// Config, never per-project code — GIT_FIX_TOKEN_OVERRIDES is a comma-separated
+// list of `owner/repo=ENV_VAR_NAME`. Add a new project by adding one line:
+//   GIT_FIX_TOKEN_OVERRIDES=G99agency/nuvoaestheticsclinic.gogroth.com=GH_TOKEN_NUVO
+function resolveGitFixToken(
+  ownerRepo: { owner: string; repo: string } | null,
+): string | undefined {
+  if (!ownerRepo) return undefined
+  const raw = process.env.GIT_FIX_TOKEN_OVERRIDES
+  if (!raw) return undefined
+  const key = `${ownerRepo.owner}/${ownerRepo.repo}`.toLowerCase()
+  for (const entry of raw.split(",")) {
+    const [repoKey, envVar] = entry.split("=").map((s) => s.trim())
+    if (!repoKey || !envVar) continue
+    if (repoKey.toLowerCase() === key) {
+      const val = process.env[envVar]
+      if (val) return val
+    }
+  }
+  return undefined
 }
 
 export async function processAiFixRunJob(job: Job) {
@@ -130,9 +161,11 @@ export async function processAiFixRunJob(job: Job) {
     return
   }
 
-  const token = process.env.GIT_FIX_TOKEN
-  const dryRun = process.env.AI_FIX_DRY_RUN === "true" || !token
-  logger.info({ runId, tedTaskId, dryRun }, "AI Fix module starting")
+  // Shared default push token. A per-repo override may replace it once the beta
+  // repo is resolved (see resolveGitFixToken below). dryRun is finalized there
+  // too, since a project may have an override token but no shared GIT_FIX_TOKEN.
+  const baseToken = process.env.GIT_FIX_TOKEN
+  logger.info({ runId, tedTaskId }, "AI Fix module starting")
 
   const { data: findings } = await supabase
     .from("findings")
@@ -171,6 +204,15 @@ export async function processAiFixRunJob(job: Job) {
   )
 
   const ownerRepo = repoUrl ? ownerRepoFromUrl(repoUrl) : null
+  // Prefer a repo-scoped override token for this exact beta repo (e.g. client
+  // 1534's G99agency repo → GH_TOKEN_NUVO); otherwise the shared token.
+  const overrideToken = resolveGitFixToken(ownerRepo)
+  const token = overrideToken ?? baseToken
+  const dryRun = process.env.AI_FIX_DRY_RUN === "true" || !token
+  logger.info(
+    { runId, dryRun, tokenSource: overrideToken ? "override" : baseToken ? "shared" : "none", ownerRepo },
+    "AI Fix: push token resolved",
+  )
   // A dry run still clones (proposals are only meaningful checked against the
   // real files); pushing is what a dry run withholds.
   const canClone = !!repoUrl && !!ownerRepo && !!token
