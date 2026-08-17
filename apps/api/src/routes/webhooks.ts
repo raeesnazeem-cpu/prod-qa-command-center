@@ -1327,31 +1327,25 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
               `✅ Proceeding with QACC project: ${project.name} (ID: ${project.id})`,
             )
 
-            // 1b. Backfill the project's site URL from TED when it's still on
-            // the placeholder (or empty). We only overwrite the fallback so a
-            // URL a human set intentionally in QACC is never clobbered.
-            if (tedSiteUrl) {
-              const current = (project.site_url || "").trim()
-              const isPlaceholder =
-                !current || /qacctest\.gogroth\.com/i.test(current)
-              if (isPlaceholder && current !== tedSiteUrl) {
-                const { data: upd, error: updErr } = await supabase
-                  .from("projects")
-                  .update({ site_url: tedSiteUrl })
-                  .eq("id", project.id)
-                  .select()
-                  .single()
-                if (updErr) {
-                  console.error(
-                    "❌ Failed to backfill project site_url:",
-                    updErr,
-                  )
-                } else if (upd) {
-                  project = upd
-                  console.log(
-                    `✅ Backfilled project site_url: "${current || "(empty)"}" -> "${tedSiteUrl}"`,
-                  )
-                }
+            // 1b. The project's "active website" (site_url) ALWAYS reflects what
+            // is being scanned RIGHT NOW — every new scan overwrites it with the
+            // current target URL, so the header never shows a stale domain. Only
+            // written when it actually changes (avoids a redundant update).
+            if (tedSiteUrl && (project.site_url || "").trim() !== tedSiteUrl) {
+              const prev = (project.site_url || "").trim() || "(empty)"
+              const { data: upd, error: updErr } = await supabase
+                .from("projects")
+                .update({ site_url: tedSiteUrl })
+                .eq("id", project.id)
+                .select()
+                .single()
+              if (updErr) {
+                console.error("❌ Failed to update project site_url:", updErr)
+              } else if (upd) {
+                project = upd
+                console.log(
+                  `✅ Updated active site_url: "${prev}" -> "${tedSiteUrl}"`,
+                )
               }
             }
 
@@ -2196,27 +2190,24 @@ webhookRouter.post(
               `✅ Proceeding with QACC project: ${project.name} (ID: ${project.id})`,
             )
 
-            // Backfill site URL from TED only while it's still the placeholder,
-            // so a URL a human set intentionally is never clobbered.
-            if (tedSiteUrl) {
-              const current = (project.site_url || "").trim()
-              const isPlaceholder =
-                !current || /qacctest\.gogroth\.com/i.test(current)
-              if (isPlaceholder && current !== tedSiteUrl) {
-                const { data: upd, error: updErr } = await supabase
-                  .from("projects")
-                  .update({ site_url: tedSiteUrl })
-                  .eq("id", project.id)
-                  .select()
-                  .single()
-                if (updErr) {
-                  console.error("❌ Failed to backfill project site_url:", updErr)
-                } else if (upd) {
-                  project = upd
-                  console.log(
-                    `✅ Backfilled project site_url: "${current || "(empty)"}" -> "${tedSiteUrl}"`,
-                  )
-                }
+            // The project's "active website" (site_url) ALWAYS reflects what is
+            // being scanned RIGHT NOW — every new scan overwrites it, so the
+            // header never shows a stale domain. Only written when it changes.
+            if (tedSiteUrl && (project.site_url || "").trim() !== tedSiteUrl) {
+              const prev = (project.site_url || "").trim() || "(empty)"
+              const { data: upd, error: updErr } = await supabase
+                .from("projects")
+                .update({ site_url: tedSiteUrl })
+                .eq("id", project.id)
+                .select()
+                .single()
+              if (updErr) {
+                console.error("❌ Failed to update project site_url:", updErr)
+              } else if (upd) {
+                project = upd
+                console.log(
+                  `✅ Updated active site_url: "${prev}" -> "${tedSiteUrl}"`,
+                )
               }
             }
 
@@ -2854,6 +2845,22 @@ webhookRouter.post(
                 `🛑 Post-release scan cancelled for "${project.name}" — no live/released site URL.`,
               )
             } else {
+            // The project's "active website" (site_url) ALWAYS reflects what is
+            // being scanned RIGHT NOW — overwrite it with this run's target so
+            // the header never shows a stale domain. Only when it changes.
+            if ((project.site_url || "").trim() !== runSiteUrl) {
+              const prev = (project.site_url || "").trim() || "(empty)"
+              const { error: updErr } = await supabase
+                .from("projects")
+                .update({ site_url: runSiteUrl })
+                .eq("id", project.id)
+              if (updErr)
+                console.error("❌ Failed to update project site_url:", updErr)
+              else
+                console.log(
+                  `✅ Updated active site_url: "${prev}" -> "${runSiteUrl}"`,
+                )
+            }
             // Build the scan-start comment for the main thread: which URL was
             // scanned + where it came from, plus any mismatch/fallback warning.
             scanStartComment =

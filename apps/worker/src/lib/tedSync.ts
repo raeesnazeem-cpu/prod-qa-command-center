@@ -1517,17 +1517,21 @@ export async function postSectionedReport(opts: {
   const titleHtml =
     `<strong>${kind} QA — Report</strong><br>` +
     (runMeta?.site_url ? `Site: ${esc(runMeta.site_url)}<br>` : "")
+  // High-level test-case roll-up: one line per check (subtask) → Passed/Failed,
+  // failed first (sections are already sorted failed→passed). Deliberately icon-
+  // light — a single count line, then a plain-text list, so the summary reads as
+  // results, not a wall of emoji.
+  const rollupItems = sections
+    .map(
+      (s) =>
+        `<li>${esc(FRIENDLY[s.factor] || titleCase(s.factor))} — ${
+          s.status === "failed" ? "Failed" : "Passed"
+        }</li>`,
+    )
+    .join("")
   const overview =
-    `<p>` +
-    [
-      tally.failed
-        ? `❌ ${tally.failed} check${tally.failed > 1 ? "s" : ""} with issues`
-        : "",
-      tally.passed ? `✅ ${tally.passed} passed` : "",
-    ]
-      .filter(Boolean)
-      .join(" · ") +
-    `</p>`
+    `<p><strong>Test cases:</strong> ${tally.failed + tally.passed} total — ${tally.failed} failed, ${tally.passed} passed.</p>` +
+    (rollupItems ? `<ul>${rollupItems}</ul>` : "")
 
   const subtaskMap = runMeta?.ted_subtask_map || {}
   const hasSubtasks = Object.keys(subtaskMap).length > 0
@@ -1585,12 +1589,55 @@ export async function postSectionedReport(opts: {
         ).catch(() => {})
       }
     }
-    // Always post a summary on the PARENT (main thread) when there's a summary
-    // header (the AI-fix run-level summary) OR checks with no subtask to route
-    // to. This guarantees the run summary lands on the main thread even when
-    // every check mapped cleanly to its own subtask.
-    if (opts.summaryHeaderHtml || leftovers.length) {
-      let body = titleHtml + (opts.summaryHeaderHtml || "") + `<br>` + overview
+    // No subtask left reason-less: a mapped check that produced NO pass/fail
+    // section (it errored / could not complete) would otherwise be marked
+    // Completed with no comment. Post the EXACT reason to each such subtask so
+    // every one carries a pinpointed result before it is closed. `sections` are
+    // the checks that produced a pass/fail result; anything mapped but missing
+    // from it is an errored/no-result check.
+    const resultFactors = new Set(sections.map((s) => s.factor))
+    for (const [factor, raw] of Object.entries(subtaskMap)) {
+      if (resultFactors.has(factor)) continue
+      const targets = Array.isArray(raw) ? raw : raw ? [raw] : []
+      if (!targets.length) continue
+      const label = FRIENDLY[factor] || titleCase(factor)
+      const lapse = (byCheck.get(factor) || []).find(isToolLapseFinding)
+      const reason = lapse
+        ? clipText(
+            String(lapse.description || lapse.title || "")
+              .replace(/\s+/g, " ")
+              .trim(),
+            240,
+          )
+        : ""
+      const body = `<p><strong>${esc(label)}</strong> — Could not complete this run${
+        reason ? `: ${esc(reason)}` : " (the check produced no automated pass/fail result)"
+      }. QACC has made the call and marked this subtask complete; review manually if needed.</p>`
+      for (const target of targets) {
+        await postTedComment(
+          target,
+          body,
+          `ext:${opts.eventKeyPrefix}-subtask-noresult-${runId}-${factor}-${target}`,
+          {
+            runId,
+            projectId: runMeta?.project_id,
+            targetKind: "subtask",
+            checkFactor: factor,
+            ...reportCtx,
+          },
+        ).catch(() => {})
+      }
+    }
+    // ALWAYS post the final summary on the PARENT (main thread) — the high-level
+    // test-case roll-up (each check → Passed/Failed) + any AI-fix run status +
+    // any check with no subtask to route to. Posted every run so the main thread
+    // always carries the final summary before the parent task is closed.
+    {
+      // Order: scan pass/fail roll-up FIRST, then the fixes-applied high-level
+      // summary (summaryHeaderHtml, present only on the AI-fix pass), then any
+      // no-subtask leftover sections.
+      let body =
+        titleHtml + overview + (opts.summaryHeaderHtml || "")
       for (const sec of leftovers) body += sec.html
       await postTedComment(
         tedTaskId,
@@ -1601,10 +1648,11 @@ export async function postSectionedReport(opts: {
     }
   } else {
     // No subtasks → one combined, section-by-section summary on the parent.
-    // Two-line gap between sections so the stacked checks don't read as one
-    // crowded block (TED renders <br>, strips inline style).
+    // Order: scan pass/fail roll-up FIRST, then the fixes-applied high-level
+    // summary (summaryHeaderHtml), then each section. Two-line gap between
+    // sections so the stacked checks don't read as one crowded block.
     let body =
-      titleHtml + (opts.summaryHeaderHtml || "") + `<br>` + overview
+      titleHtml + overview + (opts.summaryHeaderHtml || "")
     sections.forEach((sec, i) => {
       if (i > 0) body += `<br><br>`
       body += sec.html
