@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express"
+import { isTedIssuedToken, verifyTedSsoToken } from "./tedSso"
 
 export interface AuthPayload {
   userId: string
@@ -99,6 +100,20 @@ export const clerkAuth = async (
   const token = authz.startsWith("Bearer ") ? authz.slice(7).trim() : ""
   if (!token) {
     res.status(401).json({ error: "Login required" })
+    return
+  }
+
+  // SSO path: a TED-issued token (aud=qacc) is verified against TED's public
+  // keys (JWKS). Only tokens whose issuer is TED take this branch; everything
+  // else falls through to the Google backup below. Same super_admin identity.
+  if (isTedIssuedToken(token)) {
+    const ted = await verifyTedSsoToken(token)
+    if (!ted.ok) {
+      res.status(ted.status).json({ error: ted.error })
+      return
+    }
+    stampSystemIdentity(req, ted.email, "ted:" + ted.sub)
+    next()
     return
   }
 

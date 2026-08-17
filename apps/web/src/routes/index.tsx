@@ -7,6 +7,7 @@ import {
   RunDetailPage,
   FixPreviewPage,
   SettingsPage,
+  SsoCallback,
 } from "@/pages";
 
 // Headless mode: no auth routes, no ProtectedRoute. TED owns auth. The UI is a
@@ -16,6 +17,9 @@ export const router = createBrowserRouter(
     // Standalone, chrome-free carousel opened by the TED "AI Fix" link. Kept
     // OUTSIDE AppLayout so it shows nothing of QACC.
     { path: "/fix-preview/:id", element: <FixPreviewPage /> },
+    // TED SSO landing (chrome-free): grabs the token from the URL hash and
+    // sends the user into the app. See lib/googleAuth captureSsoTokenFromUrl.
+    { path: "/sso", element: <SsoCallback /> },
     {
       element: (
         <ChatProvider>

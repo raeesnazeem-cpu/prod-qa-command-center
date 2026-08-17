@@ -105,6 +105,9 @@ importers:
       ioredis:
         specifier: ^5.3.2
         version: 5.10.1
+      jose:
+        specifier: ^5.9.6
+        version: 5.10.0
       pino:
         specifier: ^8.19.0
         version: 8.21.0
@@ -4455,6 +4458,9 @@ packages:
   jiti@1.21.7:
     resolution: {integrity: sha512-/imKNG4EbWNrVjoNC/1H5/9GFy+tqjGBHCaSsN+P2RnPqjsLmv6UD3Ej+Kj8nBWaRAwyk7kK5ZUc+OEatnTR3A==}
     hasBin: true
+
+  jose@5.10.0:
+    resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
 
   jose@6.2.3:
     resolution: {integrity: sha512-YYVDInQKFJfR/xa3ojUTl8c2KoTwiL1R5Wg9YCydwH0x0B9grbzlg5HC7mMjCtUJjbQ/YnGEZIhI5tCgfTb4Hw==}
@@ -11091,6 +11097,8 @@ snapshots:
       - ts-node
 
   jiti@1.21.7: {}
+
+  jose@5.10.0: {}
 
   jose@6.2.3: {}
 
