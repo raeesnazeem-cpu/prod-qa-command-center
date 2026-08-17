@@ -525,9 +525,16 @@ export async function checkFooterLogo(
   if (onProgress) await onProgress(85, "Analyzing footer logo across views (vision)...")
 
   const perView: { name: string; pass: boolean; reasons: string[]; variant?: string; notes?: string }[] = []
+  const visionErrors: string[] = []
   for (const { name, buffer } of footerBuffers) {
-    const verdict = await verifyFooterLogo(buffer).catch(() => null)
-    if (!verdict) continue // vision unavailable for this view
+    const { verdict, error } = await verifyFooterLogo(buffer).catch((e: any) => ({
+      verdict: null,
+      error: e?.message || String(e),
+    }))
+    if (!verdict) {
+      if (error) visionErrors.push(`${name}: ${error}`)
+      continue // vision unavailable for this view
+    }
     const { pass, reasons } = evaluateFooterLogo(verdict)
     perView.push({ name, pass, reasons, variant: verdict.variant, notes: verdict.notes })
   }
@@ -564,13 +571,20 @@ export async function checkFooterLogo(
     ]
   }
 
-  // Vision unavailable → keep the manual verify finding (no silent pass).
+  // Vision unavailable for every view (no key, or every provider/key errored) →
+  // we captured screenshots but could NOT verify, so this must fail for manual
+  // review, never pass. The full provider error is already in the worker log
+  // (describeImageResult logs it). Evidence screenshots ride along.
   return [
     {
       check_factor: "footer_logo",
-      title: "Verify Footer Logo",
+      title: "Footer logo not verified — AI vision unavailable",
       description:
-        "Please verify the footer logo across all 3 views (Desktop, Tablet, Mobile) using the evidence screenshots. It must be the approved Growth99 logo (white or colour variant) with no tagline.",
+        "The footer logo could not be verified because the AI vision service returned no result for any view. Marked as failed for manual review — confirm the approved Growth99 logo (white or colour variant, no tagline) across Desktop, Tablet, and Mobile using the evidence screenshots.",
+      // Full technical reason for the worker log + internal QACC copy only —
+      // sanitizeClientReport strips this "AI vision unavailable:" line from the
+      // client-facing copy.
+      context_text: `AI vision unavailable: ${(visionErrors.join(" ; ") || "no result for any view").slice(0, 400)}`,
       screenshot_url: screenshotUrls,
       status: "open",
       ai_generated: false,
@@ -2494,7 +2508,7 @@ export async function checkLogoOnChatbot(
   const { chromium } = require("playwright")
   const sharp = require("sharp")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
-  const { describeImage } = require("../lib/aiFallback")
+  const { describeImageResult } = require("../lib/aiFallback")
   const { supabase } = require("../lib/supabase")
 
   const CHECK_FACTOR = "logo_chatbot"
@@ -2621,16 +2635,33 @@ export async function checkLogoOnChatbot(
       ? `Image 1 is a website's MAIN header logo. Image 2 is the circular chatbot toggle icon from the same site.${nameCtx} Do they represent the SAME brand? The chatbot icon may be a VARIATION of the main logo — the symbol/icon alone, the wordmark alone, or a simplified mark — and that still counts as a match. It is NOT a match if image 2 is a generic chat/speech-bubble icon, empty, or a DIFFERENT company's logo. Answer on the FIRST line with exactly MATCH or NO_MATCH, then a second line with a one-sentence reason.`
       : `This is the circular chatbot toggle from a website's homepage.${nameCtx} Does it show the website owner's own brand logo/mark (or a variation of it — icon or wordmark alone), as opposed to no logo, a generic chat/speech-bubble icon, or a different company's logo? Answer on the FIRST line with exactly MATCH or NO_MATCH, then a second line with a one-sentence reason.`
 
-    let verdictRaw = ""
-    try {
-      verdictRaw = (await describeImage(buffers, prompt)) || ""
-    } catch {
-      verdictRaw = ""
-    }
-    const isMatch = /\bMATCH\b/i.test(verdictRaw) && !/\bNO[_\s-]?MATCH\b/i.test(verdictRaw)
-    const reason = verdictRaw.replace(/\s+/g, " ").trim().slice(0, 400)
+    const vision = await describeImageResult(buffers, prompt)
+    const verdictRaw = vision.text || ""
     const shots = [iconShot, headerShot].filter(Boolean).join(",")
     const refNote = headerBuf ? "" : " (header logo could not be captured — judged from the toggle alone)"
+
+    // Vision unavailable (no key, or every provider/key errored) → we CANNOT
+    // verify the logo, so we must NOT pass and must NOT invent a "does not match"
+    // verdict. Report it as a failed check needing manual review, with the
+    // captured screenshots as evidence. The full provider error is already in the
+    // worker log (describeImageResult logs it); a short reason rides along here.
+    if (!vision.ok) {
+      return [
+        {
+          check_factor: CHECK_FACTOR,
+          title: "Chatbot logo not verified — AI vision unavailable",
+          description:
+            "The chatbot logo could not be verified because the AI vision service returned no result. Marked as failed for manual review — confirm the chatbot toggle shows the client's own brand logo (see the evidence screenshot).",
+          context_text: `AI vision unavailable: ${(vision.error || "no result").slice(0, 300)}${refNote}`,
+          screenshot_url: shots || iconShot || null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+
+    const isMatch = /\bMATCH\b/i.test(verdictRaw) && !/\bNO[_\s-]?MATCH\b/i.test(verdictRaw)
+    const reason = verdictRaw.replace(/\s+/g, " ").trim().slice(0, 400)
 
     if (isMatch) {
       return [

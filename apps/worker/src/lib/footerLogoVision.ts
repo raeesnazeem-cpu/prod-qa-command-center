@@ -1,6 +1,6 @@
 import fs from "fs"
 import path from "path"
-import { describeImage } from "./aiFallback"
+import { describeImageResult } from "./aiFallback"
 
 /**
  * Footer-logo vision verifier — recognizes the Growth99 logo in the footer and
@@ -77,9 +77,12 @@ Inspect the FOOTER screenshot (the LAST image) and decide:
 Return STRICT JSON only, no markdown:
 {"logoFound":bool,"matchesApproved":bool,"hasTagline":bool,"variant":"white|color|other","backgroundIsDark":bool,"legibleOnBackground":bool,"notes":"..."}`
 
+// Returns the parsed verdict, or `verdict: null` with an `error` describing why
+// (vision unavailable, or an unparseable reply). The error is meant for the
+// worker log + the internal QACC report copy, never the client-facing copy.
 export async function verifyFooterLogo(
   footerScreenshot: Buffer,
-): Promise<FooterLogoVerdict | null> {
+): Promise<{ verdict: FooterLogoVerdict | null; error?: string }> {
   const refs = loadReferenceLogos()
   const prompt =
     refs.length > 0
@@ -87,23 +90,25 @@ export async function verifyFooterLogo(
       : PROMPT_BASE
   const images = [...refs, footerScreenshot]
 
-  const text = await describeImage(images, prompt).catch(() => "")
-  if (!text) return null
+  const res = await describeImageResult(images, prompt)
+  if (!res.ok) return { verdict: null, error: res.error || "vision unavailable" }
   try {
-    const m = text.match(/\{[\s\S]*\}/)
-    if (!m) return null
+    const m = res.text.match(/\{[\s\S]*\}/)
+    if (!m) return { verdict: null, error: "vision returned an unparseable reply (no JSON)" }
     const j = JSON.parse(m[0])
     return {
-      logoFound: !!j.logoFound,
-      matchesApproved: !!j.matchesApproved,
-      hasTagline: !!j.hasTagline,
-      variant: j.variant === "white" || j.variant === "color" ? j.variant : "other",
-      backgroundIsDark: !!j.backgroundIsDark,
-      legibleOnBackground: j.legibleOnBackground !== false,
-      notes: String(j.notes || ""),
+      verdict: {
+        logoFound: !!j.logoFound,
+        matchesApproved: !!j.matchesApproved,
+        hasTagline: !!j.hasTagline,
+        variant: j.variant === "white" || j.variant === "color" ? j.variant : "other",
+        backgroundIsDark: !!j.backgroundIsDark,
+        legibleOnBackground: j.legibleOnBackground !== false,
+        notes: String(j.notes || ""),
+      },
     }
   } catch {
-    return null
+    return { verdict: null, error: "vision returned an unparseable reply (bad JSON)" }
   }
 }
 

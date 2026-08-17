@@ -76,6 +76,14 @@ function displayHostFor(clientDomain?: string | null, runType?: string | null): 
 // fallback / clone / could-not-push plumbing and, when a fix landed, say simply
 // "committed and created a pull request". The raw QACC copy is untouched.
 const CLIENT_WORDING: [RegExp, string][] = [
+  // The client SEES that AI vision failed (kept, in plain words) but NOT the raw
+  // provider error after the colon — that backend detail lives only in the worker
+  // log + the internal QACC copy. Replace the "AI vision unavailable: <errors>"
+  // context line with a clean, client-safe note.
+  [
+    /<br>\s*<small>AI vision unavailable:[\s\S]*?<\/small>/gi,
+    "<br><small>⚠️ AI vision could not verify this automatically — flagged for manual review.</small>",
+  ],
   // The whole fallback "Note:" paragraph.
   [/<p><strong>Note:<\/strong>[^]*?fallback repository and its hosted site[^]*?<\/p>/gi, ""],
   // Repo label in the header.
@@ -736,6 +744,12 @@ export function isCleanPassFinding(f: any): boolean {
 // reports the detected plugin count for a human to eyeball). It is not a defect
 // and not a "no issues found" sentinel — treat it as a pass that surfaces the
 // fact (the count), never as an issue.
+// Vision-verdict checks decide pass/fail from an AI-vision read of a screenshot.
+// For these a PASS must carry its evidence (the screenshot + the vision reason),
+// and a check that produced NO finding must never be reported as a silent pass —
+// there is nothing verified to pass on.
+const VISION_VERDICT_CHECKS = new Set(["logo_chatbot", "footer_logo"])
+
 const INFORMATIONAL_CHECKS = new Set(["plugin_number", "video_recording"])
 export function isInformationalFinding(f: any): boolean {
   return INFORMATIONAL_CHECKS.has(f?.check_factor) && !isToolLapseFinding(f)
@@ -1180,6 +1194,15 @@ async function renderCheckSectionHtml(
   const lapses = group.filter(isToolLapseFinding)
   const cleanPass = group.filter(isCleanPassFinding)
 
+  // A vision-verdict check with NO finding at all (enabled but never emitted a
+  // result — skipped or threw before returning) has verified nothing, so it must
+  // NOT fall through to the generic "Passed — found no issues" line. Report it as
+  // could-not-complete (empty → dropped from the report; the subtask closeout
+  // posts an honest "could not complete this run"), never a silent pass.
+  if (VISION_VERDICT_CHECKS.has(factor) && group.length === 0) {
+    return { status: "errored", html: "" }
+  }
+
   // Link checks: render EVERY broken link in full (whole URL, status/reason,
   // anchor text, and the page it was found on) — never a clipped preview, since
   // a truncated URL tells the client nothing. Merged + deduped across pages.
@@ -1394,6 +1417,32 @@ async function renderCheckSectionHtml(
       html: `<p>✅ <strong>${esc(label)}</strong> — Passed. ${line ? esc(line) : "No problems found."} No errors.${extra}</p>`,
     }
   }
+  // Vision-verdict pass: a logo check only passes because AI vision READ a
+  // screenshot and confirmed it, so the pass MUST carry that evidence — the
+  // screenshot and the vision reason — not a bare green line. This deliberately
+  // overrides the global "screenshots hidden" TEMP note above for these checks.
+  if (VISION_VERDICT_CHECKS.has(factor) && cleanPass.length > 0) {
+    const cp = cleanPass[0]
+    const desc = clipText(
+      String(cp.description || cp.title || "").replace(/\s+/g, " ").trim(),
+      240,
+    )
+    let html = `<p>✅ <strong>${esc(label)}</strong> — Passed. ${desc ? esc(desc) : "Verified by AI vision."}</p>`
+    // Surface the vision reason when it's plain text (chatbot stores "AI vision:
+    // <reason>"); skip machine context like the footer's JSON perView blob.
+    const ctx = String(cp.context_text || "").trim()
+    if (ctx && !/^[[{]/.test(ctx)) {
+      const reason = clipText(
+        ctx.replace(/^AI vision:\s*/i, "").replace(/\s+/g, " ").trim(),
+        300,
+      )
+      if (reason) html += `<p><small>AI vision: ${esc(reason)}</small></p>`
+    }
+    if (cp.screenshot_url)
+      html += await renderScreenshotsHtml(String(cp.screenshot_url), imgBudget)
+    return { status: "passed", html }
+  }
+
   const detail = cleanPass.length
     ? clipText(
         String(cleanPass[0].description || cleanPass[0].title || "")

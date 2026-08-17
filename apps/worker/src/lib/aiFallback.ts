@@ -1,6 +1,12 @@
 import { genAI, analyzeImageWith, makeGeminiClient } from "@qacc/ai"
+import pino from "pino"
 
 type GeminiClient = ReturnType<typeof makeGeminiClient>
+
+const logger = pino({
+  level: process.env.LOG_LEVEL || "info",
+  transport: { target: "pino-pretty", options: { colorize: true } },
+})
 
 /**
  * Worker-side text completion with multi-provider fallback.
@@ -167,7 +173,30 @@ export async function completeText(system: string, user: string): Promise<AiResu
  * Each provider tries GEMINI_MODELS in order. Best-effort: returns "" if every
  * provider fails or no key is set — callers already treat empty as "no result".
  */
-export async function describeImage(buffer: Buffer | Buffer[], prompt: string): Promise<string> {
+export interface VisionResult {
+  /** The model's reply, or "" when no provider returned text. */
+  text: string
+  /** true only when a provider actually returned a non-empty reply. */
+  ok: boolean
+  /** When !ok, the FULL reason (no providers configured, or every provider's
+   *  error joined) — already logged to the worker log at error level. */
+  error?: string
+  /** The provider/key that answered, when ok. */
+  provider?: string
+}
+
+/**
+ * Vision with an EXPLICIT availability signal. Unlike describeImage (which
+ * flattens every failure to ""), this distinguishes "vision ran and answered"
+ * (ok:true) from "vision is unavailable" (ok:false) — no key configured, or
+ * every provider/key errored. Every failure is logged in full to the worker log
+ * so a real vision outage is never silent. Verdict checks (logo match, etc.)
+ * MUST use this so an outage becomes an honest failure, never a false pass/fail.
+ */
+export async function describeImageResult(
+  buffer: Buffer | Buffer[],
+  prompt: string,
+): Promise<VisionResult> {
   const env = process.env
   const providers: { name: string; client: GeminiClient }[] = []
   if (env.GOOGLE_AI_API_KEY) providers.push({ name: "gemini", client: genAI })
@@ -175,13 +204,33 @@ export async function describeImage(buffer: Buffer | Buffer[], prompt: string): 
   geminiKeyList().forEach((client, i) => providers.push({ name: `gemini-keys-${i + 1}`, client }))
   if (env.GEMINI_API_KEY) providers.push({ name: "gemini-paid", client: paidGemini() })
 
+  if (providers.length === 0) {
+    const error =
+      "no vision provider configured — set GOOGLE_AI_API_KEY, GEMINI_KEYS, or GEMINI_API_KEY"
+    logger.error({ error }, "Vision unavailable: no provider configured")
+    return { text: "", ok: false, error }
+  }
+
+  const errors: string[] = []
   for (const p of providers) {
     try {
       const text = await analyzeImageWith(p.client, GEMINI_MODELS, buffer, prompt)
-      if (text) return text
-    } catch {
-      // try the next provider/key
+      if (text) return { text, ok: true, provider: p.name }
+      errors.push(`${p.name}: returned an empty reply`)
+      logger.warn({ provider: p.name }, "Vision provider returned an empty reply; trying next")
+    } catch (e: any) {
+      const msg = e?.message || String(e)
+      errors.push(`${p.name}: ${msg}`)
+      logger.warn({ provider: p.name, error: msg }, "Vision provider failed; trying next")
     }
   }
-  return ""
+  const error = errors.join(" | ")
+  logger.error({ error }, "Vision unavailable: every provider failed")
+  return { text: "", ok: false, error }
+}
+
+/** Best-effort vision that returns "" on any failure (back-compat). Prefer
+ *  describeImageResult when the caller must know whether vision was available. */
+export async function describeImage(buffer: Buffer | Buffer[], prompt: string): Promise<string> {
+  return (await describeImageResult(buffer, prompt)).text
 }
