@@ -68,8 +68,8 @@ export async function processStartRunJob(job: Job) {
 
   // Detect the target theme type ONCE, before any check runs, and persist it on
   // the run so every check (and later the AI-fix job) can pick the classic- or
-  // block-theme variant. Hybrid: repo peek (local fallback repo / beta_site.env
-  // GitHub repo) → rendered-HTML fallback. Purely best-effort — a miss leaves
+  // block-theme variant. Hybrid: peek the beta_site.env GitHub repo → rendered-
+  // HTML fallback (no local fallback repo). Purely best-effort — a miss leaves
   // theme_type null and everything behaves exactly as before.
   try {
     const { data: proj } = await supabase

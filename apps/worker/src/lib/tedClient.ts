@@ -152,10 +152,10 @@ export async function resolveBetaSiteRepo(
   const clientId = client?.id
   if (!clientId) return null
 
-  // Repo always comes from the beta_site.env task's automation.payload. HubSpot
-  // is NOT a repo source (it supplies site URL / plan / GBP / paid-media data —
-  // see hubspotClient.ts). For local testing before the payload is populated,
-  // set AI_FIX_LOCAL_REPO — aiFixRunJob uses it directly and never calls this.
+  // Repo always comes from the beta_site.env task — its automation.payload
+  // (betaSiteRepo=…) or a "GitHub repo: …" comment on that task. HubSpot is NOT
+  // a repo source (it supplies site URL / plan / GBP / paid-media data — see
+  // hubspotClient.ts). There is no local fallback repo.
   return await repoFromTedTimeline(clientId)
 }
 

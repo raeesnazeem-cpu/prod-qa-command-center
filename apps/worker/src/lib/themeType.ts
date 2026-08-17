@@ -11,10 +11,9 @@ import { resolveBetaSiteRepo } from "./tedClient"
  * detection miss never changes what runs today.
  *
  * Hybrid resolution (see resolveThemeType):
- *   1. Repo-preferred — peek the source repo when it is available, either the
- *      local fallback repo (AI_FIX_LOCAL_REPO, read straight off disk) or the
- *      client's beta_site.env repo (GitHub tree, read via the API). This is the
- *      authoritative signal because it sees the actual template files.
+ *   1. Repo-preferred — peek the client's beta_site.env repo when available
+ *      (GitHub tree, read via the API). This is the authoritative signal because
+ *      it sees the actual template files. (There is NO local fallback repo.)
  *   2. Front-end fallback — when no repo can be peeked, classify from the
  *      RENDERED HTML of the live site (block themes emit wp-block-* markup and a
  *      global-styles stylesheet; a classic WP site has neither).
@@ -214,21 +213,14 @@ async function detectFromGitHub(repoUrl: string): Promise<ThemeType> {
 }
 
 /**
- * Hybrid resolver used at scan start. Repo-preferred (local fallback repo → beta
- * repo on GitHub), then the rendered-HTML fallback. Never throws.
+ * Hybrid resolver used at scan start. Repo-preferred (beta_site.env repo on
+ * GitHub), then the rendered-HTML fallback. Never throws. No local fallback repo.
  */
 export async function resolveThemeType(opts: {
   projectName?: string | null
   siteUrl?: string | null
-}): Promise<{ themeType: ThemeType; source: "local-repo" | "github-repo" | "front-end" | "none" }> {
-  // 1a. Local fallback repo — read straight off disk (the local-deploy case).
-  const localRepo = (process.env.AI_FIX_LOCAL_REPO || "").trim()
-  if (localRepo && fs.existsSync(path.join(localRepo, ".git"))) {
-    const t = detectFromRepoDir(localRepo)
-    if (t !== "unknown") return { themeType: t, source: "local-repo" }
-  }
-
-  // 1b. Beta_site.env repo on GitHub — one API call, no clone.
+}): Promise<{ themeType: ThemeType; source: "github-repo" | "front-end" | "none" }> {
+  // 1. Beta_site.env repo on GitHub — one API call, no clone.
   try {
     const repoUrl = await resolveBetaSiteRepo(opts.projectName || null).catch(() => null)
     if (repoUrl) {

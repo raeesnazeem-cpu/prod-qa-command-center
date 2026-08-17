@@ -19,6 +19,7 @@ import {
   gatherRepoContext,
   applyEdit,
   MAX_CONTEXT_FILES,
+  type ApplyResult,
 } from "../lib/repoContext"
 import {
   seedPrivacyPolicyPage,
@@ -47,35 +48,32 @@ const logger = pino({
 /**
  * AI Fix module — runs AFTER the QA report is posted to TED.
  *
- * DELIVERY (Git-only, never touches WP admin/DB directly) has two targets,
- * same for pre-release, post-release, and internal-QA runs:
+ * DELIVERY (Git-only, never touches WP admin/DB directly). The repo comes
+ * STRICTLY from the client's beta_site.env task (betaSiteRepo), the same source
+ * for pre-release, post-release, and internal-QA runs. There is NO local/demo
+ * fallback repo:
  *
- *  • REAL beta_site.env repo (betaRepo, not useLocal): resolve → clone →
- *    branch → apply AI corrections → commit each `fix: <finding>` → push the
- *    branch → open ONE pull request to `main`. A human reviews + merges; FlyWP
- *    (GitHub Action) then auto-deploys. The module NEVER merges.
- *  • Local fallback repo (useLocal, AI_FIX_LOCAL_REPO — used when beta_site.env
- *    has no clonable repo, e.g. the demo/test loop): same clone+branch+commit,
- *    but there is no PR reviewer for a local box, so the fixed branch is
- *    pushed STRAIGHT to `main` on the filesystem instead (see `pushedLocal`
- *    below). AI_FIX_LOCAL_REPO must be the exact repo backing
- *    QACC_FALLBACK_SITE_URL, so the push doubles as the deploy — whatever
- *    serves that URL reads straight off this repo's working tree.
+ *  • Repo resolves + clonable: resolve → clone → branch → apply AI corrections
+ *    → commit each `fix: <finding>` → push the branch → open ONE pull request to
+ *    `main`. A human reviews + merges; FlyWP (GitHub Action) then auto-deploys.
+ *    The module NEVER merges.
+ *  • No repo access (unresolved or not clonable): the fix pass still computes
+ *    each correction from the findings and reports it per subtask, explicitly
+ *    noting the change was NOT applied because there's no repo access. Nothing
+ *    is cloned or pushed.
  *
  * TWO OUTPUTS:
  *  1) TED comment = FIXED-errors report (grouped check → page → fix) + the
- *     single Pull request link (real repo) or local-push confirmation
- *     (fallback repo) + a "Review needed" bullet list of the findings AI
- *     could not auto-fix (human decision).
+ *     single Pull request link (when a repo was available), or a clear
+ *     "not applied — no repo access" status + a "Review needed" bullet list of
+ *     the findings AI could not auto-fix (human decision).
  *  2) Full categorized analysis (every finding: category + proposal + applied)
  *     is saved to the `ai_fix_runs` table for the QACC "Dry-run Data" tab.
  *
- * Gating: AI_FIX_MODULE_ENABLED=true. On the REAL repo, push happens only when
- * GIT_FIX_TOKEN is set and AI_FIX_DRY_RUN !== "true" — a dry run there still
- * clones and applies + verifies edits locally, so proposals are real diffs
- * against real files; it simply never pushes. The LOCAL fallback repo ignores
- * AI_FIX_DRY_RUN entirely and always pushes to main when a fix lands — there is
- * no meaningful "dry run" against a local test box.
+ * Gating: AI_FIX_MODULE_ENABLED=true. Push happens only when GIT_FIX_TOKEN is
+ * set and AI_FIX_DRY_RUN !== "true" — a dry run still clones and applies +
+ * verifies edits locally, so proposals are real diffs against real files; it
+ * simply never pushes.
  *
  * Retrieval: `lib/repoContext.ts` picks candidate files per finding and feeds the
  * model their ACTUAL contents. Edits are applied through `applyEdit`, which
@@ -159,79 +157,35 @@ export async function processAiFixRunJob(job: Job) {
   const { data: pages } = await supabase.from("pages").select("id, url").eq("run_id", runId)
   const pageUrlById = new Map<string, string>((pages || []).map((p: any) => [p.id, p.url]))
 
-  // Repo precedence keeps the end-to-end flow alive even when the beta site
-  // isn't fully wired up yet:
-  //   1. beta_site.env's real repo (betaSiteRepo) → clone from GitHub, can push.
-  //   2. else the fallback repo (AI_FIX_LOCAL_REPO) → clone locally, never push,
-  //      flagged in the report. The fixes are REAL and applied to this repo's
-  //      actual files — only the repo (and its hosted site) is a substitute so
-  //      the flow never stalls when beta_site.env isn't wired up yet.
-  //   3. else nothing to fix → reported as a failure below.
-  const localRepo = (process.env.AI_FIX_LOCAL_REPO || "").trim()
+  // Repo resolution — STRICTLY the client's beta_site.env repo (betaSiteRepo),
+  // the same source for pre-release, internal-QA, and post-release runs. There
+  // is NO local/demo fallback repo anymore:
+  //   • repo resolves & clones → clone from GitHub → branch → apply → push →
+  //     open ONE pull request to `main` (never merged; a human reviews + merges,
+  //     then FlyWP auto-deploys).
+  //   • repo missing / not clonable → the fix pass still computes each correction
+  //     from the findings and reports it per subtask, explicitly noting the
+  //     change was NOT applied because there's no repo access. Nothing is pushed.
+  const repoUrl: string | null = await resolveBetaSiteRepo(project?.name).catch(
+    () => null,
+  )
 
-  // Resolve the REAL beta repo so the fix pass can push a branch + open a PR.
-  // The repo always comes from the beta_site.env task; the run's URLs only
-  // decide whether we're in "real" mode or fall back to the forced demo repo
-  // (AI_FIX_LOCAL_REPO), which never pushes:
-  //   • pre-release / internal-QA → the scan already ran against a real beta
-  //     site, so resolve betaSiteRepo. Not present/clonable → demo fallback.
-  //   • post-release → only go real when TED's release.security actually
-  //     supplied the new released domain (run.released_site_url). If it didn't,
-  //     say so and fall back to the demo override.
-  // A run whose site_url is the fallback demo site is always the demo.
-  const fallbackSite = (process.env.QACC_FALLBACK_SITE_URL || "").trim()
-  const isDemoTarget =
-    !run?.site_url || (!!fallbackSite && run.site_url === fallbackSite)
-
-  let betaRepo: string | null = null
-  // When the demo repo is used, this records WHY, so the report can say so
-  // instead of silently pretending the target was real. (Only ever set for a
-  // demo-target run now — a real scan with no repo STALLS instead of falling
-  // back, see below.)
-  let fallbackReason = ""
-  if (isDemoTarget) {
-    logger.info(
-      { runId, siteUrl: run?.site_url },
-      "AI Fix: scan target is the fallback demo site → using the demo repo (no push).",
-    )
-  } else {
-    // Real scan (beta site for pre/internal, live/released site for post). The
-    // fix targets this client's beta_site.env repo. We DO NOT fall back to the
-    // demo repo here: a real site was scanned, so if there's no clonable repo
-    // the fix simply STALLS (below) — the demo repo is left out of it entirely.
-    betaRepo = await resolveBetaSiteRepo(project?.name).catch(() => null)
-  }
-
-  let repoUrl: string | null = null
-  let useLocal = false
-  let usingFallbackRepo = false
-  if (betaRepo) {
-    repoUrl = betaRepo
-  } else if (isDemoTarget && localRepo) {
-    // Demo/test loop ONLY: fix the local repo that backs the fallback site.
-    repoUrl = localRepo
-    useLocal = true
-    usingFallbackRepo = true
-  }
-
-  const ownerRepo = useLocal ? null : repoUrl ? ownerRepoFromUrl(repoUrl) : null
+  const ownerRepo = repoUrl ? ownerRepoFromUrl(repoUrl) : null
   // A dry run still clones (proposals are only meaningful checked against the
-  // real files); pushing is what dry run withholds. A local/mock repo is never
-  // pushed regardless of AI_FIX_DRY_RUN.
-  const canClone = useLocal ? true : !!repoUrl && !!ownerRepo && !!token
-  const willPush = !useLocal && canClone && !dryRun
+  // real files); pushing is what a dry run withholds.
+  const canClone = !!repoUrl && !!ownerRepo && !!token
+  const willPush = canClone && !dryRun
 
   // No usable repo → we can't clone/apply/push, but we CAN still determine the
-  // corrections from the findings and report them (in the past tense, as done).
-  // So we DON'T bail out here anymore: the per-finding loop below computes each
-  // known fix, and the run-level status line makes clear nothing was pushed
-  // (because there was no repository). A repo, when present, adds the branch/PR
-  // clause on top.
+  // corrections from the findings and report them per subtask, clearly flagged as
+  // NOT applied (no repo access). So we DON'T bail out here: the per-finding loop
+  // below computes each known fix, and the run-level status line makes clear the
+  // changes were not applied. A repo, when present, adds the branch/PR clause.
   const noRepo = !repoUrl
   if (noRepo) {
     logger.info(
       { runId, project: project?.name, siteUrl: run?.site_url },
-      "AI Fix: no repository available — generating + reporting fixes without pushing.",
+      "AI Fix: no beta_site.env repository access — reporting fixes per subtask without applying.",
     )
   }
 
@@ -250,23 +204,14 @@ export async function processAiFixRunJob(job: Job) {
       workDir = path.join(os.tmpdir(), "qacc-aifix", runId)
       await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {})
       await fs.promises.mkdir(path.dirname(workDir), { recursive: true })
-      if (useLocal) {
-        if (!fs.existsSync(path.join(localRepo, ".git")))
-          throw new Error(`AI_FIX_LOCAL_REPO is not a git repo`)
-        // Clone the local path so we work on a throwaway copy, never the user's
-        // working tree. --no-hardlinks keeps the original object store untouched.
-        await execFileAsync("git", ["clone", "--no-hardlinks", localRepo, workDir], { maxBuffer: 1024 * 1024 * 64 })
-      } else {
-        const authUrl = `https://${token}@github.com/${ownerRepo!.owner}/${ownerRepo!.repo}.git`
-        await execFileAsync("git", ["clone", "--depth", "1", authUrl, workDir], { maxBuffer: 1024 * 1024 * 64 })
-      }
+      const authUrl = `https://${token}@github.com/${ownerRepo!.owner}/${ownerRepo!.repo}.git`
+      await execFileAsync("git", ["clone", "--depth", "1", authUrl, workDir], { maxBuffer: 1024 * 1024 * 64 })
       await git(["config", "user.email", "ai-fix@growth99.com"])
       await git(["config", "user.name", "AI Fix"])
       await git(["checkout", "-b", branch]) // all fixes go on one branch → one PR
       repoIndex = await buildRepoIndex(workDir)
       repoThemeType = detectFromRepoDir(workDir)
-      // Never log the local fallback repo's absolute path — keep it private.
-      logger.info({ runId, files: repoIndex.length, dryRun, themeType: repoThemeType, source: useLocal ? "fallback-repo" : "github" }, "AI Fix: repo cloned and indexed")
+      logger.info({ runId, files: repoIndex.length, dryRun, themeType: repoThemeType, source: "github" }, "AI Fix: repo cloned and indexed")
     } catch (e: any) {
       logger.error({ runId, error: e.message }, "AI Fix: clone failed; triaging without repo context.")
       workDir = ""
@@ -291,6 +236,11 @@ export async function processAiFixRunJob(job: Job) {
     // the TED report can show the real correction instead of a paraphrase.
     edits?: { path: string; find: string; replace: string }[]
     diff?: string
+    // Set ONLY when an edit was located in the repo but the OVERWRITE genuinely
+    // failed after 3 retries (write/verification error) — never for a "text not
+    // in the repo" mismatch. Surfaced verbatim in the report so a real technical
+    // failure is stated exactly, never silently skipped.
+    applyError?: { find: string; replace: string; reason: string }
   }[] = []
 
   for (const f of (findings || []).slice(0, MAX_FINDINGS)) {
@@ -904,16 +854,47 @@ export async function processAiFixRunJob(job: Job) {
     const landedEdits: Edit[] = []
     let diff = ""
 
+    // Genuine overwrite/write failures (NOT "text not in the repo" mismatches),
+    // captured after the retries below so the report can state them exactly.
+    const overwriteFailures: { find: string; replace: string; reason: string }[] = []
+    // A write/verification failure is technical and worth retrying; a logical
+    // mismatch (text absent, ambiguous, path not offered, no-op) returns the same
+    // result every time, so retrying it is pointless — those are DB-content, not
+    // failures to overwrite.
+    const isOverwriteFailure = (reason: string) =>
+      /verification after write failed|replacement not found after write|apply threw|EACCES|EPERM|EBUSY|ENOSPC/i.test(
+        reason,
+      )
+
     if (workDir && edits.length > 0) {
       for (const ed of edits) {
-        const res = await applyEdit(workDir, ed, repoCtx?.files || []).catch(
-          (e: any) => ({ ok: false, reason: `apply threw: ${e?.message}` }),
-        )
+        // Retry the apply up to 3 times before giving up — a write/overwrite
+        // failure must NEVER be an easy way to skip a fix. Break the instant it
+        // lands. (A deterministic mismatch just exhausts the attempts harmlessly.)
+        let res: ApplyResult = { ok: false, reason: "not attempted" }
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          res = await applyEdit(workDir, ed, repoCtx?.files || []).catch(
+            (e: any) => ({ ok: false, reason: `apply threw: ${e?.message}` }),
+          )
+          if (res.ok) break
+          if (attempt < 3 && isOverwriteFailure(res.reason))
+            logger.warn(
+              { runId, path: ed.path, attempt, reason: res.reason },
+              "AI Fix: overwrite failed; retrying",
+            )
+          else if (!isOverwriteFailure(res.reason)) break // no point retrying a mismatch
+        }
         editNotes.push(`${ed.path}: ${res.reason}`)
         if (res.ok) {
           const rel = ed.path.replace(/^\.?\//, "")
           if (!filesChanged.includes(rel)) filesChanged.push(rel)
           landedEdits.push(ed)
+        } else if (isOverwriteFailure(res.reason)) {
+          overwriteFailures.push({
+            find: ed.find,
+            replace: ed.replace,
+            reason: res.reason,
+          })
         }
       }
 
@@ -996,6 +977,12 @@ export async function processAiFixRunJob(job: Job) {
         replace: e.replace,
       })),
       diff,
+      // Only when nothing landed for this finding AND the reason was a genuine
+      // overwrite failure (not a text-not-in-repo mismatch). Reported verbatim.
+      applyError:
+        !landed && overwriteFailures.length > 0
+          ? overwriteFailures[0]
+          : undefined,
     })
   }
 
@@ -1040,81 +1027,6 @@ export async function processAiFixRunJob(job: Job) {
     }
   }
 
-  // --- Local fallback repo: push straight to main on the filesystem ---
-  // There is no PR reviewer for the local test loop, and AI_FIX_LOCAL_REPO is
-  // exactly the repo backing QACC_FALLBACK_SITE_URL (WP Playground mounts it
-  // straight off disk) — so landing the fix on `main` here IS the deploy.
-  // `origin` in this clone already points at localRepo (cloned from it above).
-  // `updateInstead` lets a push into the currently-checked-out main branch also
-  // refresh its working tree; git still safely refuses if that tree is dirty
-  // (e.g. someone's mid-edit there), so this never clobbers uncommitted work.
-  // Filesystem-only — never touches GitHub, and applies regardless of
-  // AI_FIX_DRY_RUN, since there is nothing to "dry run" against a local test box.
-  let pushedLocal = false
-  if (useLocal && workDir && committed > 0) {
-    const localGit = (args: string[]) =>
-      execFileAsync("git", ["-C", localRepo, ...args], {
-        maxBuffer: 1024 * 1024 * 16,
-      })
-    // `updateInstead` REFUSES the push whenever the fallback repo's own working
-    // tree is dirty — that dirty tree (someone mid-edit, or leftover scan
-    // artifacts) is exactly why the fix used to land as "committed locally but
-    // could not be pushed". Set it aside first so the push always lands, then
-    // restore it on top of the freshly-pushed main. -u also stashes untracked.
-    let stashed = false
-    try {
-      await localGit([
-        "config",
-        "receive.denyCurrentBranch",
-        "updateInstead",
-      ])
-      try {
-        const { stdout } = await localGit([
-          "stash",
-          "push",
-          "-u",
-          "-m",
-          `qacc-aifix-${runId}`,
-        ])
-        stashed = !/No local changes to save/i.test(stdout)
-      } catch (e: any) {
-        logger.warn(
-          { runId, error: e.message },
-          "AI Fix: could not stash the fallback repo's working tree; attempting the push anyway.",
-        )
-      }
-      await git(["push", "origin", `${branch}:main`])
-      pushedLocal = true
-      for (const a of analysis) {
-        if (a.proposed) {
-          a.proposed = false
-          a.applied = true
-        }
-      }
-      logger.info(
-        { runId },
-        "AI Fix: pushed fixes straight to main of the local fallback repo (filesystem-only; the local test site now reflects them).",
-      )
-    } catch (e: any) {
-      logger.error(
-        { runId, error: e.message },
-        "AI Fix: local push to main failed — left as proposed.",
-      )
-    } finally {
-      // Reapply the user's set-aside work over the pushed main. A conflict here
-      // keeps the stash intact (git does not drop it), so nothing is lost — we
-      // only log it so a human can resolve.
-      if (stashed) {
-        await localGit(["stash", "pop"]).catch((e: any) =>
-          logger.error(
-            { runId, error: e.message },
-            "AI Fix: failed to restore (pop) the fallback repo's stashed changes — they remain in `git stash` for manual recovery.",
-          ),
-        )
-      }
-    }
-  }
-
   // --- Output 2: save the full analysis to QACC (Dry-run Data tab) ---
   try {
     await supabase.from("ai_fix_runs").insert({
@@ -1124,11 +1036,8 @@ export async function processAiFixRunJob(job: Job) {
       committed,
       commit_url: prUrl || null,
       data: {
-        // Never persist the local filesystem path — show it generically.
-        repoUrl: useLocal ? "(fallback repo)" : repoUrl,
+        repoUrl: repoUrl,
         dryRun,
-        localTestRepo: useLocal ? "(fallback repo)" : null,
-        pushedLocal,
         repoCloned: !!workDir,
         repoIndexedFiles: repoIndex.length,
         contextFilesPerFinding: MAX_CONTEXT_FILES,
@@ -1145,15 +1054,9 @@ export async function processAiFixRunJob(job: Job) {
   const fixesDone = analysis.filter((a) => (a.applied || a.proposed) && !a.lapse)
   let statusLine: string
   if (noRepo)
-    statusLine = `No repository was available for this client, so the corrections below were determined from the findings and are reported as done — nothing was pushed anywhere. Wire up the repository to push them.`
+    statusLine = `No repository access for this client (no clonable beta_site.env repo), so the corrections below were determined from the findings but <strong>changes were not applied — we do not have repo access</strong>. Nothing was pushed. Wire up the beta_site.env repository to apply them and raise a PR.`
   else if (prUrl) statusLine = `Pushed to branch <code>${branch}</code> · Pull request <strong>created</strong> — not merged.`
   else if (pushed) statusLine = `Pushed to branch <code>${branch}</code> · pull request could not be opened automatically.`
-  else if (useLocal && pushedLocal)
-    statusLine = `Pushed ${committed} fix${committed > 1 ? "es" : ""} straight to <code>main</code> of the local fallback repository — the local test site now reflects ${committed > 1 ? "them" : "it"}.`
-  else if (useLocal && proposedList.length > 0)
-    statusLine = `${proposedList.length} attempted fix${proposedList.length > 1 ? "es" : ""} — committed locally, but could not be pushed to the local fallback repository's <code>main</code> (it may have uncommitted changes); verified against the code on a clone only.`
-  else if (useLocal)
-    statusLine = `No code-level fixes were applicable this run — nothing to push to the local fallback repository.`
   else if (willPush && committed > 0)
     statusLine = `${committed} fix${committed > 1 ? "es" : ""} committed locally, but the branch could not be pushed — nothing has reached the repository.`
   else if (dryRun && proposedList.length > 0)
@@ -1174,17 +1077,21 @@ export async function processAiFixRunJob(job: Job) {
     // text isn't in the repo (it's page/database content), so the code-editing
     // fix pass structurally can't touch it.
     const manual = !a.applied && !a.proposed
-    // Never "manual" and never an "AI correction needed" middle state: if a fix
-    // lives in CODE the pass already applies + pushes it ("AI Fix applied").
-    // The ONLY reason a real defect can't be auto-fixed is that its text lives in
-    // the WordPress database (page/post content or wp_options like tagline/phone)
-    // — not in any file the code-editing pass can touch — so it needs REST API
-    // write access. One non-applied outcome only: "REST API access needed".
+    // Two non-applied outcomes:
+    //  • apply_failed — the edit WAS located in a file but the overwrite failed
+    //    after 3 retries (a genuine, rare technical failure). Stated verbatim.
+    //  • rest_api — the flagged text lives in the WordPress database (page/post
+    //    content or wp_options like tagline/phone), not in any file the
+    //    code-editing pass can touch, so it needs REST API write access.
+    const applyFailed = manual && !!a.applyError
     fixMap.set(a.findingId, {
       applied: a.applied,
       proposed: a.proposed,
       manual,
-      manualKind: manual ? "rest_api" : undefined,
+      manualKind: manual ? (applyFailed ? "apply_failed" : "rest_api") : undefined,
+      manualReason: applyFailed
+        ? `couldn't correct \`${a.applyError!.find}\` to \`${a.applyError!.replace}\` as overwriting failed`
+        : undefined,
       fix: a.fix,
       edits: a.edits,
       filesChanged: a.filesChanged,
@@ -1192,30 +1099,19 @@ export async function processAiFixRunJob(job: Job) {
   }
 
   // Repo + push/PR status, shown once atop the summary and (compactly) atop each
-  // subtask comment. Never expose the local repo path.
-  const repoLabel = useLocal
-    ? `<em>Fallback repository</em>`
-    : repoUrl
-      ? `<a href="${repoUrl}">${repoUrl}</a>`
-      : "not resolved"
+  // subtask comment.
+  const repoLabel = repoUrl
+    ? `<a href="${repoUrl}">${repoUrl}</a>`
+    : "not resolved (no repo access)"
   let summaryHeaderHtml = `<p>🤖 <strong>AI Fix</strong> · Repository: ${repoLabel}</p>`
-  // Be explicit whenever we fell back to the substitute repo — the fixes are
-  // real (applied + verified against this repo's actual files); only the repo
-  // and its hosted site stand in for a beta site that wasn't wired up.
-  if (usingFallbackRepo)
-    summaryHeaderHtml += `<p><strong>Note:</strong> ${fallbackReason ? `${escHtml(fallbackReason)} ` : ""}The scan ran against the configured <strong>fallback repository and its hosted site</strong> — the checks and fixes are real, only the target was substituted.${pushedLocal ? "" : " Nothing was pushed."}</p>`
   summaryHeaderHtml += `<p><strong>Fix status:</strong> ${statusLine}</p>`
   if (prUrl) summaryHeaderHtml += `<p>Pull request: <a href="${prUrl}">${prUrl}</a></p>`
   // Count-free version of the status, so each subtask banner can prepend its OWN
   // per-check fix count. `statusLine` (run-wide) still heads the parent summary.
   let pushClause: string
-  if (noRepo) pushClause = `No repository was available, so nothing was pushed.`
+  if (noRepo) pushClause = `Changes not applied — no repository access. Nothing was pushed.`
   else if (prUrl) pushClause = `Pushed to branch <code>${branch}</code>; pull request <strong>created</strong> — not merged.`
   else if (pushed) pushClause = `Pushed to branch <code>${branch}</code>; pull request could not be opened automatically.`
-  else if (useLocal && pushedLocal)
-    pushClause = `Pushed straight to <code>main</code> of the local fallback repository — the local test site now reflects it.`
-  else if (useLocal)
-    pushClause = `Committed locally, but could not be pushed to the local fallback repository's <code>main</code>; verified against the code on a clone only.`
   else if (willPush && committed > 0)
     pushClause = `Committed locally, but the branch could not be pushed — nothing has reached the repository.`
   else if (dryRun) pushClause = `Dry run — verified against the repository, nothing pushed.`
@@ -1264,7 +1160,7 @@ export async function processAiFixRunJob(job: Job) {
     runMeta: run,
     fixMap,
     summaryHeaderHtml,
-    perTargetFix: { pushClause, usingFallbackRepo },
+    perTargetFix: { pushClause },
     eventKeyPrefix: "qacc-report",
   }).catch((e: any) => {
     logger.error({ runId, error: e?.message }, "Failed to post section-wise TED report.")
@@ -1278,7 +1174,6 @@ export async function processAiFixRunJob(job: Job) {
       reportTally,
       committed,
       prUrl,
-      pushedLocal,
       dryRun,
       applied: analysis.filter((a) => a.applied).length,
       proposed: proposedList.length,

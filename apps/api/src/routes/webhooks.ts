@@ -70,41 +70,83 @@ async function recordLocalTedWrite(
 
 const CLERK_WEBHOOK_SECRET = process.env.CLERK_WEBHOOK_SECRET || ""
 
-// Fallback scan URL, used only when beta_site.env has no betaSiteUrl. This MUST
-// be a site backed by the AI-fix repo (AI_FIX_LOCAL_REPO) so the scan runs REAL
-// checks against a real site AND the fix pass edits the same codebase — that's
-// the whole point of a fallback. QACC_FALLBACK_SITE_URL is set to the local WP
-// Playground (http://127.0.0.1:9400), which serves my-blank-theme straight off
-// that repo. The default below is that same local port — there is intentionally
-// NO external default (a bare public URL with no matching repo can't be fixed,
-// so it would never be a valid fallback).
-const TED_FALLBACK_SITE_URL =
-  process.env.QACC_FALLBACK_SITE_URL || "http://127.0.0.1:9400"
+// NO FALLBACK SCAN URL (removed 2026-08-17). The scan target now comes STRICTLY
+// from TED — beta_site.env for pre-release/internal-QA, the released/live URL for
+// post-release. There is no longer any fallback to a local demo site
+// (http://127.0.0.1:9400 + AI_FIX_LOCAL_REPO): scanning the wrong target is worse
+// than not scanning. When no real URL resolves, the run is created as `failed`
+// and a plain-language notice is posted to TED — see `createAbortedRun` below.
+//
+// Plain-language notices, stored as the failed run's name and posted to TED.
+const NO_BETA_URL_REASON =
+  "No beta site url found from beta site creation task. Scanning cancelled as there is no site Url to scan."
+const NO_LIVE_URL_REASON =
+  "No live/released site url found from the release task. Scanning cancelled as there is no site Url to scan."
+
+// Create a VISIBLE `failed` run when a scan can't proceed for lack of a site URL.
+// This replaces the old silent fallback: instead of scanning a local demo site,
+// QACC records a failed run (so it shows up in the dashboard with the reason as
+// its name) and the caller posts the same reason back to TED. The worker is NOT
+// queued for this run — it's terminal. Returns the run id, or null on insert
+// failure. site_url is stored empty (the column is NOT NULL) since there is none.
+async function createAbortedRun(opts: {
+  projectId: string
+  runType: "pre_release" | "internal_qa" | "post_release"
+  enabledChecks: string[]
+  tedSubtaskMap: Record<string, string[]>
+  tedTaskId: string | null
+  createdBy: string | null
+  reason: string
+  deviceMatrix?: string[]
+}): Promise<string | null> {
+  const now = new Date().toISOString()
+  const { data: run, error } = await supabase
+    .from("qa_runs")
+    .insert({
+      project_id: opts.projectId,
+      run_type: opts.runType,
+      site_url: "",
+      enabled_checks: opts.enabledChecks,
+      ted_subtask_map: opts.tedSubtaskMap,
+      device_matrix: opts.deviceMatrix || ["desktop"],
+      status: "failed",
+      custom_name: opts.reason,
+      created_by: opts.createdBy,
+      ted_task_id: opts.tedTaskId,
+      started_at: now,
+      completed_at: now,
+    })
+    .select()
+    .single()
+  if (error) {
+    console.error("❌ Failed to create aborted (failed) QA run:", error)
+    return null
+  }
+  console.log(`🛑 Aborted ${opts.runType} run ${run.id}: ${opts.reason}`)
+  return run.id
+}
 
 // ===========================================================================
-// TED-FIRST SCAN-URL RESOLUTION (LIVE).
+// TED-FIRST SCAN-URL RESOLUTION (LIVE, no fallback).
 //
 // PREMISE: the SCAN and the FIX are decoupled. The scan needs only a real site
 // URL; the fix additionally needs a clonable repo. So we SCAN the real site
 // whenever its URL resolves from TED — independent of any repo — and only the
-// AI-FIX pass stalls when there's no clonable repo (see aiFixRunJob.ts). Only
-// when NO real URL resolves do we fall back to the demo site
-// (QACC_FALLBACK_SITE_URL).
+// AI-FIX pass stalls when there's no clonable repo (see aiFixRunJob.ts).
 //
 //   internal_qa + pre_release → site source: beta_site.env (resolveBetaSiteUrlFromTED)
 //   post_release              → site source: release.security released URL,
 //                               else the client-notes canonical domain
 //
-// The run's scan URL is therefore `tedSiteUrl || TED_FALLBACK_SITE_URL` (where
-// tedSiteUrl is the real URL when one resolved, else null → demo). The project's
-// stored site_url is NOT consulted — what gets scanned is what THIS webhook
-// resolves, so it no longer matters which URL is saved under the project's name.
+// When NO real URL resolves the scan does NOT proceed: there is no fallback to a
+// local/demo site anymore. Instead the run is created as `failed` (visible in the
+// dashboard with the reason as its name) and a plain-language notice is posted to
+// TED — see `createAbortedRun` above. The project's stored site_url is NOT
+// consulted — what gets scanned is strictly what THIS webhook resolves.
 //
-// FIX COHERENCE: the worker keys its repo choice off the run's site_url — if
-// site_url === QACC_FALLBACK_SITE_URL (no real URL resolved) it uses the demo
-// repo AI_FIX_LOCAL_REPO; otherwise it resolves the real betaSiteRepo and, if
-// there is no clonable repo, STALLS the fix (it does NOT fix the unrelated demo
-// repo for a real-site scan). See aiFixRunJob.ts.
+// FIX COHERENCE: the worker resolves the real betaSiteRepo for the fix pass and,
+// if there is no clonable repo, still reports each proposed fix per subtask but
+// notes the changes were not applied (no repo access). See aiFixRunJob.ts.
 // ===========================================================================
 
 // Resolve the beta site URL that QACC should scan, from TED.
@@ -150,9 +192,34 @@ async function fetchTedTaskCommentsText(
   }
 }
 
+// Parse a beta site URL out of free text — the beta_site.env task's automation
+// payload OR a human/AI comment on it. Handles all the shapes seen in the wild:
+//   • token:   betaSiteUrl=https://foo.gogroth.com
+//   • labelled: "Beta URL: https://…", "Beta site URL: https://…", "Beta link: …"
+//   • bare: the first non-GitHub http(s) URL in the text (so a "GitHub repo:"
+//     line on the same comment is never mistaken for the site URL).
+// Returns a cleaned URL (no trailing slash/punctuation), or null.
+function parseBetaSiteUrl(text: string): string | null {
+  if (!text) return null
+  const clean = (u: string) =>
+    u.replace(/[.,;)]+$/, "").replace(/\/+$/, "").trim()
+  // 1. Explicit token.
+  const token = text.match(/betaSiteUrl\s*=\s*(\S+)/i)
+  if (token?.[1]) return clean(token[1])
+  // 2. Labelled line: "Beta URL:", "Beta site URL:", "Beta site link:", etc.
+  const labelled = text.match(
+    /beta[\s_-]*(?:site[\s_-]*)?(?:url|link)\s*[:=]\s*(https?:\/\/\S+)/i,
+  )
+  if (labelled?.[1]) return clean(labelled[1])
+  // 3. Fallback: first http(s) URL that is NOT a GitHub repo link.
+  const urls = text.match(/https?:\/\/\S+/gi) || []
+  const nonGithub = urls.find((u) => !/github\.com/i.test(u))
+  return nonGithub ? clean(nonGithub) : null
+}
+
 async function resolveBetaSiteUrlFromTED(
   clientId?: string | number | null,
-): Promise<string | null> {
+): Promise<{ url: string; source: string } | null> {
   const apiToken = process.env.TED_API_TOKEN
   if (!apiToken) {
     console.log("⚠️ TED_API_TOKEN missing — cannot resolve beta site URL.")
@@ -207,24 +274,20 @@ async function resolveBetaSiteUrlFromTED(
       // Authoritative check: the task must actually be the beta_site.env template.
       if (String(task?.automation?.templateKey || "") !== "beta_site.env") continue
       const payload: string = task?.automation?.payload || ""
-      // Payload first, then the task's comments (the URL is sometimes typed as a
-      // comment rather than baked into the payload).
-      const matchUrl = (text: string) => {
-        const m = text.match(/betaSiteUrl=(\S+)/i)
-        return m && m[1] ? m[1].replace(/[.,;)]+$/, "") : null
-      }
-      const fromPayload = matchUrl(payload)
+      // Payload first, then the task's comments (the URL is usually typed as a
+      // comment — e.g. "Beta URL: https://…" — rather than baked into payload).
+      const fromPayload = parseBetaSiteUrl(payload)
       if (fromPayload) {
         console.log(`✅ Resolved beta site URL from TED payload (task #${id}): ${fromPayload}`)
-        return fromPayload
+        return { url: fromPayload, source: "beta site creation task (automation payload)" }
       }
-      const fromComment = matchUrl(await fetchTedTaskCommentsText(id))
+      const fromComment = parseBetaSiteUrl(await fetchTedTaskCommentsText(id))
       if (fromComment) {
         console.log(`✅ Resolved beta site URL from TED comment (task #${id}): ${fromComment}`)
-        return fromComment
+        return { url: fromComment, source: "beta site creation task (comment)" }
       }
       console.log(
-        `⚠️ beta_site.env task #${id} has no betaSiteUrl in payload or comments yet.`,
+        `⚠️ beta_site.env task #${id} has no beta site URL in payload or comments yet.`,
       )
     }
     return null
@@ -485,6 +548,25 @@ async function resolveReleasedUrlFromReleaseSecurity(
   } catch (err) {
     console.error("❌ Error resolving released site URL from TED:", err)
     return null
+  }
+}
+
+// Normalize a URL down to its bare host for comparison (drop protocol, "www.",
+// path, and case). Used to decide whether the released URL and the client
+// notes/details URL point at the same domain. Returns "" for empty/garbage.
+function normalizeHost(u: string | null | undefined): string {
+  if (!u) return ""
+  let s = String(u).trim()
+  if (!/^https?:\/\//i.test(s)) s = `https://${s}`
+  try {
+    return new URL(s).host.replace(/^www\./i, "").toLowerCase()
+  } catch {
+    return String(u)
+      .toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .replace(/\/.*$/, "")
+      .trim()
   }
 }
 
@@ -943,6 +1025,14 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
   // Hoisted so the catch block can record the outcome/error on the audit row.
   let webhookEventId: string | null = null
   let createdRunId: string | null = null
+  // True when the scan was cancelled for lack of a resolvable site URL (a
+  // `failed` run was recorded via createAbortedRun). Suppresses the "connection
+  // active" confirmation so only the cancellation notice reaches TED.
+  let scanAborted = false
+  // Provenance line appended to the scan-start comment (which URL was scanned +
+  // where it came from). Hoisted so the talk-back block, outside if(clientName),
+  // can include it. Empty until a scan actually starts.
+  let scanStartNote = ""
 
   try {
     // 1. Handle the body safely depending on how Express parsed it
@@ -1123,13 +1213,14 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
           // we can resolve its URL from beta_site.env (payload OR task comment) —
           // independent of whether a clonable repo exists. The repo only gates
           // the AI-FIX pass (which stalls when there's no repo, see aiFixRunJob),
-          // NOT the scan. Only when no beta URL resolves do we fall back to the
-          // demo site (QACC_FALLBACK_SITE_URL).
-          const betaUrl = await resolveBetaSiteUrlFromTED(task.clientId)
-          const tedSiteUrl: string | null = betaUrl || null
+          // NOT the scan. When no beta URL resolves the scan is CANCELLED (a
+          // `failed` run is recorded + TED notified) — there is no demo fallback.
+          const betaResolved = await resolveBetaSiteUrlFromTED(task.clientId)
+          const tedSiteUrl: string | null = betaResolved?.url || null
+          const tedSiteSource: string | null = betaResolved?.source || null
           if (!tedSiteUrl)
             console.log(
-              `ℹ️ pre-release: no beta site URL on beta_site.env → forcing demo site.`,
+              `ℹ️ pre-release: no beta site URL on beta_site.env → scan will be cancelled.`,
             )
 
           // Resolve the release.qa_pre task (client-agnostic, by template key)
@@ -1201,7 +1292,11 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 client_name: clientName,
                 org_id: orgData.org_id,
                 status: "active",
-                site_url: tedSiteUrl || TED_FALLBACK_SITE_URL,
+                // No fallback URL: store the resolved beta URL, or empty when
+                // none resolved (the site_url column is NOT NULL). The scan is
+                // cancelled below in that case, and the backfill fills this in
+                // once a real URL appears on beta_site.env.
+                site_url: tedSiteUrl || "",
                 // release.pre_dev completed → this project is now in the
                 // pre-release QA stage.
                 is_pre_release: true,
@@ -1353,6 +1448,9 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 .from("qa_runs")
                 .select("id, created_at")
                 .eq("ted_task_id", String(preReleaseTaskId))
+                // Ignore cancelled scans (status "failed") so a retry after the
+                // beta URL is added isn't blocked by the earlier aborted run.
+                .neq("status", "failed")
                 .gte("created_at", since)
                 .limit(1)
               if (recentRuns && recentRuns.length > 0) {
@@ -1366,18 +1464,46 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
               }
             }
 
+            // 3. No beta site URL resolved → do NOT scan. Record a visible
+            // `failed` run and post a plain-language cancellation notice to TED.
+            // (Replaces the old silent fallback to the local demo site.)
+            if (!tedSiteUrl) {
+              scanAborted = true
+              const abortedRunId = await createAbortedRun({
+                projectId: project.id,
+                runType: "pre_release",
+                enabledChecks: preReleaseChecks,
+                tedSubtaskMap: preReleaseSubtaskMap,
+                tedTaskId: preReleaseTaskId ? String(preReleaseTaskId) : null,
+                createdBy: runCreatorId,
+                reason: NO_BETA_URL_REASON,
+                deviceMatrix: ["desktop", "mobile"],
+              })
+              if (preReleaseTaskId && process.env.TED_API_TOKEN) {
+                await postTedComment(
+                  preReleaseTaskId,
+                  NO_BETA_URL_REASON,
+                  `ext:qacc-prerelease-cancelled-${preReleaseTaskId}`,
+                  abortedRunId,
+                )
+              }
+              console.log(
+                `🛑 Pre-release scan cancelled for "${project.name}" — no beta site URL.`,
+              )
+            } else {
+            // Provenance for the scan-start comment: which URL + where from.
+            scanStartNote = `\n\nScanning beta site ${tedSiteUrl} (beta site URL obtained from ${tedSiteSource}).`
             // 3. Create the new QA Run in the database
             const { data: run, error: runError } = await supabase
               .from("qa_runs")
               .insert({
                 project_id: project.id,
                 run_type: "pre_release",
-                // Scan target = the TED beta_site.env URL when its URL+repo pair
-                // is usable, else the local fallback (:9400 + AI_FIX_LOCAL_REPO).
-                // The project's stored site_url is deliberately NOT consulted —
-                // what gets scanned is what THIS webhook resolves, independent of
-                // whatever URL happens to be saved under the project's name.
-                site_url: tedSiteUrl || TED_FALLBACK_SITE_URL,
+                // Scan target = the TED beta_site.env URL, resolved strictly from
+                // beta_site.env. There is no fallback: the project's stored
+                // site_url is deliberately NOT consulted, and when no URL resolves
+                // the scan is cancelled above rather than scanning a demo site.
+                site_url: tedSiteUrl,
                 // Checks the discovered release.qa_pre subtasks mapped to
                 // (mirroring TED's checklist) + always-on cross_browser, or the
                 // full pre-release suite as a fallback when nothing was mapped.
@@ -1415,6 +1541,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 )
               }
             }
+            } // end else (tedSiteUrl resolved → scan)
           }
         }
 
@@ -1448,17 +1575,17 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
           }
         }
 
-        if (taskId) {
+        if (taskId && !scanAborted) {
           console.log(
             `💬 Sending confirmation comment back to TED Task #${taskId}...`,
           )
           await postTedComment(
             taskId,
-            "Successfully received the release request — the automated QA connection is active!",
+            `Successfully received the release request — the automated QA connection is active!${scanStartNote}`,
             `ext:qacc-prerelease-received-${taskId}`,
             createdRunId,
           )
-        } else {
+        } else if (!taskId) {
           console.log(
             "⚠️ Could not post comment to TED: taskId is missing from payload.",
           )
@@ -1799,6 +1926,11 @@ webhookRouter.post(
     // Hoisted so the catch block can record the outcome/error on the audit row.
     let webhookEventId: string | null = null
     let createdRunId: string | null = null
+    // True when the scan was cancelled for lack of a resolvable beta site URL
+    // (a `failed` run was recorded). Suppresses the generic confirmation comment.
+    let scanAborted = false
+    // Provenance line appended to the scan-start comment (URL + where from).
+    let scanStartNote = ""
     // The task QACC talks back to = beta_site.internal_test (the target),
     // NOT the beta_site.seo trigger. Resolved from the payload/timeline below.
     let targetTaskId: string | null = null
@@ -1951,12 +2083,14 @@ webhookRouter.post(
           // we can resolve its URL from beta_site.env (payload OR task comment) —
           // independent of whether a clonable repo exists. The repo only gates
           // the AI-FIX pass (which stalls when there's no repo), NOT the scan.
-          // Only when no beta URL resolves do we fall back to the demo site.
-          const betaUrl = await resolveBetaSiteUrlFromTED(task.clientId)
-          const tedSiteUrl: string | null = betaUrl || null
+          // When no beta URL resolves the scan is CANCELLED (a `failed` run is
+          // recorded + TED notified) — there is no demo fallback.
+          const betaResolved = await resolveBetaSiteUrlFromTED(task.clientId)
+          const tedSiteUrl: string | null = betaResolved?.url || null
+          const tedSiteSource: string | null = betaResolved?.source || null
           if (!tedSiteUrl)
             console.log(
-              `ℹ️ internal-QA: no beta site URL on beta_site.env → forcing demo site.`,
+              `ℹ️ internal-QA: no beta site URL on beta_site.env → scan will be cancelled.`,
             )
 
           // Resolve the beta_site.internal_test target task QACC talks back to.
@@ -2029,7 +2163,10 @@ webhookRouter.post(
                 client_name: clientName,
                 org_id: orgData.org_id,
                 status: "active",
-                site_url: tedSiteUrl || TED_FALLBACK_SITE_URL,
+                // No fallback URL: store the resolved beta URL, or empty when
+                // none resolved (site_url is NOT NULL). The scan is cancelled
+                // below in that case; the backfill fills this once a URL appears.
+                site_url: tedSiteUrl || "",
                 // Internal beta-site testing is its own stage, before pre-release.
                 is_internal_qa: true,
               }
@@ -2165,6 +2302,9 @@ webhookRouter.post(
                 .from("qa_runs")
                 .select("id, created_at")
                 .eq("ted_task_id", String(targetTaskId))
+                // Ignore cancelled scans (status "failed") so a retry after the
+                // beta URL is added isn't blocked by the earlier aborted run.
+                .neq("status", "failed")
                 .gte("created_at", since)
                 .limit(1)
               if (recentRuns && recentRuns.length > 0) {
@@ -2178,6 +2318,35 @@ webhookRouter.post(
               }
             }
 
+            // No beta site URL resolved → do NOT scan. Record a visible
+            // `failed` run and post a plain-language cancellation notice to TED.
+            // (Replaces the old silent fallback to the local demo site.)
+            if (!tedSiteUrl) {
+              scanAborted = true
+              const abortedRunId = await createAbortedRun({
+                projectId: project.id,
+                runType: "internal_qa",
+                enabledChecks: internalQaChecks,
+                tedSubtaskMap: tedSubtaskMap,
+                tedTaskId: targetTaskId ? String(targetTaskId) : null,
+                createdBy: runCreatorId,
+                reason: NO_BETA_URL_REASON,
+                deviceMatrix: ["desktop"],
+              })
+              if (targetTaskId && process.env.TED_API_TOKEN) {
+                await postTedComment(
+                  targetTaskId,
+                  NO_BETA_URL_REASON,
+                  `ext:qacc-internalqa-cancelled-${targetTaskId}`,
+                  abortedRunId,
+                )
+              }
+              console.log(
+                `🛑 Internal-QA scan cancelled for "${project.name}" — no beta site URL.`,
+              )
+            } else {
+            // Provenance for the scan-start comment: which URL + where from.
+            scanStartNote = `\n\nScanning beta site ${tedSiteUrl} (beta site URL obtained from ${tedSiteSource}).`
             // Create the internal QA run against the beta site. enabled_checks
             // are the checks that mapped to a discovered subtask (mirroring
             // TED's checklist), or the full internal-QA suite as a fallback.
@@ -2189,12 +2358,10 @@ webhookRouter.post(
               .insert({
                 project_id: project.id,
                 run_type: "internal_qa",
-                // Scan target = the TED beta_site.env URL when its URL+repo pair
-                // is usable, else the local fallback (:9400 + AI_FIX_LOCAL_REPO).
-                // The project's stored site_url is deliberately NOT consulted —
-                // what gets scanned is what THIS webhook resolves, independent of
-                // whatever URL happens to be saved under the project's name.
-                site_url: tedSiteUrl || TED_FALLBACK_SITE_URL,
+                // Scan target = the TED beta_site.env URL, resolved strictly from
+                // beta_site.env. No fallback: when no URL resolves the scan is
+                // cancelled above rather than scanning a demo site.
+                site_url: tedSiteUrl,
                 enabled_checks: internalQaChecks,
                 ted_subtask_map: tedSubtaskMap,
                 device_matrix: ["desktop"],
@@ -2222,6 +2389,7 @@ webhookRouter.post(
                 console.error("❌ Failed to add run to worker queue:", queueErr)
               }
             }
+            } // end else (tedSiteUrl resolved → scan)
           }
         } else {
           console.log(
@@ -2260,13 +2428,13 @@ webhookRouter.post(
           }
         }
 
-        if (taskId) {
+        if (taskId && !scanAborted) {
           console.log(
             `💬 Sending internal-QA confirmation comment to TED Task #${taskId}...`,
           )
           await postTedComment(
             taskId,
-            "Received the beta site SEO completion signal and started internal QA testing of the beta site.",
+            `Received the beta site SEO completion signal and started internal QA testing of the beta site.${scanStartNote}`,
             `ext:qacc-internal-qa-received-${taskId}`,
             createdRunId,
           )
@@ -2342,6 +2510,14 @@ webhookRouter.post(
     // Hoisted so the catch block can record the outcome/error on the audit row.
     let webhookEventId: string | null = null
     let createdRunId: string | null = null
+    // True when the scan was cancelled for lack of a resolvable live/released
+    // URL (a `failed` run was recorded). Suppresses the generic confirmation.
+    let scanAborted = false
+    // Full scan-start comment posted to the release.qa_post main thread: which
+    // URL was scanned, where it was fetched from, and any domain-mismatch /
+    // fallback warning. Hoisted so the talk-back block (outside if(clientName))
+    // can post it. Empty until a scan actually starts.
+    let scanStartComment = ""
     // The scan task QACC operates on for post-release = release.qa_post (NOT the
     // release.security trigger). Resolved from the client's tasks below.
     let scanTaskId: string | null = null
@@ -2619,21 +2795,71 @@ webhookRouter.post(
 
             // Create the post-release run of the automated General Checks.
             // Post-release QA matrix (docs/qacc-postrelease-matrix.html).
-            // TED-first resolution (post-release): SCAN the REAL live/main site
-            // whenever we can resolve its URL — the released URL from the
-            // release.security task, or the client-notes canonical domain as a
-            // fallback — independent of whether a clonable repo exists. The repo
-            // only gates the AI-FIX pass (which stalls when there's no repo),
-            // NOT the scan. Only when NO main-site URL resolves do we fall back
-            // to the demo site.
-            const runSiteUrl =
-              (releasedUrl as string | null) ||
-              (liveSiteUrl as string | null) ||
-              TED_FALLBACK_SITE_URL
-            if (runSiteUrl === TED_FALLBACK_SITE_URL)
+            //
+            // POST-RELEASE URL DECISION (no demo fallback):
+            //  • releasedUrl = URL on the "Complete website security and release"
+            //    (release.security) task — payload or its comments.
+            //  • liveSiteUrl = client notes / client details URL (canonical).
+            // We prefer the released URL and cross-check it against the client
+            // notes/details URL:
+            //  - released present, hosts MATCH → scan released, no warning.
+            //  - released present, hosts DIFFER → scan released, but warn in the
+            //    main thread (client likely opted for a domain change).
+            //  - released MISSING, notes present → scan the notes/details URL as a
+            //    FALLBACK, and say so explicitly.
+            //  - neither → cancel the scan (failed run + notice), below.
+            let runSiteUrl: string | null = null
+            let siteUrlSource = ""
+            let urlWarning = ""
+            if (releasedUrl) {
+              runSiteUrl = releasedUrl as string
+              siteUrlSource = "Complete website security and release task"
+              if (
+                liveSiteUrl &&
+                normalizeHost(liveSiteUrl as string) !==
+                  normalizeHost(releasedUrl as string)
+              ) {
+                urlWarning =
+                  `⚠️ Domain mismatch: the released URL (${releasedUrl}) does not match the client notes/details URL (${liveSiteUrl}). ` +
+                  `Scanning the released URL — the client has likely opted for a domain change. Please verify this is intended.`
+              }
+            } else if (liveSiteUrl) {
+              runSiteUrl = liveSiteUrl as string
+              siteUrlSource = "client notes / client details (fallback)"
+              urlWarning =
+                `⚠️ Fallback URL in use: no released domain was found on the "Complete website security and release" task ` +
+                `(neither in its automation payload nor its comments), so QACC is scanning the client notes/details URL (${liveSiteUrl}) instead.`
+            }
+            if (!runSiteUrl) {
+              scanAborted = true
+              const abortedRunId = await createAbortedRun({
+                projectId: project.id,
+                runType: "post_release",
+                enabledChecks: postReleaseChecks,
+                tedSubtaskMap: postReleaseSubtaskMap,
+                tedTaskId: scanTaskId ? String(scanTaskId) : null,
+                createdBy: runCreatorId,
+                reason: NO_LIVE_URL_REASON,
+                deviceMatrix: ["desktop"],
+              })
+              if (scanTaskId && process.env.TED_API_TOKEN) {
+                await postTedComment(
+                  scanTaskId,
+                  NO_LIVE_URL_REASON,
+                  `ext:qacc-postrelease-cancelled-${scanTaskId}`,
+                  abortedRunId,
+                )
+              }
               console.log(
-                `ℹ️ post-release: no released/live main-site URL resolved → forcing demo site.`,
+                `🛑 Post-release scan cancelled for "${project.name}" — no live/released site URL.`,
               )
+            } else {
+            // Build the scan-start comment for the main thread: which URL was
+            // scanned + where it came from, plus any mismatch/fallback warning.
+            scanStartComment =
+              `Post-release automated run started for ${runSiteUrl} ` +
+              `(release website url obtained from ${siteUrlSource}).` +
+              (urlWarning ? `\n\n${urlWarning}` : "")
             const { data: run, error: runError } = await supabase
               .from("qa_runs")
               .insert({
@@ -2680,6 +2906,7 @@ webhookRouter.post(
                 console.error("❌ Failed to add run to worker queue:", queueErr)
               }
             }
+            } // end else (live/released URL resolved → scan)
           }
         } else {
           console.log(
@@ -2717,13 +2944,14 @@ webhookRouter.post(
           }
         }
 
-        if (taskId) {
+        if (taskId && !scanAborted) {
           console.log(
-            `💬 Sending post-release confirmation comment to TED Task #${taskId}...`,
+            `💬 Sending post-release scan-start comment to TED Task #${taskId}...`,
           )
           await postTedComment(
             taskId,
-            "Received the post-release signal and started the General Checks. ✅",
+            scanStartComment ||
+              "Received the post-release signal and started the General Checks. ✅",
             `ext:qacc-postrelease-received-${taskId}`,
             createdRunId,
           )

@@ -16,10 +16,10 @@ import type { ThemeType } from "./themeType"
  *   • fills it in if the page exists but has no content,
  * using the shared PRIVACY_TEMPLATE with the client's company name + site URL.
  *
- * Only the demo/fallback repo (and any beta repo built on WP Playground) carries
- * a blueprint. On a real Bedrock beta repo with no blueprint there is nothing to
- * edit, so this returns { changed: false } and the AI-fix pass reports the
- * finding as a manual (page/database content) fix — the honest outcome.
+ * Only a beta repo built on WP Playground carries a blueprint. On a real Bedrock
+ * beta repo with no blueprint there is nothing to edit, so this returns
+ * { changed: false } and the AI-fix pass reports the finding as a manual
+ * (page/database content) fix — the honest outcome.
  */
 
 const MARKER = "QACC:privacy-policy-seed"

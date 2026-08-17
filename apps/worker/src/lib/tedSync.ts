@@ -987,7 +987,11 @@ export type FixReportInfo = {
   // outcome is that the text lives in the WordPress database (page/post content
   // or wp_options), not in any file, so it needs REST API write access.
   manual?: boolean
-  manualKind?: "rest_api"
+  // "rest_api" → text lives in the WP database, needs REST API write access.
+  // "apply_failed" → the edit was located in a file but the overwrite genuinely
+  // failed after retries (rare technical failure); `manualReason` states it
+  // verbatim, e.g. "couldn't correct `x` to `y` as overwriting failed".
+  manualKind?: "rest_api" | "apply_failed"
   manualReason?: string
   fix?: string
   edits?: { path: string; find: string; replace: string }[]
@@ -1100,6 +1104,12 @@ function renderIssueDetail(
 // is that the text lives in the WordPress database (page/post content or
 // wp_options) and needs REST API write access. No leading <br> — callers wrap.
 function renderNeedsLabel(fx: FixReportInfo): string {
+  // A genuine, rare overwrite failure — stated exactly as it happened, never
+  // dressed up and never used as a way to skip the check.
+  if (fx.manualKind === "apply_failed")
+    return `⚠️ <strong>Fix could not be applied:</strong> ${esc(
+      clipText(fx.manualReason || "overwriting the file failed", 200),
+    )}`
   return `🔌 <strong>REST API access needed:</strong> ${esc(
     clipText(
       fx.manualReason ||
@@ -1425,9 +1435,9 @@ export async function postSectionedReport(opts: {
   // Per-subtask AI-fix banner. The count is computed PER CHECK inside this
   // function (not run-wide), and the banner is omitted entirely for checks that
   // had no fix — so e.g. "Website Functionality" never carries a fix line it
-  // didn't earn. `pushClause` describes where the fixes landed (branch/PR/local
-  // main/clone) with no count of its own.
-  perTargetFix?: { pushClause: string; usingFallbackRepo: boolean }
+  // didn't earn. `pushClause` describes where the fixes landed (branch/PR) — or,
+  // when there's no repo access, that they were not applied — with no count.
+  perTargetFix?: { pushClause: string }
   // Per-page image-enhance outcomes (page_id → {enhanced, total, carousel url}),
   // used to render the "AI Fix — enhanced N of M" line under each image page.
   imageFix?: Map<string, ImageFixInfo>
@@ -1554,9 +1564,8 @@ export async function postSectionedReport(opts: {
         // Fixes are reported as DONE (past tense); the push destination is the
         // run-level status line, so the per-check banner just states the count.
         header =
-          `<p>🤖 <strong>AI Fix</strong> — ${total} fix${total > 1 ? "es" : ""} done for this check. ` +
-          `${opts.perTargetFix.pushClause}` +
-          `${opts.perTargetFix.usingFallbackRepo ? " <em>(fallback repo)</em>" : ""}</p>`
+          `<p>🤖 <strong>AI Fix</strong> — ${total} fix${total > 1 ? "es" : ""} for this check. ` +
+          `${opts.perTargetFix.pushClause}</p>`
       }
       // Post the section (results + fix banner) to EACH owning subtask. The
       // idempotency key includes the subtask id so the same section landing on
