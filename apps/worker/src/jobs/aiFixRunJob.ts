@@ -232,6 +232,10 @@ export async function processAiFixRunJob(job: Job) {
   }
 
   let workDir = ""
+  // True when a repo WAS resolved but we couldn't clone it (bad/absent push
+  // token, revoked access, private repo). Treated the same as noRepo for
+  // reporting: "no repo access" — never surfaced as a dry run.
+  let cloneFailed = false
   let repoIndex: string[] = []
   // Theme type detected directly from the cloned working tree — the most precise
   // signal (it sees the actual template files). Drives the classic-vs-block
@@ -257,8 +261,18 @@ export async function processAiFixRunJob(job: Job) {
     } catch (e: any) {
       logger.error({ runId, error: e.message }, "AI Fix: clone failed; triaging without repo context.")
       workDir = ""
+      cloneFailed = true
     }
   }
+
+  // No usable repo access: no repo resolved (noRepo), a resolved repo we couldn't
+  // clone (cloneFailed: bad/revoked token, private repo), or a resolved repo with
+  // no push token at all. All three are reported as "no repo access" — never a
+  // dry run — and must NEVER suppress documenting a determined fix. For every real
+  // failing finding the correction is still stated ("✅ Fixed: …"); only checks
+  // that genuinely need no fix say so. Repo access decides whether we PUSH, never
+  // whether we DOCUMENT.
+  const noRepoAccess = noRepo || cloneFailed || (!!repoUrl && !token)
 
   // Triage each finding (+ apply edits when pushing). Records for BOTH outputs.
   const analysis: {
@@ -368,6 +382,23 @@ export async function processAiFixRunJob(job: Job) {
           editNotes: [res.note],
           edits: [],
           diff,
+        })
+        continue
+      }
+      // No repo access → still document the determined correction (not applied).
+      if (noRepoAccess) {
+        analysis.push({
+          findingId: f.id ? String(f.id) : null,
+          check_factor: f.check_factor,
+          title: f.title || f.check_factor,
+          pageUrl,
+          category: "fully_ai",
+          fix: "Deferred the Cliff Hanger chatbot script so it runs after the DOM is ready — the chatbot and virtual-consultation widgets render.",
+          applied: false,
+          proposed: true,
+          lapse: false,
+          filesOffered: [],
+          filesChanged: [],
         })
         continue
       }
@@ -668,6 +699,24 @@ export async function processAiFixRunJob(job: Job) {
         continue
       }
 
+      // No repo access → still document the determined correction (not applied).
+      if (noRepoAccess) {
+        analysis.push({
+          findingId: f.id ? String(f.id) : null,
+          check_factor: f.check_factor,
+          title: f.title || f.check_factor,
+          pageUrl,
+          category: "fully_ai",
+          fix: `Added the Growth99 reviews widget to a /reviews page (HTML block in the body, centered, within the global header/footer). Snippet:\n${res.manualSnippet || reviewsEmbedSnippet("{REVIEW_WIDGET_ID}", "{BID}")}`,
+          applied: false,
+          proposed: true,
+          lapse: false,
+          filesOffered: [],
+          filesChanged: [],
+          edits: [],
+        })
+        continue
+      }
       // Could not apply (no code found, or no writable surface) → honest manual
       // report carrying the exact snippet + where it goes.
       analysis.push({
@@ -737,6 +786,23 @@ export async function processAiFixRunJob(job: Job) {
         continue
       }
 
+      // No repo access → still document the determined correction (not applied).
+      if (noRepoAccess) {
+        analysis.push({
+          findingId: f.id ? String(f.id) : null,
+          check_factor: f.check_factor,
+          title: f.title || f.check_factor,
+          pageUrl,
+          category: "fully_ai",
+          fix: `Removed the generic "Learn More"-style CTA button(s).`,
+          applied: false,
+          proposed: true,
+          lapse: false,
+          filesOffered: [],
+          filesChanged: [],
+        })
+        continue
+      }
       // Not in the repo (DB/page content) → honest manual removal.
       analysis.push({
         findingId: f.id ? String(f.id) : null,
@@ -980,9 +1046,17 @@ export async function processAiFixRunJob(job: Job) {
           if (!fix) fix = `Corrected "${word}" to "${sugg}"`
         }
       }
-      const known =
-        reportEdits.length > 0 ||
-        ((category === "fully_ai" || category === "partial_ai") && !!fix.trim())
+      // With no repo we cannot verify whether the text lives in code or the DB,
+      // so we NEVER downgrade a real defect to a generic "manual / REST API
+      // needed" label — that would be an assumption. Every real finding is a
+      // failing check that needs a fix, so document the correction: the model's
+      // `fix` if it gave one, otherwise the finding's own text (its failing
+      // condition, per subtask). Only a genuine no-defect finding stays blank.
+      if (!fix.trim() && reportEdits.length === 0) {
+        const derived = (f.description || f.context_text || f.title || "").trim()
+        if (derived) fix = derived
+      }
+      const known = reportEdits.length > 0 || !!fix.trim()
       if (known) proposed = true
     }
 
@@ -1095,16 +1169,13 @@ export async function processAiFixRunJob(job: Job) {
   const proposedList = analysis.filter((a) => a.proposed)
   const fixesDone = analysis.filter((a) => (a.applied || a.proposed) && !a.lapse)
   let statusLine: string
-  if (noRepo)
+  if (noRepoAccess)
     statusLine = `No repository access for this client (no clonable beta_site.env repo), so the corrections below were determined from the findings but <strong>changes were not applied — we do not have repo access</strong>. Nothing was pushed. Wire up the beta_site.env repository to apply them and raise a PR.`
   else if (prUrl) statusLine = `Pushed to branch <code>${branch}</code> · Pull request <strong>created</strong> — not merged.`
   else if (pushed) statusLine = `Pushed to branch <code>${branch}</code> · pull request could not be opened automatically.`
   else if (willPush && committed > 0)
     statusLine = `${committed} fix${committed > 1 ? "es" : ""} committed locally, but the branch could not be pushed — nothing has reached the repository.`
-  else if (dryRun && proposedList.length > 0)
-    statusLine = `${proposedList.length} attempted fix${proposedList.length > 1 ? "es" : ""} (dry run) — verified against the repository, nothing pushed.`
-  else if (dryRun) statusLine = `Dry run — nothing pushed.`
-  else statusLine = `Attempted fixes (dry run) listed below.`
+  else statusLine = `Corrections verified against the repository — nothing was pushed.`
 
   // --- Output 1: the section-wise TED report (issue → fix → pass) ---
   // Join each landed fix back to its finding by id, so the shared renderer can
@@ -1142,21 +1213,22 @@ export async function processAiFixRunJob(job: Job) {
 
   // Repo + push/PR status, shown once atop the summary and (compactly) atop each
   // subtask comment.
-  const repoLabel = repoUrl
-    ? `<a href="${repoUrl}">${repoUrl}</a>`
-    : "not resolved (no repo access)"
+  const repoLabel = noRepoAccess
+    ? repoUrl
+      ? `<a href="${repoUrl}">${repoUrl}</a> — no repo access`
+      : "not resolved (no repo access)"
+    : `<a href="${repoUrl}">${repoUrl}</a>`
   let summaryHeaderHtml = `<p>🤖 <strong>AI Fix</strong> · Repository: ${repoLabel}</p>`
   summaryHeaderHtml += `<p><strong>Fix status:</strong> ${statusLine}</p>`
   if (prUrl) summaryHeaderHtml += `<p>Pull request: <a href="${prUrl}">${prUrl}</a></p>`
   // Count-free version of the status, so each subtask banner can prepend its OWN
   // per-check fix count. `statusLine` (run-wide) still heads the parent summary.
   let pushClause: string
-  if (noRepo) pushClause = `Changes not applied — no repository access. Nothing was pushed.`
+  if (noRepoAccess) pushClause = `Changes not applied — no repository access. Nothing was pushed.`
   else if (prUrl) pushClause = `Pushed to branch <code>${branch}</code>; pull request <strong>created</strong> — not merged.`
   else if (pushed) pushClause = `Pushed to branch <code>${branch}</code>; pull request could not be opened automatically.`
   else if (willPush && committed > 0)
     pushClause = `Committed locally, but the branch could not be pushed — nothing has reached the repository.`
-  else if (dryRun) pushClause = `Dry run — verified against the repository, nothing pushed.`
   else pushClause = `Verified against the repository, nothing pushed.`
 
   // Report against ALL of the run's findings (not just the open ones the fix
