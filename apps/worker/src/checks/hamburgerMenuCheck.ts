@@ -95,6 +95,13 @@ export async function checkHamburgerMenu(
   const findings: Finding[] = []
   let context: any = null
   let page: any = null
+  // Stealth chromium: gogroth (and other Cloudflare-fronted) staging sites 403
+  // a plain headless browser. The passed-in `browser` is a plain-playwright
+  // instance, so launch our own stealth browser here and close it in finally.
+  const { chromium } = require("playwright-extra")
+  const stealth = require("puppeteer-extra-plugin-stealth")()
+  chromium.use(stealth)
+  let ownBrowser: any = null
 
   const push = (title: string, description: string, screenshot_url?: string) => {
     if (findings.length >= MAX_FINDINGS) return
@@ -120,7 +127,8 @@ export async function checkHamburgerMenu(
   }
 
   try {
-    context = await browser.newContext({
+    ownBrowser = await chromium.launch({ headless: true })
+    context = await ownBrowser.newContext({
       viewport: MOBILE,
       isMobile: true,
       hasTouch: true,
@@ -334,6 +342,9 @@ export async function checkHamburgerMenu(
   } finally {
     try {
       if (context) await context.close().catch(() => {})
+    } catch {}
+    try {
+      if (ownBrowser) await ownBrowser.close().catch(() => {})
     } catch {}
   }
 }

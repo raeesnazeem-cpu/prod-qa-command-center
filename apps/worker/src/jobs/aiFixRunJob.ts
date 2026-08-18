@@ -12,6 +12,7 @@ import { injectSingleScriptIntoFooter } from "../lib/singleScriptFix"
 import { removeLearnMoreButtons } from "../lib/learnMoreFix"
 import { deferChatbotScript } from "../lib/chatbotScriptFix"
 import { applyFooterLogoFix } from "../lib/footerLogoFix"
+import { applyStickyHeaderFix } from "../lib/stickyHeaderFix"
 import {
   postTedComment,
   postSectionedReport,
@@ -939,6 +940,95 @@ export async function processAiFixRunJob(job: Job) {
         pageUrl,
         category: "manual",
         fix: `Add the "Developed & maintained by Growth99" footer credit (${variantLabel} logo) manually — ${res.note}.`,
+        applied: false,
+        proposed: false,
+        lapse: false,
+        filesOffered: [],
+        filesChanged: [],
+      })
+      continue
+    }
+
+    // --- Deterministic Sticky Header fix ---------------------------------
+    // The top_bar_sticky check passes a header that stays pinned after scroll OR
+    // declares computed position:sticky. When neither holds (reported inline as
+    // "did NOT stay pinned"), the fix is to make it sticky: inject a CSS rule
+    // that sets position:sticky;top:0 (+ z-index) on the header element into the
+    // theme's header template. Block → parts/header.html; classic → header.php.
+    const stickyDefect =
+      f.check_factor === "top_bar_sticky" &&
+      !/check failed/i.test(f.title || "") &&
+      /did not stay pinned|not pinned/i.test(
+        `${f.title || ""} ${f.description || ""} ${(f as any).context_text || ""}`,
+      )
+    if (stickyDefect) {
+      const res = workDir
+        ? await applyStickyHeaderFix(workDir, repoThemeType).catch((e: any) => ({
+            changed: false,
+            files: [] as string[],
+            note: `sticky header fix threw: ${e?.message}`,
+          }))
+        : { changed: false, files: [] as string[], note: "no repo cloned" }
+
+      if (res.changed) {
+        let landed = false
+        let diff = ""
+        try {
+          const { stdout } = await git(["diff", "--unified=3", "--", ...res.files])
+          diff = stdout.slice(0, MAX_DIFF_CHARS)
+        } catch {}
+        try {
+          await git(["add", "-A"])
+          await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
+          committed++
+          landed = true
+        } catch (e: any) {
+          logger.warn({ runId, error: e.message }, "AI Fix: sticky header commit failed.")
+        }
+        analysis.push({
+          findingId: f.id ? String(f.id) : null,
+          check_factor: f.check_factor,
+          title: f.title || f.check_factor,
+          pageUrl,
+          category: landed ? "fully_ai" : "manual",
+          fix: `Made the header sticky — added position:sticky;top:0 to the header element in the theme's header template.`,
+          applied: landed,
+          proposed: false,
+          lapse: false,
+          filesOffered: res.files,
+          filesChanged: landed ? res.files : [],
+          editNotes: [res.note],
+          edits: [],
+          diff,
+        })
+        continue
+      }
+
+      // No repo access → document the determined correction (not applied).
+      if (noRepoAccess) {
+        analysis.push({
+          findingId: f.id ? String(f.id) : null,
+          check_factor: f.check_factor,
+          title: f.title || f.check_factor,
+          pageUrl,
+          category: "fully_ai",
+          fix: `Make the header sticky — add position:sticky;top:0 to the header element in the theme's header template.`,
+          applied: false,
+          proposed: true,
+          lapse: false,
+          filesOffered: [],
+          filesChanged: [],
+        })
+        continue
+      }
+      // Repo present but no header template to edit → honest manual report.
+      analysis.push({
+        findingId: f.id ? String(f.id) : null,
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+        category: "manual",
+        fix: `Make the header sticky (position:sticky;top:0) manually — ${res.note}.`,
         applied: false,
         proposed: false,
         lapse: false,
