@@ -822,7 +822,15 @@ export async function checkTopBarAndStickyHeader(
   onProgress?: (progress: number, message: string) => Promise<void>,
   themeType?: ThemeType,
 ): Promise<Finding[]> {
-  const { chromium } = require("playwright")
+  // Stealth chromium: gogroth (and other Cloudflare-fronted) staging sites 403
+  // a plain headless browser. playwright-extra + the stealth plugin hides the
+  // headless/webdriver tells. The shared browser is a plain-playwright instance,
+  // so decouple and launch our own stealth browser here.
+  const { chromium } = require("playwright-extra")
+  const stealth = require("puppeteer-extra-plugin-stealth")()
+  chromium.use(stealth)
+  sharedBrowser = undefined
+
   const { uploadScreenshot } = require("../lib/supabaseStorage")
   // Classic themes may carry the nav in a bare <nav>; block themes use a
   // template-part header. Pick the matching selector set (defaults to block).
@@ -836,8 +844,13 @@ export async function checkTopBarAndStickyHeader(
 
   try {
     const browser = sharedBrowser || (await chromium.launch({ headless: true }))
+    // Set a real desktop UA. Without one, Playwright sends a "HeadlessChrome"
+    // user-agent that Cloudflare (and similar WAFs) block with a 403 — every
+    // other desktop check here already sets a UA; this one used to be missed.
     const context = await browser.newContext({
       viewport: { width: 1920, height: 1080 },
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     })
     const newPage = await context.newPage()
     if (onProgress)
@@ -879,6 +892,33 @@ export async function checkTopBarAndStickyHeader(
         // Pinned = still within the top band of the viewport and visible.
         stickyObserved =
           after.top >= -5 && after.top < 150 && after.height > 0
+
+        // Additional pass condition: if the header element itself — or any
+        // header/sticky-classed element inside it — declares position:sticky
+        // in its computed style, the header is sticky by definition and the
+        // check must pass, even if the scroll-based measurement did not
+        // observe pinning (e.g. the page is too short to scroll 800px, or a
+        // sticky ancestor keeps rect.top from crossing the threshold).
+        try {
+          const cssSticky = await headerElement.evaluate(
+            (el: Element, HEADER_SELECTOR: string) => {
+              const isSticky = (node: Element) =>
+                getComputedStyle(node).position === "sticky"
+              if (isSticky(el)) return true
+              const nested = Array.from(
+                el.querySelectorAll(
+                  `${HEADER_SELECTOR}, .is-sticky, .sticky-header, [class*='sticky' i]`,
+                ),
+              )
+              return nested.some(isSticky)
+            },
+            headerSelector,
+          )
+          if (cssSticky) stickyObserved = true
+        } catch {
+          // Computed-style probe failed — fall back to the scroll measurement.
+        }
+
         stickyMeasured = true
         // Reset scroll so the code-snippet capture below is unaffected.
         await newPage.evaluate(() => window.scrollTo(0, 0)).catch(() => {})
