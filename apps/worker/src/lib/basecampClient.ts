@@ -40,6 +40,29 @@ const UA = "QACC (raees.nazeem@growth99.com)"
 const norm = (s: any) =>
   String(s || "").toLowerCase().replace(/\s+/g, " ").trim()
 
+/**
+ * Decode HTML entities so code PASTED into a Basecamp message (stored escaped:
+ * `<` → `&lt;`, `&` → `&amp;`, etc.) is recovered as the literal markup. `&amp;`
+ * is decoded LAST so a double-escaped `&amp;lt;` collapses correctly.
+ */
+function decodeHtmlEntities(s: string): string {
+  return String(s || "")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;|&apos;/gi, "'")
+    .replace(/&#x0*2f;/gi, "/")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&#0*(\d+);/g, (m, n) => {
+      try {
+        return String.fromCodePoint(parseInt(n, 10))
+      } catch {
+        return m
+      }
+    })
+    .replace(/&amp;/gi, "&")
+}
+
 function headers(token: string) {
   return {
     Authorization: `Bearer ${token}`,
@@ -233,16 +256,13 @@ export async function getChatbotConsultationCodes(
  * Growth99 contact-form embed from the Basecamp Message Board.
  *
  * The client's Basecamp Message Board carries a "G99+ Contact Form Code" message
- * with the exact embed (bid/fid differ PER project):
- *   <script src="https://app.growth99.com/assets/js/form-tracking.js"></script>
- *   <iframe style="height:610px;width:500px;border:0"
- *           src="https://app.growth99.com/assets/static/form.html?bid=<bid>&fid=<fid>"
- *           title="Contact Form"></iframe>
- *
- * We resolve the Basecamp project by the TED project name, read that message, and
- * return the reconstructed snippet so QACC can hand the developer the correct
- * code to place on the contact sections of every page. Returns found:false when
- * no such message exists.
+ * with the exact embed to use (the markup differs PER project — host, ids, and
+ * shape all vary). We resolve the Basecamp project by the TED project name, read
+ * that message, and return the code EXACTLY as pasted there (verbatim <script>/
+ * <iframe> block, entity-decoded) — never a rebuilt template. `snippet` is what
+ * QACC suggests, unchanged, for the developer to place on every page's contact
+ * section. `bid`/`fid` are surfaced for logging only. found:false when no such
+ * message exists or it carries no recoverable code.
  */
 export async function getContactFormCodeFromBasecamp(
   projectId: string | null | undefined,
@@ -254,20 +274,32 @@ export async function getContactFormCodeFromBasecamp(
     "contact form",
     "contact form code",
   )
-  // Basecamp encodes `&` as `&amp;` in stored HTML — normalize before matching.
-  const dec = String(html).replace(/&amp;/gi, "&")
+  // Recover the code EXACTLY as pasted into the message: Basecamp stores pasted
+  // markup HTML-escaped, so decode entities first, then lift the verbatim embed.
+  // We suggest THIS code unchanged — never a rebuilt template — so whatever embed
+  // shape the project actually uses is exactly what QACC hands back.
+  const decoded = decodeHtmlEntities(String(html))
+  // Verbatim <script>/<iframe> block(s), in the order they appear in the message.
+  let snippet = (
+    decoded.match(
+      /<script\b[^>]*>[\s\S]*?<\/script>|<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi,
+    ) || []
+  )
+    .map((s) => s.trim())
+    .join("\n")
+    .trim()
+  // Fallback: some projects paste the code inside a <pre>/<code> block with no
+  // real tags left after decode — take that block's text verbatim.
+  if (!snippet) {
+    const pre = decoded.match(/<(?:pre|code)\b[^>]*>([\s\S]*?)<\/(?:pre|code)>/i)
+    if (pre) snippet = pre[1].replace(/<[^>]+>/g, "").trim()
+  }
+  const bid = (decoded.match(/[?&]bid=(\d+)/i) || [null, ""])[1] || ""
+  const fid = (decoded.match(/[?&]fid=(\d+)/i) || [null, ""])[1] || ""
   const iframeSrc =
-    (dec.match(/https?:\/\/app\.growth99\.com\/assets\/static\/form\.html[^"'<> ]*/i) || [""])[0]
-  const bid = (dec.match(/[?&]bid=(\d+)/i) || [null, ""])[1] || ""
-  const fid = (dec.match(/[?&]fid=(\d+)/i) || [null, ""])[1] || ""
-  const scriptSrc =
-    (dec.match(/https?:\/\/app\.growth99\.com\/assets\/js\/form-tracking\.js/i) || [""])[0] ||
-    "https://app.growth99.com/assets/js/form-tracking.js"
-  const found = !!iframeSrc || (!!bid && !!fid)
-  const src = iframeSrc || `https://app.growth99.com/assets/static/form.html?bid=${bid}&fid=${fid}`
-  const snippet = found
-    ? `<script src="${scriptSrc}"></script><iframe style="height:610px;width:500px;border:0" src="${src}" title="Contact Form"></iframe>`
-    : ""
+    (decoded.match(/<iframe\b[^>]*\bsrc=["']([^"']+)["']/i) || [null, ""])[1] || ""
+  // Found only when we actually recovered code to suggest — never a fabricated one.
+  const found = !!snippet
   return { found, snippet, bid, fid, iframeSrc }
 }
 
