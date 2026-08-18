@@ -328,6 +328,13 @@ export async function postTedComment(
 // (Confirm exact string against TED before relying on it in production.)
 const TED_STATUS_COMPLETED = "Completed"
 
+// Minimum age (from run start) before the FIRST subtask result is posted. This
+// is a floor, not a fixed delay: if the run already took this long we post
+// immediately; only a run that finished faster waits out the remainder. Stops a
+// fast run from closing every subtask the instant it ends. Default 60s.
+const SUBTASK_MIN_WAIT_MS = Number(process.env.SUBTASK_MIN_WAIT_MS || 60000)
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
 // PUT a status onto a TED task. TED's SSR returns app-shell HTML (HTTP 200)
 // when the task id can't be resolved, so a JSON body is the only proof the
 // update landed. Best-effort — returns false instead of throwing.
@@ -435,17 +442,14 @@ export async function markAllTedTasksCompleted(
     const parent = parentTaskId || (run?.ted_task_id as string | undefined)
     if (parent) await postTedStatus(parent, TED_STATUS_COMPLETED, runId)
 
-    // Close out every mapped checklist subtask, for ANY run that carries a
-    // subtask map — internal QA (beta_site.internal_test) and pre-release
-    // (release.qa_pre) both do; post-release has no map, so this is a no-op
-    // there. Keying off the map (not run_type) keeps this correct as more
-    // run types adopt subtask routing.
+    // Checklist SUBTASKS are closed by postSectionedReport — each one the moment
+    // its OWN comment lands: pass/fail via the section loop, hung/errored via the
+    // no-result loop. Those two loops together cover every mapped subtask, so a
+    // subtask is always closed WITH its result and never before it. This funnel
+    // only closes the PARENT and hands off the video barrier.
     const map: Record<string, string | string[]> = (run?.ted_subtask_map as any) || {}
-    // The video-recording subtask is NOT closed here. It is the final
-    // verification step and is owned entirely by the video_recording_check
-    // barrier (it must run AFTER every other check has passed, then decide the
-    // subtask's fate). Exclude its id(s) from the blanket close so the barrier
-    // sets its status, and hand the barrier off below.
+    // The video-recording subtask is owned by the video_recording_check barrier
+    // (it runs AFTER every other check passed, then sets its own status).
     const videoSubtaskIds = new Set(
       (Array.isArray(map["video_recording"])
         ? map["video_recording"]
@@ -454,19 +458,7 @@ export async function markAllTedTasksCompleted(
           : []
       ).map((v) => String(v)),
     )
-    // A check can map to several subtasks; flatten + de-dupe. Tolerates the
-    // legacy one-to-one shape ({check: subtaskId}) too.
-    const subtaskIds = [
-      ...new Set(
-        Object.values(map).flatMap((v) => (Array.isArray(v) ? v : [v])),
-      ),
-    ].filter((id) => !videoSubtaskIds.has(String(id)))
-    for (const subtaskId of subtaskIds) {
-      await postTedStatus(subtaskId, TED_STATUS_COMPLETED, runId).catch(
-        () => {},
-      )
-    }
-    logger.info({ runId, parent }, "Marked TED tasks Completed for finished run.")
+    logger.info({ runId, parent }, "Marked TED parent Completed; subtasks closed per-check by the report.")
 
     // Hand off to the video-recording barrier: it evaluates whether every other
     // check passed and then either records or reports why it couldn't. Enqueued
@@ -1621,13 +1613,29 @@ export async function postSectionedReport(opts: {
   // failed first (sections are already sorted failed→passed). Deliberately icon-
   // light — a single count line, then a plain-text list, so the summary reads as
   // results, not a wall of emoji.
+  // One short reason per failed check, pulled from its first real defect
+  // (title, else the description) — HTML stripped and clipped to one sentence —
+  // so the roll-up reads "Contact Form — Failed: No contact form found" instead
+  // of a bare "Failed" the reader has to scroll down to explain.
+  const failReason = (factor: string): string => {
+    const real = (byCheck.get(factor) || []).filter(isRealDefect)
+    if (!real.length) return ""
+    const f = real[0]
+    const raw = String(f.title || f.description || "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+    return clipText(raw, 140)
+  }
   const rollupItems = sections
-    .map(
-      (s) =>
-        `<li>${esc(FRIENDLY[s.factor] || titleCase(s.factor))} — ${
-          s.status === "failed" ? "Failed" : "Passed"
-        }</li>`,
-    )
+    .map((s) => {
+      const label = esc(FRIENDLY[s.factor] || titleCase(s.factor))
+      if (s.status === "failed") {
+        const reason = failReason(s.factor)
+        return `<li>${label} — Failed${reason ? `: ${esc(reason)}` : ""}</li>`
+      }
+      return `<li>${label} — Passed</li>`
+    })
     .join("")
   const overview =
     `<p><strong>Test cases:</strong> ${tally.failed + tally.passed} total — ${tally.failed} failed, ${tally.passed} passed.</p>` +
@@ -1637,9 +1645,29 @@ export async function postSectionedReport(opts: {
   const hasSubtasks = Object.keys(subtaskMap).length > 0
 
   if (hasSubtasks) {
+    // Floor the FIRST subtask post to at least 1 min after the run started — so a
+    // fast/degenerate run doesn't dump every result the instant it ends (which
+    // read as "closed before it ran"). This is NOT a fixed sleep: we only wait
+    // the REMAINDER up to the 1-min mark, and a run that already took a minute or
+    // more flows straight through. Main-thread comments are never delayed.
+    try {
+      const { data: rt } = await supabase
+        .from("qa_runs")
+        .select("started_at, created_at")
+        .eq("id", runId)
+        .single()
+      const startIso = (rt?.started_at as string) || (rt?.created_at as string) || ""
+      const startMs = startIso ? new Date(startIso).getTime() : 0
+      if (startMs) {
+        const remaining = SUBTASK_MIN_WAIT_MS - (Date.now() - startMs)
+        if (remaining > 0) await sleep(remaining)
+      }
+    } catch {}
+
     // Each mapped check → its own subtask. Any check WITHOUT a subtask still
     // gets reported, stitched into a summary comment on the parent so nothing
-    // is silently dropped.
+    // is silently dropped. A subtask is marked Completed ONLY right after its
+    // own pass/fail comment lands here.
     const leftovers: typeof sections = []
     for (const sec of sections) {
       const raw = subtaskMap[sec.factor]
@@ -1687,6 +1715,10 @@ export async function postSectionedReport(opts: {
             ...reportCtx,
           },
         ).catch(() => {})
+        // Close THIS subtask now that its pass/fail comment has landed. Never the
+        // video subtask (the barrier owns its status).
+        if (sec.factor !== "video_recording")
+          await postTedStatus(target, TED_STATUS_COMPLETED, runId).catch(() => {})
       }
     }
     // No subtask left reason-less: a mapped check that produced NO pass/fail
@@ -1714,9 +1746,9 @@ export async function postSectionedReport(opts: {
             240,
           )
         : ""
-      const body = `<p><strong>${esc(label)}</strong> — Could not complete this run${
-        reason ? `: ${esc(reason)}` : " (the check produced no automated pass/fail result)"
-      }. QACC has made the call and marked this subtask complete; review manually if needed.</p>`
+      const body = `<p>❌ <strong>${esc(label)} — Failed (could not complete)</strong>${
+        reason ? `: ${esc(reason)}` : " — the check hung or errored and produced no automated pass/fail result"
+      }. Marked complete so the checklist isn't left hanging; review manually if needed.</p>`
       for (const target of targets) {
         await postTedComment(
           target,
@@ -1730,12 +1762,15 @@ export async function postSectionedReport(opts: {
             ...reportCtx,
           },
         ).catch(() => {})
+        // Close this subtask now that its "could not complete" note has landed.
+        await postTedStatus(target, TED_STATUS_COMPLETED, runId).catch(() => {})
       }
     }
-    // ALWAYS post the final summary on the PARENT (main thread) — the high-level
+    // Now that every subtask has its comment AND is marked Completed (both loops
+    // above), post the final summary on the PARENT (main thread) — the high-level
     // test-case roll-up (each check → Passed/Failed) + any AI-fix run status +
-    // any check with no subtask to route to. Posted every run so the main thread
-    // always carries the final summary before the parent task is closed.
+    // any check with no subtask to route to. The summary always follows subtask
+    // completion, never precedes it.
     {
       // Order: scan pass/fail roll-up FIRST, then the fixes-applied high-level
       // summary (summaryHeaderHtml, present only on the AI-fix pass), then any
