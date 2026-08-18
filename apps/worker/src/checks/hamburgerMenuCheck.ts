@@ -61,6 +61,10 @@ const CLASSIC_TOGGLES = [
   ".mobile-nav-toggle",
   ".nav-toggle",
   ".menu-trigger",
+  // Custom-coded builds that ship their own toggle as `#burger` / `.burger`.
+  "button#burger",
+  "#burger",
+  ".burger",
   '[class*="menu-toggle" i]',
   '[class*="mobile-menu" i][class*="toggle" i]',
 ]
@@ -150,6 +154,38 @@ export async function checkHamburgerMenu(
     }
     await page.waitForTimeout(600)
 
+    // 0. Fast-path: a `#burger` toggle button. Some custom builds ship their
+    //    hamburger as a `<button id="burger" class="burger">` in the navbar
+    //    (see project requirement). Presence of this button, visible in the
+    //    header band at mobile width (< 1024px), satisfies the "hamburger exists
+    //    below 1024px" requirement on its own — mark present and pass. Custom
+    //    open mechanisms don't reliably match the WP aria/.is-menu-open heuristics
+    //    below, so we don't force the deep open/validate flow on them.
+    if (onProgress) await onProgress(20, "Checking for a #burger toggle button...")
+    const hasBurgerId = await page
+      .evaluate(() => {
+        const el = document.querySelector("button#burger, #burger, .burger")
+        if (!el) return false
+        const r = (el as HTMLElement).getBoundingClientRect()
+        const s = getComputedStyle(el as HTMLElement)
+        return (
+          r.width > 0 && r.height > 0 && r.top <= 240 &&
+          s.visibility !== "hidden" && s.display !== "none" && Number(s.opacity) > 0.05
+        )
+      })
+      .catch(() => false)
+
+    if (hasBurgerId) {
+      const s = await shot("burger_id_present")
+      push(
+        "Hamburger menu verified",
+        `A #burger toggle button is present in the navbar at ${MOBILE.width}px (below 1024px). Hamburger menu present — requirement satisfied.`,
+        s,
+      )
+      if (onProgress) await onProgress(98, "Finalizing hamburger menu findings...")
+      return findings
+    }
+
     // 1. Find a visible hamburger toggle. Explicit WP/Elementor selectors first,
     // then a theme-agnostic heuristic: a small, icon-only, clickable element
     // hugging a top corner of the header (covers custom / React / Next sites
@@ -190,7 +226,7 @@ export async function checkHamburgerMenu(
       push(
         "No hamburger menu found at mobile width",
         loadOk
-          ? `No mobile menu toggle was found at ${MOBILE.width}px for a ${themeType || "WordPress"} theme (looked for block Navigation, classic .menu-toggle variants, and Elementor). Pre-release requires a hamburger menu below 1024px — verify the mobile navigation exists.`
+          ? `No mobile menu toggle was found at ${MOBILE.width}px for a ${themeType || "WordPress"} theme (looked for a #burger button, block Navigation, classic .menu-toggle variants, and Elementor). No automated fix is available for this — ask the developer to add a hamburger menu for screens under 1024px wide, per the project requirement.`
           : `The homepage did not finish loading, so the mobile menu could not be checked. QACC will retry on the next run.`,
         s,
       )

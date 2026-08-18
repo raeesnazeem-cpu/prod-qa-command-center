@@ -1048,7 +1048,14 @@ export type FixReportInfo = {
   // "apply_failed" → the edit was located in a file but the overwrite genuinely
   // failed after retries (rare technical failure); `manualReason` states it
   // verbatim, e.g. "couldn't correct `x` to `y` as overwriting failed".
-  manualKind?: "rest_api" | "apply_failed"
+  // "no_auto_fix" → a real defect for which no automated fix could ever exist
+  // (the data lives outside the site, e.g. Project Plan not set in TED/HubSpot);
+  // `manualReason` carries the human suggestion. Rendered as "Suggested Fix …",
+  // never "✅ Fixed".
+  // "place_code" → an assisted-manual fix that resolved the exact code + where to
+  // place it (e.g. contact_form's per-client G99+ embed from Basecamp);
+  // `manualReason` carries the instructions + snippet, surfaced verbatim.
+  manualKind?: "rest_api" | "apply_failed" | "no_auto_fix" | "place_code"
   manualReason?: string
   fix?: string
   edits?: { path: string; find: string; replace: string }[]
@@ -1161,6 +1168,28 @@ function renderIssueDetail(
 // is that the text lives in the WordPress database (page/post content or
 // wp_options) and needs REST API write access. No leading <br> — callers wrap.
 function renderNeedsLabel(fx: FixReportInfo): string {
+  // A real defect with no automated fix that could ever exist — the correction
+  // lives outside the site (e.g. Project Plan not set in TED/HubSpot). Stated as
+  // a suggestion for the human, explicitly flagged as not auto-fixable.
+  if (fx.manualKind === "no_auto_fix")
+    return `💡 <strong>Suggested Fix:</strong> ${esc(
+      clipText(fx.manualReason || fx.fix || "action required", 240),
+    )} <em>— no automated fix possible.</em>`
+  // Assisted-manual: the fix engine resolved the exact code + placement (e.g. the
+  // client's contact-form embed from Basecamp). Surface the instructions and the
+  // snippet in full so a developer can copy it, never generic boilerplate.
+  if (fx.manualKind === "place_code") {
+    const raw = fx.manualReason || fx.fix || ""
+    const nl = raw.indexOf("\n")
+    const intro = (nl >= 0 ? raw.slice(0, nl) : raw).trim()
+    const code = nl >= 0 ? raw.slice(nl + 1).trim() : ""
+    let out = `🧩 <strong>Action needed:</strong> ${esc(clipText(intro, 400))}`
+    if (code)
+      out += `<pre style="white-space:pre-wrap;word-break:break-word"><code>${esc(
+        clipText(code, 1500),
+      )}</code></pre>`
+    return out
+  }
   // A genuine, rare overwrite failure — stated exactly as it happened, never
   // dressed up and never used as a way to skip the check.
   if (fx.manualKind === "apply_failed")

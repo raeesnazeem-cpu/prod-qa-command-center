@@ -306,6 +306,17 @@ export async function processAiFixRunJob(job: Job) {
     // in the repo" mismatch. Surfaced verbatim in the report so a real technical
     // failure is stated exactly, never silently skipped.
     applyError?: { find: string; replace: string; reason: string }
+    // Set when the finding is a real defect with NO automated fix that could ever
+    // exist in code/config (e.g. "Project Plan not set" — the plan lives in TED
+    // notes / HubSpot, not the site). Renders a plain "Suggested Fix … — no
+    // automated fix possible" line, never "✅ Fixed" and never an AI-Fix banner.
+    noAutoFix?: boolean
+    suggestedFix?: string
+    // Set for assisted-manual fixes that produced the exact code to place plus
+    // where to put it (e.g. contact_form's per-client G99+ embed from Basecamp).
+    // The report must SURFACE `fix` (the snippet + instructions), not the generic
+    // "REST API access needed" boilerplate.
+    placeCode?: boolean
   }[] = []
 
   for (const f of (findings || []).slice(0, MAX_FINDINGS)) {
@@ -758,6 +769,37 @@ export async function processAiFixRunJob(job: Job) {
       continue
     }
 
+    // --- Project Plan: no-automated-fix cases ----------------------------
+    // Any project_plan finding that reached here is NOT the reviews-widget
+    // defect (that block `continue`d above). The remaining failing cases —
+    // "Project Plan not set" (no plan in HubSpot/TED/notes) and "Project Plan
+    // — could not reach TED" — are DATA issues that live in TED notes / HubSpot,
+    // not in the site's code. No automated fix can ever exist for them, so we
+    // NEVER run them through the LLM triage (which would fabricate a "✅ Fixed"
+    // line). We report them honestly as a suggestion the human must act on.
+    if (f.check_factor === "project_plan") {
+      const suggested = /could not reach ted/i.test(f.title || "")
+        ? "Retry once TED is reachable, or add the Growth99 plan to the client's TED notes / HubSpot growth99_plan field."
+        : "Add the Growth99 project plan to the client notes, or set the growth99_plan field in HubSpot / the TED client record."
+      analysis.push({
+        findingId: f.id ? String(f.id) : null,
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+        category: "manual",
+        fix: suggested,
+        applied: false,
+        proposed: false,
+        lapse: false,
+        noAutoFix: true,
+        suggestedFix: suggested,
+        filesOffered: [],
+        filesChanged: [],
+        edits: [],
+      })
+      continue
+    }
+
     // --- Deterministic Learn More buttons fix ----------------------------
     // The check flags generic CTA buttons ("Learn More"/"Read More"/…). The fix
     // is to REMOVE them. We strip matching Gutenberg button blocks + plain
@@ -1058,18 +1100,19 @@ export async function processAiFixRunJob(job: Job) {
         applied: false,
         proposed: false,
         lapse: false,
+        placeCode: true,
         filesOffered: [] as string[],
         filesChanged: [] as string[],
       }
       if (cf?.found) {
         analysis.push({
           ...base,
-          fix: `No contact form was found. Add the Growth99 contact form to the desired contact spaces on ALL pages using this client's embed code (from Basecamp "G99+ Contact Form Code" — bid=${cf.bid || "?"}, fid=${cf.fid || "?"}):\n${cf.snippet}`,
+          fix: `No contact form was found in the page source. Add this project's contact-form code — the exact embed from its Basecamp Message Board "G99+ Contact Form Code" message — to the contact section of every page:\n${cf.snippet}`,
         })
       } else {
         analysis.push({
           ...base,
-          fix: `No contact form was found, and the "G99+ Contact Form Code" message could not be read from this project's Basecamp Message Board. Get the client's contact-form embed (app.growth99.com/assets/static/form.html?bid=…&fid=…) from Basecamp and add it to the contact sections on all pages.`,
+          fix: `No contact form was found in the page source, and the "G99+ Contact Form Code" message could not be read from this project's Basecamp Message Board. Open that message in Basecamp, copy the exact embed it contains, and add it to the contact section of every page.`,
         })
       }
       continue
@@ -1574,14 +1617,32 @@ export async function processAiFixRunJob(job: Job) {
     //    content or wp_options like tagline/phone), not in any file the
     //    code-editing pass can touch, so it needs REST API write access.
     const applyFailed = manual && !!a.applyError
+    // A real defect with no automated fix that could ever exist in code/config
+    // (project_plan not-set). Rendered as a plain suggestion, never "✅ Fixed".
+    const noAutoFix = manual && !!a.noAutoFix
+    // Assisted-manual fix that produced the exact code + placement (contact_form).
+    // Surface `fix` verbatim, never the generic REST-API boilerplate.
+    const placeCode = manual && !!a.placeCode
     fixMap.set(a.findingId, {
       applied: a.applied,
       proposed: a.proposed,
       manual,
-      manualKind: manual ? (applyFailed ? "apply_failed" : "rest_api") : undefined,
-      manualReason: applyFailed
-        ? `couldn't correct \`${a.applyError!.find}\` to \`${a.applyError!.replace}\` as overwriting failed`
+      manualKind: manual
+        ? noAutoFix
+          ? "no_auto_fix"
+          : placeCode
+            ? "place_code"
+            : applyFailed
+              ? "apply_failed"
+              : "rest_api"
         : undefined,
+      manualReason: noAutoFix
+        ? a.suggestedFix || a.fix
+        : placeCode
+          ? a.fix
+          : applyFailed
+            ? `couldn't correct \`${a.applyError!.find}\` to \`${a.applyError!.replace}\` as overwriting failed`
+            : undefined,
       fix: a.fix,
       edits: a.edits,
       filesChanged: a.filesChanged,
