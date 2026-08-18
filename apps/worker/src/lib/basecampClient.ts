@@ -228,3 +228,75 @@ export async function getChatbotConsultationCodes(
     vc: { found: !!composer || !!vcFid, composer, bid: vcBid, fid: vcFid },
   }
 }
+
+/**
+ * Growth99 contact-form embed from the Basecamp Message Board.
+ *
+ * The client's Basecamp Message Board carries a "G99+ Contact Form Code" message
+ * with the exact embed (bid/fid differ PER project):
+ *   <script src="https://app.growth99.com/assets/js/form-tracking.js"></script>
+ *   <iframe style="height:610px;width:500px;border:0"
+ *           src="https://app.growth99.com/assets/static/form.html?bid=<bid>&fid=<fid>"
+ *           title="Contact Form"></iframe>
+ *
+ * We resolve the Basecamp project by the TED project name, read that message, and
+ * return the reconstructed snippet so QACC can hand the developer the correct
+ * code to place on the contact sections of every page. Returns found:false when
+ * no such message exists.
+ */
+export async function getContactFormCodeFromBasecamp(
+  projectId: string | null | undefined,
+  projectName?: string | null,
+): Promise<{ found: boolean; snippet: string; bid: string; fid: string; iframeSrc: string }> {
+  const html = await getMessageBoardHtml(
+    projectId,
+    projectName,
+    "contact form",
+    "contact form code",
+  )
+  // Basecamp encodes `&` as `&amp;` in stored HTML — normalize before matching.
+  const dec = String(html).replace(/&amp;/gi, "&")
+  const iframeSrc =
+    (dec.match(/https?:\/\/app\.growth99\.com\/assets\/static\/form\.html[^"'<> ]*/i) || [""])[0]
+  const bid = (dec.match(/[?&]bid=(\d+)/i) || [null, ""])[1] || ""
+  const fid = (dec.match(/[?&]fid=(\d+)/i) || [null, ""])[1] || ""
+  const scriptSrc =
+    (dec.match(/https?:\/\/app\.growth99\.com\/assets\/js\/form-tracking\.js/i) || [""])[0] ||
+    "https://app.growth99.com/assets/js/form-tracking.js"
+  const found = !!iframeSrc || (!!bid && !!fid)
+  const src = iframeSrc || `https://app.growth99.com/assets/static/form.html?bid=${bid}&fid=${fid}`
+  const snippet = found
+    ? `<script src="${scriptSrc}"></script><iframe style="height:610px;width:500px;border:0" src="${src}" title="Contact Form"></iframe>`
+    : ""
+  return { found, snippet, bid, fid, iframeSrc }
+}
+
+/**
+ * Growth99 single-script embed (the "G99+ Cliff Hanger Code") from the Basecamp
+ * Message Board. Same message QACC reads for the chatbot, returned here as the
+ * reconstructed site-wide loader snippet so the fix can inject it into the footer:
+ *   <div id="buisness-id" data-id="<bid>"></div>
+ *   <script id="integration-script" src="https://chatbot.growth99.com/assets/js/integration.js"></script>
+ * The data-id (business id) differs per client. Returns found:false on a miss.
+ */
+export async function getSingleScriptCodeFromBasecamp(
+  projectId: string | null | undefined,
+  projectName?: string | null,
+): Promise<{ found: boolean; businessId: string; scriptSrc: string; snippet: string }> {
+  const html = await getMessageBoardHtml(
+    projectId,
+    projectName,
+    "cliff hanger",
+    "cliff hanger code",
+  )
+  const dec = String(html).replace(/&amp;/gi, "&")
+  const scriptSrc =
+    (dec.match(/https?:\/\/chatbot\.growth99\.com\/assets\/js\/integration\.js/i) || [""])[0] ||
+    "https://chatbot.growth99.com/assets/js/integration.js"
+  const businessId = (dec.match(/data-id=["']?(\d+)/i) || [null, ""])[1] || ""
+  const found = /chatbot\.growth99\.com\/assets\/js\/integration\.js/i.test(dec) || !!businessId
+  const snippet = found
+    ? `<div id="buisness-id" data-id="${businessId}"></div><script id="integration-script" src="${scriptSrc}"></script>`
+    : ""
+  return { found, businessId, scriptSrc, snippet }
+}

@@ -201,18 +201,31 @@ async function fetchTedTaskCommentsText(
 // Returns a cleaned URL (no trailing slash/punctuation), or null.
 function parseBetaSiteUrl(text: string): string | null {
   if (!text) return null
+  // When the source is an HTML comment (e.g. <a href="URL">URL</a><br>GitHub),
+  // a bare \S+ match swallows the closing `">…</a><br>…` markup into the URL and
+  // that mangled value gets stored in site_url — breaking every place it renders
+  // (TED comments + QACC). Cut at the first char that cannot be part of a bare
+  // URL (quote, angle bracket, whitespace) BEFORE stripping trailing
+  // punctuation. Mirrors apps/web/src/lib/siteUrl.ts's cleanSiteUrl.
   const clean = (u: string) =>
-    u.replace(/[.,;)]+$/, "").replace(/\/+$/, "").trim()
+    u
+      .split(/["'<>\s]/)[0]
+      .replace(/[.,;)]+$/, "")
+      .replace(/\/+$/, "")
+      .trim()
   // 1. Explicit token.
   const token = text.match(/betaSiteUrl\s*=\s*(\S+)/i)
   if (token?.[1]) return clean(token[1])
   // 2. Labelled line: "Beta URL:", "Beta site URL:", "Beta site link:", etc.
+  // URL char class excludes quotes/angle brackets so the match stops at HTML.
   const labelled = text.match(
-    /beta[\s_-]*(?:site[\s_-]*)?(?:url|link)\s*[:=]\s*(https?:\/\/\S+)/i,
+    /beta[\s_-]*(?:site[\s_-]*)?(?:url|link)\s*[:=]\s*(https?:\/\/[^\s"'<>]+)/i,
   )
   if (labelled?.[1]) return clean(labelled[1])
-  // 3. Fallback: first http(s) URL that is NOT a GitHub repo link.
-  const urls = text.match(/https?:\/\/\S+/gi) || []
+  // 3. Fallback: first http(s) URL that is NOT a GitHub repo link. Each match is
+  // a single clean URL (no quote/bracket chars), so the GitHub check is reliable
+  // even when the site URL and a GitHub link sit adjacent in HTML markup.
+  const urls = text.match(/https?:\/\/[^\s"'<>]+/gi) || []
   const nonGithub = urls.find((u) => !/github\.com/i.test(u))
   return nonGithub ? clean(nonGithub) : null
 }

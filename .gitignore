@@ -12,6 +12,8 @@ apps/*/.env.*
 packages/*/.env
 packages/*/.env.*
 !packages/*/.env.example
+prod.env
+**/prod.env
 
 # Build outputs
 dist/
@@ -272,3 +274,8 @@ graphify-out/
 
 # Supabase Blueprint
 supabase-blueprint/.git-worktree-pointer.bak
+
+# Ad-hoc worker test / scratch scripts (not runtime modules — real code is in src/)
+apps/worker/_*.ts
+apps/worker/aiFixLinkTest.ts
+apps/worker/uploadFixPreview.ts

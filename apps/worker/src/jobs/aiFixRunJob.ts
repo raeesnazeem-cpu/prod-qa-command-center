@@ -3,9 +3,15 @@ import { supabase } from "../lib/supabase"
 import { completeText, describeImage } from "../lib/aiFallback"
 import { resolveBetaSiteRepo, getReviewsWidgetId } from "../lib/tedClient"
 import { provisionReviewsPage, reviewsEmbedSnippet } from "../lib/reviewsWidgetFix"
-import { getReviewsWidgetFromBasecamp } from "../lib/basecampClient"
+import {
+  getReviewsWidgetFromBasecamp,
+  getContactFormCodeFromBasecamp,
+  getSingleScriptCodeFromBasecamp,
+} from "../lib/basecampClient"
+import { injectSingleScriptIntoFooter } from "../lib/singleScriptFix"
 import { removeLearnMoreButtons } from "../lib/learnMoreFix"
 import { deferChatbotScript } from "../lib/chatbotScriptFix"
+import { applyFooterLogoFix } from "../lib/footerLogoFix"
 import {
   postTedComment,
   postSectionedReport,
@@ -70,10 +76,11 @@ const logger = pino({
  *  2) Full categorized analysis (every finding: category + proposal + applied)
  *     is saved to the `ai_fix_runs` table for the QACC "Dry-run Data" tab.
  *
- * Gating: AI_FIX_MODULE_ENABLED=true. Push happens only when GIT_FIX_TOKEN is
- * set and AI_FIX_DRY_RUN !== "true" — a dry run still clones and applies +
- * verifies edits locally, so proposals are real diffs against real files; it
- * simply never pushes.
+ * Gating: AI_FIX_MODULE_ENABLED=true. Every run attempts the fix, applies it,
+ * and pushes a branch to raise ONE PR. A push happens whenever the client's
+ * beta_site.env repo is resolvable and a push token (GIT_FIX_TOKEN or a per-repo
+ * override) is present. There is no dry-run: a push is only ever withheld by a
+ * genuine repo-access gap, which the report states exactly.
  *
  * Retrieval: `lib/repoContext.ts` picks candidate files per finding and feeds the
  * model their ACTUAL contents. Edits are applied through `applyEdit`, which
@@ -162,8 +169,8 @@ export async function processAiFixRunJob(job: Job) {
   }
 
   // Shared default push token. A per-repo override may replace it once the beta
-  // repo is resolved (see resolveGitFixToken below). dryRun is finalized there
-  // too, since a project may have an override token but no shared GIT_FIX_TOKEN.
+  // repo is resolved (see resolveGitFixToken below) — a project may have an
+  // override token even without a shared GIT_FIX_TOKEN.
   const baseToken = process.env.GIT_FIX_TOKEN
   logger.info({ runId, tedTaskId }, "AI Fix module starting")
 
@@ -208,15 +215,16 @@ export async function processAiFixRunJob(job: Job) {
   // 1534's G99agency repo → GH_TOKEN_NUVO); otherwise the shared token.
   const overrideToken = resolveGitFixToken(ownerRepo)
   const token = overrideToken ?? baseToken
-  const dryRun = process.env.AI_FIX_DRY_RUN === "true" || !token
   logger.info(
-    { runId, dryRun, tokenSource: overrideToken ? "override" : baseToken ? "shared" : "none", ownerRepo },
+    { runId, tokenSource: overrideToken ? "override" : baseToken ? "shared" : "none", ownerRepo },
     "AI Fix: push token resolved",
   )
-  // A dry run still clones (proposals are only meaningful checked against the
-  // real files); pushing is what a dry run withholds.
+  // Every run attempts the fix, applies it, and pushes a branch to raise ONE PR.
+  // There is no dry-run: the ONLY thing that can withhold a push is a genuine
+  // lack of repo access (no repo URL, or no/invalid push token), reported with
+  // the exact reason. When a repo + token are present, we always push.
   const canClone = !!repoUrl && !!ownerRepo && !!token
-  const willPush = canClone && !dryRun
+  const willPush = canClone
 
   // No usable repo → we can't clone/apply/push, but we CAN still determine the
   // corrections from the findings and report them per subtask, clearly flagged as
@@ -234,7 +242,7 @@ export async function processAiFixRunJob(job: Job) {
   let workDir = ""
   // True when a repo WAS resolved but we couldn't clone it (bad/absent push
   // token, revoked access, private repo). Treated the same as noRepo for
-  // reporting: "no repo access" — never surfaced as a dry run.
+  // reporting: the exact "no repo access" reason, stated in the report.
   let cloneFailed = false
   let repoIndex: string[] = []
   // Theme type detected directly from the cloned working tree — the most precise
@@ -257,7 +265,7 @@ export async function processAiFixRunJob(job: Job) {
       await git(["checkout", "-b", branch]) // all fixes go on one branch → one PR
       repoIndex = await buildRepoIndex(workDir)
       repoThemeType = detectFromRepoDir(workDir)
-      logger.info({ runId, files: repoIndex.length, dryRun, themeType: repoThemeType, source: "github" }, "AI Fix: repo cloned and indexed")
+      logger.info({ runId, files: repoIndex.length, themeType: repoThemeType, source: "github" }, "AI Fix: repo cloned and indexed")
     } catch (e: any) {
       logger.error({ runId, error: e.message }, "AI Fix: clone failed; triaging without repo context.")
       workDir = ""
@@ -267,8 +275,8 @@ export async function processAiFixRunJob(job: Job) {
 
   // No usable repo access: no repo resolved (noRepo), a resolved repo we couldn't
   // clone (cloneFailed: bad/revoked token, private repo), or a resolved repo with
-  // no push token at all. All three are reported as "no repo access" — never a
-  // dry run — and must NEVER suppress documenting a determined fix. For every real
+  // no push token at all. All three are reported with the exact "no repo access"
+  // reason, and must NEVER suppress documenting a determined fix. For every real
   // failing finding the correction is still stated ("✅ Fixed: …"); only checks
   // that genuinely need no fix say so. Repo access decides whether we PUSH, never
   // whether we DOCUMENT.
@@ -374,8 +382,11 @@ export async function processAiFixRunJob(job: Job) {
           pageUrl,
           category: landed ? "fully_ai" : "manual",
           fix: `Deferred the Cliff Hanger chatbot script (${res.note}) so it runs after the DOM is ready — the next QA run re-verifies the widgets render.`,
-          applied: landed && willPush,
-          proposed: landed && !willPush,
+          // Applied = the edit landed and was committed locally (past tense).
+          // Whether it was pushed is a separate fact stated in the push
+          // disclaimer; a committed-but-unpushed fix is still an applied fix.
+          applied: landed,
+          proposed: false,
           lapse: false,
           filesOffered: res.files,
           filesChanged: landed ? res.files : [],
@@ -560,8 +571,11 @@ export async function processAiFixRunJob(job: Job) {
           pageUrl,
           category: landed ? "fully_ai" : "manual",
           fix: combinedDesc,
-          applied: landed && willPush,
-          proposed: landed && !willPush,
+          // Applied = the edit landed and was committed locally (past tense).
+          // Whether it was pushed is a separate fact stated in the push
+          // disclaimer; a committed-but-unpushed fix is still an applied fix.
+          applied: landed,
+          proposed: false,
           lapse: false,
           filesOffered: seedFiles,
           filesChanged: landed ? seedFiles : [],
@@ -628,8 +642,11 @@ export async function processAiFixRunJob(job: Job) {
           pageUrl,
           category: landed ? "fully_ai" : "manual",
           fix: res.description,
-          applied: landed && willPush,
-          proposed: landed && !willPush,
+          // Applied = the edit landed and was committed locally (past tense).
+          // Whether it was pushed is a separate fact stated in the push
+          // disclaimer; a committed-but-unpushed fix is still an applied fix.
+          applied: landed,
+          proposed: false,
           lapse: false,
           filesOffered: [res.file],
           filesChanged: landed ? [res.file] : [],
@@ -687,8 +704,11 @@ export async function processAiFixRunJob(job: Job) {
           pageUrl,
           category: landed ? "fully_ai" : "manual",
           fix: res.description,
-          applied: landed && willPush,
-          proposed: landed && !willPush,
+          // Applied = the edit landed and was committed locally (past tense).
+          // Whether it was pushed is a separate fact stated in the push
+          // disclaimer; a committed-but-unpushed fix is still an applied fix.
+          applied: landed,
+          proposed: false,
           lapse: false,
           filesOffered: res.files,
           filesChanged: landed ? res.files : [],
@@ -774,8 +794,11 @@ export async function processAiFixRunJob(job: Job) {
           pageUrl,
           category: landed ? "fully_ai" : "manual",
           fix: res.description,
-          applied: landed && willPush,
-          proposed: landed && !willPush,
+          // Applied = the edit landed and was committed locally (past tense).
+          // Whether it was pushed is a separate fact stated in the push
+          // disclaimer; a committed-but-unpushed fix is still an applied fix.
+          applied: landed,
+          proposed: false,
           lapse: false,
           filesOffered: res.files,
           filesChanged: landed ? res.files : [],
@@ -811,6 +834,244 @@ export async function processAiFixRunJob(job: Job) {
         pageUrl,
         category: "manual",
         fix: `Remove the generic "Learn More"-style CTA button(s) — ${res.note}.`,
+        applied: false,
+        proposed: false,
+        lapse: false,
+        filesOffered: [],
+        filesChanged: [],
+      })
+      continue
+    }
+
+    // --- Deterministic Footer Logo fix -----------------------------------
+    // Add a "Developed & maintained by <Growth99 logo>" credit into the footer.
+    // AI determines the variant: it reads the footer background from the evidence
+    // screenshot and picks the WHITE SVG for dark footers or the COLOUR WebP for
+    // light ones. The logo height is set in `em` so it resizes to the credit text
+    // next to it (see footerLogoFix). Runs on a real footer-logo defect (wrong/
+    // missing logo, tagline present, or vision-unverified), not tool lapses.
+    const footerLogoDefect =
+      f.check_factor === "footer_logo" &&
+      !/check failed/i.test(f.title || "") &&
+      /issue|not verified|missing|tagline|logo/i.test(`${f.title || ""} ${f.description || ""}`)
+    if (footerLogoDefect) {
+      // AI: classify the footer background (dark → white logo, light → colour).
+      let variant: "white" | "color" = "white"
+      const shot = (f.screenshot_url || "").split(",")[0]?.trim()
+      if (shot) {
+        try {
+          const resp = await fetch(shot)
+          if (resp.ok) {
+            const buf = Buffer.from(await resp.arrayBuffer())
+            const verdict = await describeImage(
+              buf,
+              'Look ONLY at the footer background colour in this screenshot. Reply with ONE word: "DARK" if the footer background is dark (white logo needed) or "LIGHT" if it is light/white (dark/colour logo needed).',
+            ).catch(() => "")
+            if (/light/i.test(verdict)) variant = "color"
+            else if (/dark/i.test(verdict)) variant = "white"
+          }
+        } catch {}
+      }
+
+      const res = workDir
+        ? await applyFooterLogoFix(workDir, repoThemeType, { variant }).catch(
+            (e: any) => ({ changed: false, files: [] as string[], note: `footer logo fix threw: ${e?.message}`, variant }),
+          )
+        : { changed: false, files: [] as string[], note: "no repo cloned", variant }
+
+      const variantLabel = variant === "white" ? "white (dark background)" : "colour (light background)"
+      if (res.changed) {
+        let landed = false
+        let diff = ""
+        try {
+          const { stdout } = await git(["diff", "--unified=3", "--", ...res.files])
+          diff = stdout.slice(0, MAX_DIFF_CHARS)
+        } catch {}
+        try {
+          await git(["add", "-A"])
+          await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
+          committed++
+          landed = true
+        } catch (e: any) {
+          logger.warn({ runId, error: e.message }, "AI Fix: footer logo commit failed.")
+        }
+        analysis.push({
+          findingId: f.id ? String(f.id) : null,
+          check_factor: f.check_factor,
+          title: f.title || f.check_factor,
+          pageUrl,
+          category: landed ? "fully_ai" : "manual",
+          fix: `Added the "Developed & maintained by Growth99" footer credit using the ${variantLabel} logo, sized to the adjacent text.`,
+          applied: landed,
+          proposed: false,
+          lapse: false,
+          filesOffered: res.files,
+          filesChanged: landed ? res.files : [],
+          editNotes: [res.note],
+          edits: [],
+          diff,
+        })
+        continue
+      }
+
+      // No repo access → document the determined correction (not applied).
+      if (noRepoAccess) {
+        analysis.push({
+          findingId: f.id ? String(f.id) : null,
+          check_factor: f.check_factor,
+          title: f.title || f.check_factor,
+          pageUrl,
+          category: "fully_ai",
+          fix: `Add the "Developed & maintained by Growth99" footer credit using the ${variantLabel} logo (white SVG on dark footers, colour WebP on light), sized to the adjacent text.`,
+          applied: false,
+          proposed: true,
+          lapse: false,
+          filesOffered: [],
+          filesChanged: [],
+        })
+        continue
+      }
+      // Repo present but no footer template to edit → honest manual report.
+      analysis.push({
+        findingId: f.id ? String(f.id) : null,
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+        category: "manual",
+        fix: `Add the "Developed & maintained by Growth99" footer credit (${variantLabel} logo) manually — ${res.note}.`,
+        applied: false,
+        proposed: false,
+        lapse: false,
+        filesOffered: [],
+        filesChanged: [],
+      })
+      continue
+    }
+
+    // --- Contact Form not found → pull the client's G99+ embed from Basecamp
+    // The correct contact-form embed (bid/fid differ per client) lives on the
+    // client's Basecamp Message Board ("G99+ Contact Form Code"). Resolve the
+    // Basecamp project by the TED project name, read that message, and hand the
+    // developer the exact snippet to place on the contact spaces of every page.
+    // Reported as MANUAL (developer placement across per-client "desired spaces"
+    // on all pages) — carrying the real code, never a bare suggestion.
+    if (f.check_factor === "contact_form" && /not found/i.test(f.title || "")) {
+      const cf = await getContactFormCodeFromBasecamp(run?.project_id, project?.name).catch(
+        () => null,
+      )
+      const base = {
+        findingId: f.id ? String(f.id) : null,
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+        category: "manual",
+        applied: false,
+        proposed: false,
+        lapse: false,
+        filesOffered: [] as string[],
+        filesChanged: [] as string[],
+      }
+      if (cf?.found) {
+        analysis.push({
+          ...base,
+          fix: `No contact form was found. Add the Growth99 contact form to the desired contact spaces on ALL pages using this client's embed code (from Basecamp "G99+ Contact Form Code" — bid=${cf.bid || "?"}, fid=${cf.fid || "?"}):\n${cf.snippet}`,
+        })
+      } else {
+        analysis.push({
+          ...base,
+          fix: `No contact form was found, and the "G99+ Contact Form Code" message could not be read from this project's Basecamp Message Board. Get the client's contact-form embed (app.growth99.com/assets/static/form.html?bid=…&fid=…) from Basecamp and add it to the contact sections on all pages.`,
+        })
+      }
+      continue
+    }
+
+    // --- Single Script not installed → inject the Cliff Hanger embed -------
+    // The site-wide loader (the "G99+ Cliff Hanger Code" on the client's Basecamp
+    // Message Board — a business-id div + integration.js, data-id differs per
+    // client) is a ONE-TIME site-wide snippet. We read it from Basecamp and
+    // inject it into the FOOTER template so it loads on every page. Committed +
+    // pushed like the other deterministic fixers.
+    if (f.check_factor === "single_script" && /not installed/i.test(f.title || "")) {
+      const ss = await getSingleScriptCodeFromBasecamp(run?.project_id, project?.name).catch(
+        () => null,
+      )
+      const baseRec = {
+        findingId: f.id ? String(f.id) : null,
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+      }
+      if (ss?.found) {
+        const res = workDir
+          ? await injectSingleScriptIntoFooter(workDir, repoThemeType, {
+              businessId: ss.businessId,
+              scriptSrc: ss.scriptSrc,
+            }).catch((e: any) => ({ changed: false, files: [] as string[], note: `inject threw: ${e?.message}` }))
+          : { changed: false, files: [] as string[], note: "no repo cloned" }
+
+        if (res.changed) {
+          let landed = false
+          let diff = ""
+          try {
+            const { stdout } = await git(["diff", "--unified=3", "--", ...res.files])
+            diff = stdout.slice(0, MAX_DIFF_CHARS)
+          } catch {}
+          try {
+            await git(["add", "-A"])
+            await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
+            committed++
+            landed = true
+          } catch (e: any) {
+            logger.warn({ runId, error: e.message }, "AI Fix: single-script inject commit failed.")
+          }
+          analysis.push({
+            ...baseRec,
+            category: landed ? "fully_ai" : "manual",
+            fix: `Injected the Growth99 single-script embed (Cliff Hanger, data-id=${ss.businessId || "?"}) into the footer template so it loads site-wide on every page.`,
+            applied: landed,
+            proposed: false,
+            lapse: false,
+            filesOffered: res.files,
+            filesChanged: landed ? res.files : [],
+            editNotes: [res.note],
+            edits: [],
+            diff,
+          })
+          continue
+        }
+
+        // No repo access → document the determined correction (not applied).
+        if (noRepoAccess) {
+          analysis.push({
+            ...baseRec,
+            category: "fully_ai",
+            fix: `Inject the Growth99 single-script embed (Cliff Hanger, data-id=${ss.businessId || "?"}) into the footer so it loads site-wide:\n${ss.snippet}`,
+            applied: false,
+            proposed: true,
+            lapse: false,
+            filesOffered: [],
+            filesChanged: [],
+          })
+          continue
+        }
+        // Repo present but no footer template to edit → honest manual report.
+        analysis.push({
+          ...baseRec,
+          category: "manual",
+          fix: `Add the Growth99 single-script embed (Cliff Hanger, data-id=${ss.businessId || "?"}) to the footer so it loads site-wide — ${res.note}:\n${ss.snippet}`,
+          applied: false,
+          proposed: false,
+          lapse: false,
+          filesOffered: [],
+          filesChanged: [],
+        })
+        continue
+      }
+      // Couldn't read the Cliff Hanger code from Basecamp → honest manual report.
+      analysis.push({
+        ...baseRec,
+        category: "manual",
+        fix: `The single-script embed is missing, and the "G99+ Cliff Hanger Code" message could not be read from this project's Basecamp Message Board. Get the Cliff Hanger code (business-id div + chatbot.growth99.com/assets/js/integration.js) from Basecamp and add it to the footer so it loads site-wide.`,
         applied: false,
         proposed: false,
         lapse: false,
@@ -864,8 +1125,11 @@ export async function processAiFixRunJob(job: Job) {
           pageUrl,
           category: landed ? "fully_ai" : "manual",
           fix: sp.description,
-          applied: landed && willPush,
-          proposed: landed && !willPush,
+          // Applied = the edit landed and was committed locally (past tense).
+          // Whether it was pushed is a separate fact stated in the push
+          // disclaimer; a committed-but-unpushed fix is still an applied fix.
+          applied: landed,
+          proposed: false,
           lapse: false,
           filesOffered: sp.filesChanged,
           filesChanged: landed ? sp.filesChanged : [],
@@ -1012,8 +1276,8 @@ export async function processAiFixRunJob(job: Job) {
           diff = stdout.slice(0, MAX_DIFF_CHARS)
         } catch {}
         try {
-          // Commit locally even on a dry run: it isolates the next finding's
-          // diff. Only `willPush` decides whether the branch ever leaves the box.
+          // Commit each finding on its own so its diff stays isolated; the whole
+          // branch is pushed once at the end to raise a single PR.
           await git(["add", "-A"])
           await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
           committed++
@@ -1024,8 +1288,11 @@ export async function processAiFixRunJob(job: Job) {
       }
     }
 
-    let applied = landed && willPush
-    let proposed = landed && !willPush
+    // Applied = the edit landed and was committed locally (past tense),
+    // independent of push. The no-repo branch below sets `proposed` for
+    // corrections we determined but could not commit (no repository this run).
+    let applied = landed
+    let proposed = false
     // The edits shown in the report — the ones that actually landed in a repo,
     // or (no repo) the ones we KNOW the correction for from the finding itself.
     let reportEdits: Edit[] = landedEdits
@@ -1105,6 +1372,10 @@ export async function processAiFixRunJob(job: Job) {
   // --- Push the branch + open ONE pull request (real beta/post-release repo only) ---
   let prUrl = ""
   let pushed = false
+  // Captured verbatim so the report can state the EXACT push/PR failure instead
+  // of a generic "not pushed".
+  let pushError = ""
+  let prError = ""
   if (willPush && workDir && committed > 0 && ownerRepo) {
     try {
       await git(["push", "origin", branch])
@@ -1125,23 +1396,35 @@ export async function processAiFixRunJob(job: Job) {
       })
       const j: any = await r.json().catch(() => ({}))
       if (r.ok && j.html_url) prUrl = j.html_url
-      else logger.error({ runId, status: r.status, msg: j.message }, "AI Fix: PR creation failed.")
+      else {
+        prError = String(j.message || `GitHub API HTTP ${r.status}`)
+        logger.error({ runId, status: r.status, msg: j.message }, "AI Fix: PR creation failed.")
+      }
     } catch (e: any) {
+      pushError = String(e?.message || e)
       logger.error({ runId, error: e.message }, "AI Fix: push/PR failed.")
     }
   }
 
-  // If the branch never left the box, nothing was applied. Downgrade those
-  // records to proposals so neither the saved analysis nor the TED comment
-  // claims a correction that no repository ever received.
-  if (!pushed) {
-    for (const a of analysis) {
-      if (a.applied) {
-        a.applied = false
-        a.proposed = true
-      }
-    }
-  }
+  // Applied = the fix was committed locally. We do NOT downgrade committed fixes
+  // to "proposed" when a push doesn't happen — they were still applied. Every run
+  // is meant to push; the only reasons it wouldn't are genuine repo-access gaps
+  // or a real push/PR error, stated EXACTLY (never a vague "not pushed"). There
+  // is no dry-run. Priority: repo-access reasons first (they also explain a
+  // zero-commit run), then a real push/PR error.
+  const notPushedReason = noRepo
+    ? "no repository is linked to this client — the beta_site.env task carries no repo URL"
+    : cloneFailed
+      ? "the repository could not be cloned — the GitHub token is invalid/revoked or the repo is private/inaccessible"
+      : !token
+        ? "no GitHub token is configured for this client, so the branch cannot be authenticated to push"
+        : committed === 0
+          ? "no fix edits landed in the repository, so there was nothing to push"
+          : pushError
+            ? `the git push failed: ${pushError}`
+            : prError
+              ? `the branch pushed but the pull request could not be opened: ${prError}`
+              : "the push did not complete"
 
   // --- Output 2: save the full analysis to QACC (Dry-run Data tab) ---
   try {
@@ -1153,7 +1436,8 @@ export async function processAiFixRunJob(job: Job) {
       commit_url: prUrl || null,
       data: {
         repoUrl: repoUrl,
-        dryRun,
+        pushed,
+        prUrl: prUrl || null,
         repoCloned: !!workDir,
         repoIndexedFiles: repoIndex.length,
         contextFilesPerFinding: MAX_CONTEXT_FILES,
@@ -1169,13 +1453,16 @@ export async function processAiFixRunJob(job: Job) {
   const proposedList = analysis.filter((a) => a.proposed)
   const fixesDone = analysis.filter((a) => (a.applied || a.proposed) && !a.lapse)
   let statusLine: string
-  if (noRepoAccess)
-    statusLine = `No repository access for this client (no clonable beta_site.env repo), so the corrections below were determined from the findings but <strong>changes were not applied — we do not have repo access</strong>. Nothing was pushed. Wire up the beta_site.env repository to apply them and raise a PR.`
-  else if (prUrl) statusLine = `Pushed to branch <code>${branch}</code> · Pull request <strong>created</strong> — not merged.`
-  else if (pushed) statusLine = `Pushed to branch <code>${branch}</code> · pull request could not be opened automatically.`
-  else if (willPush && committed > 0)
-    statusLine = `${committed} fix${committed > 1 ? "es" : ""} committed locally, but the branch could not be pushed — nothing has reached the repository.`
-  else statusLine = `Corrections verified against the repository — nothing was pushed.`
+  if (prUrl)
+    statusLine = `Applied and pushed to branch <code>${branch}</code> · pull request <strong>created</strong> — not merged.`
+  else if (pushed)
+    statusLine = `Applied and pushed to branch <code>${branch}</code> · pull request could not be opened automatically: ${escHtml(prError || "unknown error")}.`
+  else
+    statusLine = `${
+      committed > 0
+        ? `${committed} fix${committed > 1 ? "es" : ""} applied`
+        : `No fixes applied`
+    } — not pushed because ${escHtml(notPushedReason)}.`
 
   // --- Output 1: the section-wise TED report (issue → fix → pass) ---
   // Join each landed fix back to its finding by id, so the shared renderer can
@@ -1224,12 +1511,12 @@ export async function processAiFixRunJob(job: Job) {
   // Count-free version of the status, so each subtask banner can prepend its OWN
   // per-check fix count. `statusLine` (run-wide) still heads the parent summary.
   let pushClause: string
-  if (noRepoAccess) pushClause = `Changes not applied — no repository access. Nothing was pushed.`
-  else if (prUrl) pushClause = `Pushed to branch <code>${branch}</code>; pull request <strong>created</strong> — not merged.`
-  else if (pushed) pushClause = `Pushed to branch <code>${branch}</code>; pull request could not be opened automatically.`
-  else if (willPush && committed > 0)
-    pushClause = `Committed locally, but the branch could not be pushed — nothing has reached the repository.`
-  else pushClause = `Verified against the repository, nothing pushed.`
+  if (prUrl)
+    pushClause = `Applied · pushed to branch <code>${branch}</code>; pull request opened — not merged.`
+  else if (pushed)
+    pushClause = `Applied · pushed to branch <code>${branch}</code>; pull request could not be opened automatically: ${escHtml(prError || "unknown error")}.`
+  else
+    pushClause = `Applied · not pushed because ${escHtml(notPushedReason)}.`
 
   // Report against ALL of the run's findings (not just the open ones the fix
   // pass triaged) so passing and errored checks are represented too.
@@ -1245,24 +1532,57 @@ export async function processAiFixRunJob(job: Job) {
   const realDefects = (reportFindings || []).filter(
     (f: any) => !isCleanPassFinding(f) && !isToolLapseFinding(f),
   )
+  // Clip to a whole word (never mid-word) so a bullet never ends "...in the p".
+  const clipWords = (s: string, n: number): string => {
+    const t = String(s || "").replace(/\s+/g, " ").trim()
+    if (t.length <= n) return t
+    const cut = t.slice(0, n)
+    const sp = cut.lastIndexOf(" ")
+    return (sp > 40 ? cut.slice(0, sp) : cut).replace(/[,;:.]+$/, "") + "…"
+  }
+  // Applied = the edit actually landed and was committed in the repo;
+  // proposed = the correction was determined but NOT applied (no repo
+  // access). They are counted and worded SEPARATELY — calling a proposed-only
+  // correction "done" (when the fix status says "nothing was pushed") is what
+  // made the old summary read as fake.
+  const appliedList = fixesDone.filter((a) => a.applied)
+  const proposedOnly = fixesDone.filter((a) => a.proposed && !a.applied)
   const fixBullets = fixesDone
     .slice(0, 12)
     .map((a) => {
+      const tag = a.applied ? "Applied" : "Proposed (not applied)"
       const e = a.edits && a.edits[0]
       const before = e?.find ? String(e.find).replace(/\s+/g, " ").trim() : ""
       const after = e?.replace ? String(e.replace).replace(/\s+/g, " ").trim() : ""
-      const what =
+      const issue = clipWords(a.title, 120)
+      // For an applied edit with a small literal change, show the real before →
+      // after; otherwise give the full (word-clipped) description of the fix.
+      const how =
         before && after && before.length <= 60 && after.length <= 60
-          ? `“${escHtml(before)}” → “${escHtml(after)}”`
-          : escHtml(String(a.fix || a.title || "").slice(0, 140))
-      return `<li>${escHtml(a.check_factor)}: ${what}</li>`
+          ? `changed “${escHtml(before)}” → “${escHtml(after)}”`
+          : escHtml(clipWords(a.fix || a.title, 240))
+      return (
+        `<li><strong>${escHtml(a.check_factor)}</strong> — ${tag}.` +
+        (issue ? ` Issue: ${escHtml(issue)}.` : "") +
+        (how ? ` Fix: ${how}` : "") +
+        `</li>`
+      )
     })
     .join("")
   const moreFixes =
     fixesDone.length > 12 ? `<li>…and ${fixesDone.length - 12} more</li>` : ""
+  // Honest verb: only edits that actually landed are "applied"; everything else
+  // is "proposed (not applied)". Never label a proposed-only run as "done".
+  const doneClause =
+    appliedList.length && proposedOnly.length
+      ? `${appliedList.length} applied, ${proposedOnly.length} proposed (not applied)`
+      : appliedList.length
+        ? `${appliedList.length} applied`
+        : proposedOnly.length
+          ? `${proposedOnly.length} proposed (not applied)`
+          : `no fixes applied`
   const summaryBlock =
-    `<p>📋 <strong>Summary:</strong> ${realDefects.length} issue${realDefects.length !== 1 ? "s" : ""} detected · ` +
-    `${fixesDone.length} fix${fixesDone.length !== 1 ? "es" : ""} done.</p>` +
+    `<p>📋 <strong>Summary:</strong> ${realDefects.length} issue${realDefects.length !== 1 ? "s" : ""} detected · ${doneClause}.</p>` +
     (fixesDone.length ? `<ul>${fixBullets}${moreFixes}</ul>` : "")
   // Prepend the summary so it heads the parent comment.
   summaryHeaderHtml = summaryBlock + summaryHeaderHtml
@@ -1288,7 +1608,7 @@ export async function processAiFixRunJob(job: Job) {
       reportTally,
       committed,
       prUrl,
-      dryRun,
+      pushed,
       applied: analysis.filter((a) => a.applied).length,
       proposed: proposedList.length,
       repoIndexedFiles: repoIndex.length,
@@ -1298,7 +1618,7 @@ export async function processAiFixRunJob(job: Job) {
 
   if (workDir) await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {})
 
-  // The fix pass is done (pushed, or AI-verified dry run) — close out every TED
+  // The fix pass is done — close out every TED
   // task and subtask for this run as Completed so nothing is left pending and the
   // release flow can advance. Best-effort; never throws.
   await markAllTedTasksCompleted(runId, tedTaskId)
