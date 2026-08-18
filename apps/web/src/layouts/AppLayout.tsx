@@ -82,28 +82,19 @@ export const AppLayout = () => {
 
   const isDeveloper = role === "developer"
 
+  // Temporarily hidden from the sidebar for all roles/views (routes still exist,
+  // just no nav entry): All tasks, Monitor, Stats, Team, Queue History, Feedback.
+  // The /tasks item stays only in its "My Tasks" form (qa_engineer/developer);
+  // its "Monitor" variant (other roles) is what's being hidden.
   const navItems = [
     { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { to: "/projects", label: "Projects", icon: FolderKanban },
-    ...(isAdmin
-      ? [{ to: "/all-tasks", label: "All tasks", icon: ListChecks }]
-      : []),
-    {
-      to: "/tasks",
-      label:
-        role === "qa_engineer" || role === "developer" ? "My Tasks" : "Monitor",
-      icon: Monitor,
-    },
-
-    { to: "/stats", label: "Stats", icon: BarChart2 },
-    ...(!isDeveloper ? [{ to: "/team", label: "Team", icon: Users }] : []),
-    ...(!isDeveloper
-      ? [{ to: "/admin/queue-history", label: "Queue History", icon: History }]
+    ...(role === "qa_engineer" || role === "developer"
+      ? [{ to: "/tasks", label: "My Tasks", icon: Monitor }]
       : []),
     ...(!isDeveloper
       ? [{ to: "/admin/activity-logs", label: "Activity Logs", icon: History }]
       : []),
-    { to: "/feedback", label: "Feedback", icon: MessageSquare },
     ...[{ to: "/settings", label: "Settings", icon: SettingsIcon }],
   ]
 
