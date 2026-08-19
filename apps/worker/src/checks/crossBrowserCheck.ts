@@ -365,7 +365,7 @@ export async function runCrossBrowserCheck(runId: string): Promise<void> {
           {
             check_factor: CHECK_FACTOR,
             title: "Cross-browser check could not complete",
-            description: `QACC could not run the cross-browser visual check this run due to an unexpected error: ${err?.message}. This check could not complete.`,
+            description: `The cross-browser visual check could not run this run due to an unexpected error: ${err?.message}. This check could not complete.`,
           },
         ])
       }

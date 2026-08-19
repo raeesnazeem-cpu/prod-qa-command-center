@@ -376,6 +376,18 @@ export async function postTedStatus(
     )
     if (r.ok && (r.headers.get("content-type") || "").includes("application/json")) {
       logger.info({ tedTaskId, status }, "Set TED task status.")
+      // Keep a local QACC ledger row of the close — same shape/event_key as the
+      // preview branch above (mirrors the report's "raw copy regardless of
+      // preview" design). This is the ONLY local proof that a real-mode close
+      // actually landed, so the completion CONFIRM in the video barrier works in
+      // real mode too. Idempotent via onConflict:event_key. Best-effort: the TED
+      // write already succeeded, so a ledger hiccup must not flip the result.
+      await recordLocalTedComment(
+        String(tedTaskId),
+        `<p>🔖 <strong>Status → ${esc(status)}</strong></p>`,
+        `status:${tedTaskId}:${status}:${runId || ""}`,
+        { runId, source: "status" },
+      ).catch(() => {})
       return true
     }
     const preview = (await r.text().catch(() => "")).slice(0, 200)
@@ -440,13 +452,11 @@ export async function markAllTedTasksCompleted(
       .single()
 
     const parent = parentTaskId || (run?.ted_task_id as string | undefined)
-    if (parent) await postTedStatus(parent, TED_STATUS_COMPLETED, runId)
 
     // Checklist SUBTASKS are closed by postSectionedReport — each one the moment
     // its OWN comment lands: pass/fail via the section loop, hung/errored via the
     // no-result loop. Those two loops together cover every mapped subtask, so a
-    // subtask is always closed WITH its result and never before it. This funnel
-    // only closes the PARENT and hands off the video barrier.
+    // subtask is always closed WITH its result and never before it.
     const map: Record<string, string | string[]> = (run?.ted_subtask_map as any) || {}
     // The video-recording subtask is owned by the video_recording_check barrier
     // (it runs AFTER every other check passed, then sets its own status).
@@ -458,25 +468,44 @@ export async function markAllTedTasksCompleted(
           : []
       ).map((v) => String(v)),
     )
-    logger.info({ runId, parent }, "Marked TED parent Completed; subtasks closed per-check by the report.")
-
-    // Hand off to the video-recording barrier: it evaluates whether every other
-    // check passed and then either records or reports why it couldn't. Enqueued
-    // from this single, idempotent (ted_completed_at-claimed) funnel so it fires
-    // exactly once per run. Only when the run actually carries a video subtask.
+    // PARENT CLOSE — order matters. The parent must be marked Completed ONLY
+    // after every subtask is complete. The video subtask is special: it stays
+    // open in the background while its recording runs / URLs arrive later, so it
+    // is NOT closed by the report loops above.
+    //
+    //   • Video subtask present → DEFER the parent close. The video barrier
+    //     closes the parent LAST, only after it has scanned every other subtask
+    //     to completion and settled the video subtask's own terminal state.
+    //     (This is the fix for "parent Completed while a subtask is still To-Do".)
+    //   • No video subtask → all subtasks are already closed by the report, so
+    //     the parent can close right here.
     if (videoSubtaskIds.size > 0) {
+      logger.info(
+        { runId, parent },
+        "Video subtask present — deferring parent close to the video barrier.",
+      )
       await qaQueue
         .add(
           "video_recording_check",
           { runId, tedTaskId: parent },
-          { removeOnComplete: true, attempts: 2 },
+          { removeOnComplete: true, attempts: 5 },
         )
-        .catch((e) =>
+        .catch((e) => {
+          // Can't even enqueue the barrier — don't strand the parent open. Every
+          // non-video subtask is already closed by the report, so close the
+          // parent directly as a fallback.
           logger.error(
             { runId, error: e?.message },
-            "Failed to enqueue video_recording_check.",
-          ),
-        )
+            "Failed to enqueue video_recording_check — closing parent directly as a fallback.",
+          )
+          if (parent) return postTedStatus(parent, TED_STATUS_COMPLETED, runId)
+        })
+    } else {
+      if (parent) await postTedStatus(parent, TED_STATUS_COMPLETED, runId)
+      logger.info(
+        { runId, parent },
+        "No video subtask — parent Completed after per-check report.",
+      )
     }
   } catch (e: any) {
     logger.error(
@@ -1062,9 +1091,6 @@ export type FixReportInfo = {
   filesChanged?: string[]
 }
 
-// Never truncate a failing check's issue list below this — the whole point is
-// to list every real defect (e.g. all 29 misspelled words), not a sample.
-const ISSUE_MAX = 100
 
 const clipText = (s: string, n: number): string =>
   s.length > n ? s.slice(0, n).trimEnd() + "…" : s
@@ -1449,12 +1475,10 @@ async function renderCheckSectionHtml(
   if (real.length > 0) {
     let html = `<p>❌ <strong>${esc(label)}</strong> — ${real.length} issue${real.length > 1 ? "s" : ""} found.</p><ul>`
     const compact = real.length > 8
-    for (const f of real.slice(0, ISSUE_MAX)) {
+    for (const f of real) {
       const fx = f.id ? fixMap.get(String(f.id)) : undefined
       html += `<li>${renderIssueDetail(f, compact, pageUrlById)}${renderFixLine(fx, !!f.ai_generated)}</li>`
     }
-    if (real.length > ISSUE_MAX)
-      html += `<li>…and ${real.length - ISSUE_MAX} more</li>`
     html += `</ul>`
     // TEMP: screenshots hidden from ALL TED reports for now — re-enable later.
     // const shots = collectShots(real)
@@ -1777,7 +1801,7 @@ export async function postSectionedReport(opts: {
         : ""
       const body = `<p>❌ <strong>${esc(label)} — Failed (could not complete)</strong>${
         reason ? `: ${esc(reason)}` : " — the check hung or errored and produced no automated pass/fail result"
-      }. Marked complete so the checklist isn't left hanging; review manually if needed.</p>`
+      }.</p>`
       for (const target of targets) {
         await postTedComment(
           target,

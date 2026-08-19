@@ -2841,7 +2841,7 @@ webhookRouter.post(
               siteUrlSource = "client notes / client details (fallback)"
               urlWarning =
                 `⚠️ Fallback URL in use: no released domain was found on the "Complete website security and release" task ` +
-                `(neither in its automation payload nor its comments), so QACC is scanning the client notes/details URL (${liveSiteUrl}) instead.`
+                `(neither in its automation payload nor its comments), so the client notes/details URL (${liveSiteUrl}) is being scanned instead.`
             }
             if (!runSiteUrl) {
               scanAborted = true
