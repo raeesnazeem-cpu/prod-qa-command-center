@@ -227,7 +227,7 @@ export async function checkHamburgerMenu(
         "No hamburger menu found at mobile width",
         loadOk
           ? `No mobile menu toggle was found at ${MOBILE.width}px for a ${themeType || "WordPress"} theme (looked for a #burger button, block Navigation, classic .menu-toggle variants, and Elementor). No automated fix is available for this — ask the developer to add a hamburger menu for screens under 1024px wide, per the project requirement.`
-          : `The homepage did not finish loading, so the mobile menu could not be checked. QACC will retry on the next run.`,
+          : `The homepage did not finish loading, so the mobile menu could not be checked. This will be retried on the next run.`,
         s,
       )
       return findings
