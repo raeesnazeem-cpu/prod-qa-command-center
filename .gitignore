@@ -280,7 +280,12 @@ apps/worker/_*.ts
 apps/worker/aiFixLinkTest.ts
 apps/worker/uploadFixPreview.ts
 
-# Local development session files
+# Claude Code
 .claude/
+
+# QA and Spreadsheet files
 QA_Checks_Pre_Post_Internal.xlsx
+*.xlsx
+
+# Skills lockfile
 skills-lock.json
