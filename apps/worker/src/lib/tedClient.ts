@@ -210,11 +210,15 @@ async function repoFromTedTimeline(
 
   // Payload first, then the task's comments (the URL/repo is sometimes typed as
   // a comment rather than baked into the payload).
+  // Stop the capture at whitespace, quotes, or angle brackets so a repo typed as
+  // an HTML anchor (<a href="https://…">https://…</a>) in a comment/payload yields
+  // just the URL — not the surrounding markup, which would otherwise leak into the
+  // report as half-eaten HTML.
   const matchRepo = (text: string) => {
-    const m = text.match(/betaSiteRepo=(\S+)/i)
+    const m = text.match(/betaSiteRepo=([^\s"'<>]+)/i)
     if (m) return m[1].replace(/[),.;]+$/, "")
     // Also accept a bare GitHub URL written in a comment ("repo: https://…").
-    const g = text.match(/https?:\/\/(?:www\.)?github\.com\/\S+/i)
+    const g = text.match(/https?:\/\/(?:www\.)?github\.com\/[^\s"'<>]+/i)
     return g ? g[0].replace(/[),.;]+$/, "") : null
   }
 
