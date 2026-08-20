@@ -33,6 +33,9 @@ type LocalTedCtx = {
   targetKind?: "parent" | "subtask"
   checkFactor?: string | null
   source?: "report" | "manual" | "status" | "report_raw"
+  // When true, the outgoing TED comment POST body carries aiAssigned:true — set
+  // only for the final parent-task completion summary (mirrors the status flag).
+  aiAssigned?: boolean
   // For the client-facing sanitized copy of a report: the client's real domain
   // (e.g. nuvoclinic.com) and the run type, so the local fallback URL can be
   // shown as <label>.gogroth.com (pre) / the live domain (post).
@@ -259,7 +262,11 @@ export async function postTedComment(
             Accept: "application/json",
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ text: clientText, eventKey }),
+          body: JSON.stringify({
+            text: clientText,
+            eventKey,
+            ...(ctx.aiAssigned === true ? { aiAssigned: true } : {}),
+          }),
         },
       )
       if (isJsonOk(r)) {
@@ -299,7 +306,10 @@ export async function postTedComment(
           Accept: "application/json",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ text: clientText }),
+        body: JSON.stringify({
+          text: clientText,
+          ...(ctx.aiAssigned === true ? { aiAssigned: true } : {}),
+        }),
       },
     )
     if (isJsonOk(r)) {
@@ -1916,7 +1926,7 @@ export async function postSectionedReport(opts: {
         tedTaskId,
         body.trim(),
         `ext:${opts.eventKeyPrefix}-summary-${runId}`,
-        { runId, projectId: runMeta?.project_id, targetKind: "parent", ...reportCtx },
+        { runId, projectId: runMeta?.project_id, targetKind: "parent", ...reportCtx, aiAssigned: true },
       ).catch(() => {})
     }
   } else {
@@ -1934,7 +1944,7 @@ export async function postSectionedReport(opts: {
       tedTaskId,
       body.trim(),
       `ext:${opts.eventKeyPrefix}-summary-${runId}`,
-      { runId, projectId: runMeta?.project_id, targetKind: "parent", ...reportCtx },
+      { runId, projectId: runMeta?.project_id, targetKind: "parent", ...reportCtx, aiAssigned: true },
     ).catch(() => {})
   }
 
