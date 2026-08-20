@@ -47,6 +47,68 @@ function flattenIds(raw: any): string[] {
   return [...new Set(arr.map((v: any) => String(v)))]
 }
 
+// Which non-video sibling subtasks are NOT yet marked Completed for this run?
+// A close writes a distinct status row (source="status", event_key
+// `status:<id>:Completed:<runId>`) in both preview and real mode, so that row is
+// the authoritative proof of a close. Read-only.
+async function openSiblingSubtasks(
+  runId: string,
+  map: Record<string, any>,
+  videoSet: Set<string>,
+): Promise<string[]> {
+  const otherIds = new Set<string>()
+  for (const [factor, raw] of Object.entries(map)) {
+    if (factor === VIDEO_FACTOR) continue
+    for (const id of flattenIds(raw)) if (!videoSet.has(id)) otherIds.add(id)
+  }
+  if (otherIds.size === 0) return []
+  const ids = [...otherIds]
+  const { data: rows } = await supabase
+    .from("ted_comments")
+    .select("ted_task_id, event_key")
+    .eq("qa_run_id", runId)
+    .eq("source", "status")
+    .in("ted_task_id", ids)
+  const closed = new Set(
+    (rows || [])
+      .filter((r: any) =>
+        String(r.event_key || "").includes(`:${TED_STATUS_COMPLETED}:`),
+      )
+      .map((r: any) => String(r.ted_task_id)),
+  )
+  return ids.filter((id) => !closed.has(id))
+}
+
+// Fetch a parent's subtasks from TED (read-only) and return an id → title map,
+// so blocker check keys can be shown as their human subtask names. Empty on any
+// failure (caller falls back to the raw check keys).
+async function fetchSubtaskTitles(
+  parentTaskId?: string,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const bearer = process.env.TED_API_TOKEN
+  if (!bearer || !parentTaskId) return out
+  try {
+    const r = await fetch(
+      `https://ted.growth99.com/api/tasks/${parentTaskId}/subtasks`,
+      { headers: { Authorization: `Bearer ${bearer}`, Accept: "application/json" } },
+    )
+    if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) {
+      return out
+    }
+    const body = (await r.json().catch(() => null)) as any
+    const arr = Array.isArray(body) ? body : []
+    for (const it of arr) {
+      const id = String(it?.id ?? it?.taskId ?? "")
+      const title = String(it?.title ?? it?.name ?? "")
+      if (id && title) out.set(id, title)
+    }
+  } catch {
+    /* best-effort: caller falls back to check keys */
+  }
+  return out
+}
+
 // =====================================================================
 // BARRIER: video_recording_check
 // ---------------------------------------------------------------------
@@ -118,11 +180,26 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
 
   // ---- PATH 1: something else failed → recording not possible.
   if (!gatePassed) {
-    const blockers = [...new Set(unresolved.map((f) => f.check_factor).filter(Boolean))]
+    const blockerFactors = [...new Set(unresolved.map((f) => f.check_factor).filter(Boolean))]
+    // Show the SUBTASK names (TED checklist titles), not raw check keys. Resolve
+    // each blocking check → its subtask id(s) via the run's map → title via TED.
+    const titleById = await fetchSubtaskTitles(tedTaskId)
+    const blockerNames = [
+      ...new Set(
+        blockerFactors.flatMap(
+          (factor) =>
+            flattenIds(map[factor])
+              .map((id) => titleById.get(id))
+              .filter(Boolean) as string[],
+        ),
+      ),
+    ]
+    // Fall back to the check keys only if no subtask title could be resolved.
+    const blockers = blockerNames.length ? blockerNames : blockerFactors
     const reason = runBroken
       ? " (the QA run did not complete successfully)"
       : blockers.length
-        ? ` (${blockers.length} check${blockers.length > 1 ? "s" : ""} with incomplete fixes: ${blockers
+        ? ` (${blockers.length} subtask${blockers.length > 1 ? "s" : ""} with incomplete fixes: ${blockers
             .slice(0, 8)
             .join(", ")})`
         : ""
@@ -133,6 +210,21 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
     logger.info({ runId, blockers }, "Video recording blocked by incomplete fixes; closing after other subtasks confirmed done.")
     await finalizeRunCloseout({ runId, tedTaskId, map, videoSubtaskIds })
     return
+  }
+
+  // ---- Start gate (part 2): every sibling subtask must ALSO be marked Completed.
+  // Passed AND all siblings closed → start. Passed but a sibling not yet closed is
+  // a timing case (the report normally closes them before this barrier is
+  // enqueued): don't start and don't blame — throw so BullMQ retries (attempts: 5).
+  const openSiblings = await openSiblingSubtasks(runId, map, new Set(videoSubtaskIds))
+  if (openSiblings.length > 0) {
+    logger.warn(
+      { runId, openSiblings },
+      "video_recording_check: siblings passed but not all Completed yet; will retry.",
+    )
+    throw new Error(
+      `video_recording_check: ${openSiblings.length} sibling subtask(s) not yet Completed for ${runId}`,
+    )
   }
 
   // ---- PATH 2: everything passed → start recording.
@@ -147,7 +239,7 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
   const claimed = !!claim && claim.length > 0
 
   const startingBody =
-    "<p>🎬 <strong>Starting video recording</strong> — check back in approximately 30 minutes.</p>"
+    "<p>🎬 <strong>Video Recording — in progress</strong>. Recording result appears in ~30 min.</p>"
   for (const subId of videoSubtaskIds) {
     await postTedComment(subId, startingBody, `ext:video-starting-${runId}-${subId}`, { ...ctxBase }).catch(() => {})
   }
@@ -351,18 +443,20 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
     if (url && (await isRetrievable(url))) available.push({ viewport, url })
   }
 
-  // Post each available viewport to the main thread once (stable key dedupes).
-  if (tedTaskId && available.length) {
-    for (const { viewport, url } of available) {
-      const body = `<p>🎥 <strong>${cap(viewport)} recording</strong> ready: <a href="${escapeHtml(
-        url,
-      )}">${escapeHtml(url)}</a></p>`
-      await postTedComment(tedTaskId, body, `ext:video-url-${runId}-${viewport}`, {
-        runId,
-        projectId,
-        targetKind: "parent",
-        checkFactor: VIDEO_FACTOR,
-      }).catch(() => {})
+  // Post each available viewport to the video subtask once (stable key dedupes).
+  if (videoSubtaskIds.length && available.length) {
+    for (const subId of videoSubtaskIds) {
+      for (const { viewport, url } of available) {
+        const body = `<p>🎥 <strong>${cap(viewport)} recording</strong> ready: <a href="${escapeHtml(
+          url,
+        )}">${escapeHtml(url)}</a></p>`
+        await postTedComment(subId, body, `ext:video-url-${runId}-${viewport}-${subId}`, {
+          runId,
+          projectId,
+          targetKind: "subtask",
+          checkFactor: VIDEO_FACTOR,
+        }).catch(() => {})
+      }
     }
   }
 

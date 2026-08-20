@@ -1809,6 +1809,10 @@ export async function postSectionedReport(opts: {
         leftovers.push(sec)
         continue
       }
+      // The video subtask is owned entirely by the video_recording barrier
+      // (waiting → in-progress/blocked → URLs); the report must not post a
+      // premature pass/fail comment to it. Skip here.
+      if (sec.factor === "video_recording") continue
       // Count the fixes that belong to THIS check only. The banner rides atop the
       // subtask comment solely when this check actually had ≥1 applied/proposed
       // fix; the section body below already itemizes each before → after.
