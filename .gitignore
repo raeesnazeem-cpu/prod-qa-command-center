@@ -279,3 +279,8 @@ supabase-blueprint/.git-worktree-pointer.bak
 apps/worker/_*.ts
 apps/worker/aiFixLinkTest.ts
 apps/worker/uploadFixPreview.ts
+
+# Local development session files
+.claude/
+QA_Checks_Pre_Post_Internal.xlsx
+skills-lock.json
