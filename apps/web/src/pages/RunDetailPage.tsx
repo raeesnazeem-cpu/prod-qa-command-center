@@ -509,7 +509,13 @@ export const RunDetailPage = () => {
     }
   }, [findings, currentFindingId, setSearchParams])
 
+  // TEMPORARY: retry is disabled for now (will be re-instated later). Gates both
+  // the trigger (handler no-ops) and the UI (buttons are rendered unclickable).
+  // Flip this back to false to restore retry.
+  const RETRY_DISABLED = true
+
   const handleRetryCheck = async (checkKey: string) => {
+    if (RETRY_DISABLED) return
     if (checkKey === "verify_plugin_updates") {
       setRetryCheckKey(checkKey)
       setRetryPasswordModalOpen(true)
@@ -1977,7 +1983,8 @@ export const RunDetailPage = () => {
                                         e.stopPropagation()
                                         handleRetryCheck(checkKey)
                                       }}
-                                      className="absolute -top-3 -right-3 p-1.5 bg-slate-50 dark:bg-[#1D2A31] border border-slate-300 dark:border-slate-600 rounded-full text-slate-500 hover:text-accent hover:border-accent transition-colors shadow-sm z-10"
+                                      disabled={RETRY_DISABLED}
+                                      className={`absolute -top-3 -right-3 p-1.5 bg-slate-50 dark:bg-[#1D2A31] border border-slate-300 dark:border-slate-600 rounded-full text-slate-500 hover:text-accent hover:border-accent transition-colors shadow-sm z-10${RETRY_DISABLED ? " opacity-40 pointer-events-none cursor-not-allowed" : ""}`}
                                       title={`Retry ${checkName}`}
                                     >
                                       <RefreshCw

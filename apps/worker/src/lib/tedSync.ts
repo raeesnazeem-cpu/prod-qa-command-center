@@ -405,6 +405,74 @@ export async function postTedStatus(
   }
 }
 
+// Three release.qa_post subtasks have no safe automated check and are owned by a
+// human ("Send email to client", "Verify backup size", "Two-Way Text Setup"), so
+// QACC never maps or closes them and they linger "Not Started" when the parent
+// closes. For now we close each with a fixed, honest failure reason + a
+// "no fix needed" note so the parent can advance. Matched ID-free on the subtask
+// title (normalized: lowercased, non-alphanumerics stripped).
+const POST_RELEASE_MANUAL_CLOSEOUTS: { matchers: string[]; reason: string }[] = [
+  {
+    matchers: ["sendemailtoclient", "emailtoclient"],
+    reason: "No release domain found in live site release subtask",
+  },
+  {
+    matchers: ["verifybackupsize", "backupsize"],
+    reason: "No backup data available. Please add it in notes",
+  },
+  {
+    matchers: ["twowaytextsetup", "twowaytext"],
+    reason: "Need manual confirmation",
+  },
+]
+
+// Fetch a parent's subtasks from TED (read-only), match the human-owned ones
+// above, and close each Completed with its hardcoded reason + "no fix needed".
+// Real-TED only: needs TED_API_TOKEN and a live parent, so it no-ops in local
+// preview (those subtasks only exist in real TED). Best-effort throughout.
+async function closeManualPostReleaseSubtasks(
+  parentTaskId: string,
+  runId: string,
+): Promise<void> {
+  const bearer = process.env.TED_API_TOKEN
+  if (!bearer) return
+  let subtasks: { id: string; title: string }[] = []
+  try {
+    const r = await fetch(
+      `https://ted.growth99.com/api/tasks/${parentTaskId}/subtasks`,
+      { headers: { Authorization: `Bearer ${bearer}`, Accept: "application/json" } },
+    )
+    if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) {
+      return
+    }
+    const body = (await r.json().catch(() => null)) as any
+    const arr = Array.isArray(body) ? body : []
+    subtasks = arr
+      .map((it: any) => ({
+        id: String(it?.id ?? it?.taskId ?? ""),
+        title: String(it?.title ?? it?.name ?? ""),
+      }))
+      .filter((s: { id: string; title: string }) => s.id && s.title)
+  } catch (e: any) {
+    logger.warn({ runId, parentTaskId, error: e?.message }, "Manual post-release closeout: subtask fetch failed; skipping.")
+    return
+  }
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "")
+  for (const st of subtasks) {
+    const n = norm(st.title)
+    const hit = POST_RELEASE_MANUAL_CLOSEOUTS.find((c) => c.matchers.some((m) => n.includes(m)))
+    if (!hit) continue
+    const body = `<p>${esc(hit.reason)}. - no fix needed</p>`
+    await postTedComment(st.id, body, `ext:qacc-postrelease-manual-closeout-${runId}-${st.id}`, {
+      runId,
+      targetKind: "subtask",
+      source: "status",
+    }).catch(() => {})
+    await postTedStatus(st.id, TED_STATUS_COMPLETED, runId).catch(() => {})
+    logger.info({ runId, subtaskId: st.id, title: st.title }, "Manual post-release subtask closed (hardcoded no-fix-needed).")
+  }
+}
+
 // Close out a finished run in TED: mark the parent scan task Completed, and —
 // for internal-QA runs only — mark every mapped subtask Completed too. Called at
 // the very end of the run (after the AI-fix pass), so failing checks have already
@@ -452,6 +520,15 @@ export async function markAllTedTasksCompleted(
       .single()
 
     const parent = parentTaskId || (run?.ted_task_id as string | undefined)
+
+    // Post-release only: close the human-owned checklist subtasks (email/backup/
+    // two-way text) that map to no automated check, so none linger "Not Started"
+    // when the parent closes. Runs BEFORE both parent-close paths (direct + the
+    // deferred video barrier), so it's always "after all other tasks, before the
+    // parent". Best-effort — never blocks the parent close.
+    if (parent && run?.run_type === "post_release") {
+      await closeManualPostReleaseSubtasks(String(parent), runId).catch(() => {})
+    }
 
     // Checklist SUBTASKS are closed by postSectionedReport — each one the moment
     // its OWN comment lands: pass/fail via the section loop, hung/errored via the
@@ -1732,6 +1809,10 @@ export async function postSectionedReport(opts: {
         leftovers.push(sec)
         continue
       }
+      // The video subtask is owned entirely by the video_recording barrier
+      // (waiting → in-progress/blocked → URLs); the report must not post a
+      // premature pass/fail comment to it. Skip here.
+      if (sec.factor === "video_recording") continue
       // Count the fixes that belong to THIS check only. The banner rides atop the
       // subtask comment solely when this check actually had ≥1 applied/proposed
       // fix; the section body below already itemizes each before → after.
