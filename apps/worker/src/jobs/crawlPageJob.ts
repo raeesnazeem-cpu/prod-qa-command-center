@@ -7,6 +7,8 @@ import { qaQueue } from "../lib/queue"
 import {
   postFinalReportToTED,
   postScanCompleteComment,
+  postDetectionSummary,
+  precomputeFindingMedia,
   markAllTedTasksCompleted,
 } from "../lib/tedSync"
 import { runCrossBrowserCheck } from "../checks/crossBrowserCheck"
@@ -1182,6 +1184,13 @@ export async function processCrawlPageJob(job: Job) {
             logger.error("Cross-browser check failed:", e),
           )
 
+          // Prepare inlined screenshots now (scan time), so the report — whether
+          // posted immediately here or later by the AI-fix pass — is just string
+          // assembly, not network I/O on the critical path. Best-effort.
+          await precomputeFindingMedia(runId).catch((e) =>
+            logger.error("Screenshot precompute failed:", e),
+          )
+
           // Post the final QA report back to TED (idempotent — see tedSync).
           if (runCheck.ted_task_id) {
             const report = await postFinalReportToTED(
@@ -1203,6 +1212,13 @@ export async function processCrawlPageJob(job: Job) {
         // before the TED report so its findings are included in the summary.
         await runCrossBrowserCheck(runId).catch((e) =>
           logger.error("Cross-browser check failed:", e),
+        )
+
+        // Prepare inlined screenshots now (scan time), so the report — whether
+        // posted immediately here or later by the AI-fix pass — is just string
+        // assembly, not network I/O on the critical path. Best-effort.
+        await precomputeFindingMedia(runId).catch((e) =>
+          logger.error("Screenshot precompute failed:", e),
         )
 
         // Post the final QA report back to TED (idempotent — see tedSync).
@@ -1277,6 +1293,11 @@ async function maybeTriggerAiFix(
     // section-wise report (issue → fix → pass) and then calls
     // markAllTedTasksCompleted itself, so tasks close AFTER the fix.
     await postScanCompleteComment(tedTaskId, runId)
+    // Break the ~5-min silence: post the DETECTION summary ("here's what we
+    // found") to the main thread now, before the fix pass runs. This is a plain
+    // comment — it carries no aiAssigned flag and does NOT complete the task;
+    // the end-of-run fix summary still owns both of those (Task 2, unchanged).
+    await postDetectionSummary(runId, tedTaskId)
     qaQueue
       .add("ai_fix_run", { runId, tedTaskId })
       .catch((e) => logger.error("Failed to queue ai_fix_run:", e))

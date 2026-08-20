@@ -1,6 +1,7 @@
 import { supabase } from "./supabase"
 import { getClientDomain } from "./tedClient"
 import { qaQueue } from "./queue"
+import { releaseRunSlot } from "./runSlot"
 import pino from "pino"
 import sharp from "sharp"
 
@@ -523,6 +524,12 @@ export async function markAllTedTasksCompleted(
       return
     }
 
+    // The run has reached completion (this is the single caller that won the
+    // idempotency claim above), so free the global run slot now — the next
+    // queued run can start while this run's TED closeout finishes. Idempotent
+    // and best-effort; the staleness backstop covers any missed release.
+    await releaseRunSlot(runId)
+
     const { data: run } = await supabase
       .from("qa_runs")
       .select("run_type, ted_subtask_map, ted_task_id")
@@ -616,9 +623,45 @@ const IMG_BUDGET_BYTES = 4 * 1024 * 1024 // ~4MB of base64 across the whole repo
 // in an <a> that points to the full-resolution original — so one click opens the
 // big version. No <br> between images: they flow next to each other horizontally
 // and wrap onto the next line, instead of stacking as tall block images.
+// One precomputed inline image: base64 webp data-URI + its pixel dimensions.
+// Stored on findings.inline_media at scan time (see precomputeFindingMedia).
+type InlineImg = { d: string; w: number; h: number }
+
+// Fetch → downscale → webp → base64 data-URI for ONE screenshot. Returns null on
+// any fetch/encode failure (caller falls back to a plain link). Extracted so the
+// post-time renderer and the scan-time precompute share ONE encoder.
+async function buildThumbDataUri(
+  url: string,
+): Promise<{ dataUri: string; width: number; height: number } | null> {
+  try {
+    const resp = await fetch(url)
+    if (!resp.ok) {
+      logger.warn({ url, status: resp.status }, "Screenshot fetch not OK; using link only.")
+      return null
+    }
+    const srcBuf = Buffer.from(await resp.arrayBuffer())
+    const out = await sharp(srcBuf)
+      .resize({ width: THUMB_WIDTH, withoutEnlargement: true })
+      .webp({ quality: WEBP_QUALITY })
+      .toBuffer({ resolveWithObject: true })
+    return {
+      dataUri: `data:image/webp;base64,${out.data.toString("base64")}`,
+      width: out.info.width,
+      height: out.info.height,
+    }
+  } catch (err: any) {
+    logger.warn({ url, error: err?.message }, "Screenshot inline embed failed; using link only.")
+    return null
+  }
+}
+
 async function renderScreenshotsHtml(
   screenshotUrl: string,
   budget: { remaining: number },
+  // Scan-time precomputed thumbnails, keyed by remote url. When present the post
+  // path skips the fetch/encode entirely (Task 12); missing keys fall back to
+  // encoding on the spot, so behaviour is identical when precompute didn't run.
+  inlineShots?: Record<string, InlineImg> | null,
 ): Promise<string> {
   const urls = screenshotUrl
     .split(",")
@@ -628,32 +671,21 @@ async function renderScreenshotsHtml(
   let html = ""
   for (const url of urls) {
     let embedded = false
-    // Try to inline a downscaled base64 webp thumbnail (what TED renders).
+    // Inline a downscaled base64 webp thumbnail (what TED renders).
     if (budget.remaining > 0) {
-      try {
-        const resp = await fetch(url)
-        if (resp.ok) {
-          const srcBuf = Buffer.from(await resp.arrayBuffer())
-          const out = await sharp(srcBuf)
-            .resize({ width: THUMB_WIDTH, withoutEnlargement: true })
-            .webp({ quality: WEBP_QUALITY })
-            .toBuffer({ resolveWithObject: true })
-          const dataUri = `data:image/webp;base64,${out.data.toString("base64")}`
-          if (dataUri.length <= budget.remaining) {
-            budget.remaining -= dataUri.length
-            // Clickable thumbnail: <a href=full-res><img thumbnail></a>. Real pixel
-            // width/height ATTRIBUTES (not style — TED strips style) lock the small
-            // thumbnail size. A trailing space (no <br>) lets thumbnails sit in a row.
-            html += `<a href="${url}"><img src="${dataUri}" width="${out.info.width}" height="${out.info.height}" alt="screenshot" /></a> `
-            embedded = true
-          } else {
-            logger.warn({ url }, "Screenshot skipped inline embed: report image budget exhausted; using link only.")
-          }
-        } else {
-          logger.warn({ url, status: resp.status }, "Screenshot fetch not OK; using link only.")
-        }
-      } catch (err: any) {
-        logger.warn({ url, error: err?.message }, "Screenshot inline embed failed; using link only.")
+      const pre = inlineShots?.[url]
+      const img = pre?.d
+        ? { dataUri: pre.d, width: pre.w, height: pre.h }
+        : await buildThumbDataUri(url)
+      if (img && img.dataUri.length <= budget.remaining) {
+        budget.remaining -= img.dataUri.length
+        // Clickable thumbnail: <a href=full-res><img thumbnail></a>. Real pixel
+        // width/height ATTRIBUTES (not style — TED strips style) lock the small
+        // thumbnail size. A trailing space (no <br>) lets thumbnails sit in a row.
+        html += `<a href="${url}"><img src="${img.dataUri}" width="${img.width}" height="${img.height}" alt="screenshot" /></a> `
+        embedded = true
+      } else if (img) {
+        logger.warn({ url }, "Screenshot skipped inline embed: report image budget exhausted; using link only.")
       }
     }
     // If the thumbnail couldn't be embedded, fall back to a plain link (still
@@ -720,10 +752,12 @@ async function renderImageThumbs(
 const GRID_COLS = 8 // images per row (8 keeps the grid tight, less white space)
 const GRID_CELL = 150 // px per cell (square, image "contain"ed on white)
 const GRID_GAP = 6
-async function renderImageGrid(
+// Composite the flagged images into ONE numbered webp grid → data-URI. Returns
+// null when nothing could be fetched/composited. No budget logic here — the
+// caller decides. Shared by the post-time renderer and the scan-time precompute.
+async function buildGridDataUri(
   rows: any[],
-  budget: { remaining: number },
-): Promise<string> {
+): Promise<{ dataUri: string; width: number; height: number } | null> {
   const cells: { buf: Buffer; n: number }[] = []
   for (let i = 0; i < rows.length; i++) {
     const imgUrl = String(rows[i]?.thumb || rows[i]?.src || "").trim()
@@ -748,7 +782,7 @@ async function renderImageGrid(
       )
     }
   }
-  if (cells.length === 0) return ""
+  if (cells.length === 0) return null
 
   const cols = Math.min(GRID_COLS, cells.length)
   const gridRows = Math.ceil(cells.length / GRID_COLS)
@@ -785,20 +819,37 @@ async function renderImageGrid(
       .composite(overlays)
       .webp({ quality: WEBP_QUALITY })
       .toBuffer({ resolveWithObject: true })
-    const dataUri = `data:image/webp;base64,${out.data.toString("base64")}`
-    if (dataUri.length > budget.remaining) {
-      logger.warn(
-        { bytes: dataUri.length, remaining: budget.remaining },
-        "Image grid exceeds report image budget; using link-only.",
-      )
-      return ""
+    return {
+      dataUri: `data:image/webp;base64,${out.data.toString("base64")}`,
+      width: out.info.width,
+      height: out.info.height,
     }
-    budget.remaining -= dataUri.length
-    return `<img src="${dataUri}" width="${out.info.width}" height="${out.info.height}" alt="flagged images grid" />`
   } catch (err: any) {
     logger.warn({ error: err?.message }, "Image grid composite failed; using link-only.")
+    return null
+  }
+}
+
+async function renderImageGrid(
+  rows: any[],
+  budget: { remaining: number },
+  // Scan-time precomputed grid for this finding. When present the post path skips
+  // the fetch/composite entirely (Task 12); otherwise it's built on the spot.
+  inlineGrid?: InlineImg | null,
+): Promise<string> {
+  const g = inlineGrid?.d
+    ? { dataUri: inlineGrid.d, width: inlineGrid.w, height: inlineGrid.h }
+    : await buildGridDataUri(rows)
+  if (!g) return ""
+  if (g.dataUri.length > budget.remaining) {
+    logger.warn(
+      { bytes: g.dataUri.length, remaining: budget.remaining },
+      "Image grid exceeds report image budget; using link-only.",
+    )
     return ""
   }
+  budget.remaining -= g.dataUri.length
+  return `<img src="${g.dataUri}" width="${g.width}" height="${g.height}" alt="flagged images grid" />`
 }
 
 // ---- Report formatting: group by check, dedupe, render as bullet LISTS ----
@@ -1455,7 +1506,7 @@ async function renderCheckSectionHtml(
         ? `<a href="${esc(pageUrl)}">${esc(pageUrl)}</a>`
         : "this page"
       let block = `<p>📄 <strong>Page:</strong> ${pageLabel} — ${uniq.length} image${uniq.length > 1 ? "s" : ""} flagged (blur / watermark).</p>`
-      const grid = await renderImageGrid(uniq, imgBudget)
+      const grid = await renderImageGrid(uniq, imgBudget, f.inline_media?.grid)
       if (grid) {
         block += grid
         const links = uniq
@@ -1622,7 +1673,7 @@ async function renderCheckSectionHtml(
       if (reason) html += `<p><small>AI vision: ${esc(reason)}</small></p>`
     }
     if (cp.screenshot_url)
-      html += await renderScreenshotsHtml(String(cp.screenshot_url), imgBudget)
+      html += await renderScreenshotsHtml(String(cp.screenshot_url), imgBudget, cp.inline_media?.shots)
     return { status: "passed", html }
   }
 
@@ -1646,6 +1697,92 @@ const runKind = (runType?: string | null): string =>
     : runType === "internal_qa"
       ? "Internal"
       : "Pre-Release"
+
+// Scan-time screenshot preparation (Task 12). For every finding whose media the
+// report will inline — vision-verdict passes (their screenshot) and image_quality
+// findings (their flagged-image grid) — fetch + compress + base64-encode NOW and
+// store it on findings.inline_media, so posting the report is just string
+// assembly instead of network I/O on the critical path.
+//
+// Fail-open + idempotent: if the inline_media column is absent the whole pass is
+// skipped (the renderers just fetch as before); a finding already carrying media
+// is left untouched; any per-finding error is swallowed (that finding falls back
+// to a post-time fetch). Called once at scan completion, before the report posts.
+export async function precomputeFindingMedia(runId: string): Promise<void> {
+  let findings: any[] = []
+  try {
+    const { data, error } = await supabase
+      .from("findings")
+      .select("id, check_factor, screenshot_url, context_text, inline_media")
+      .eq("run_id", runId)
+    if (error) {
+      logger.warn(
+        { runId, error: error.message },
+        "precomputeFindingMedia: cannot read findings (inline_media column not migrated yet?) — skipping; the report will inline screenshots at post time as before.",
+      )
+      return
+    }
+    findings = data || []
+  } catch (e: any) {
+    logger.warn({ runId, error: e?.message }, "precomputeFindingMedia: read threw; skipping.")
+    return
+  }
+
+  for (const f of findings) {
+    try {
+      if (f.inline_media) continue // already precomputed — idempotent
+      const media: { shots?: Record<string, InlineImg>; grid?: InlineImg } = {}
+
+      // Vision-verdict passes are the only findings whose screenshot_url reaches
+      // renderScreenshotsHtml, so only those are worth precomputing.
+      if (VISION_VERDICT_CHECKS.has(f.check_factor)) {
+        const urls = String(f.screenshot_url || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+        const shots: Record<string, InlineImg> = {}
+        for (const u of urls) {
+          const t = await buildThumbDataUri(u)
+          if (t) shots[u] = { d: t.dataUri, w: t.width, h: t.height }
+        }
+        if (Object.keys(shots).length) media.shots = shots
+      }
+
+      // image_quality → the composite grid built from its context_text images.
+      if (f.check_factor === "image_quality") {
+        const seen = new Set<string>()
+        const uniq: any[] = []
+        for (const it of parseImageIssues(f.context_text)) {
+          const key = it.src || it.thumb
+          if (!key || seen.has(key)) continue
+          seen.add(key)
+          uniq.push(it)
+        }
+        if (uniq.length) {
+          const g = await buildGridDataUri(uniq)
+          if (g) media.grid = { d: g.dataUri, w: g.width, h: g.height }
+        }
+      }
+
+      if (media.shots || media.grid) {
+        const { error } = await supabase
+          .from("findings")
+          .update({ inline_media: media })
+          .eq("id", f.id)
+        if (error)
+          logger.warn(
+            { runId, findingId: f.id, error: error.message },
+            "precomputeFindingMedia: update failed; report will fetch this finding's media at post time.",
+          )
+      }
+    } catch (e: any) {
+      logger.warn(
+        { runId, findingId: f?.id, error: e?.message },
+        "precomputeFindingMedia: finding failed; falling back to a post-time fetch.",
+      )
+    }
+  }
+}
 
 // Build and post the section-wise report. Every enabled check is represented —
 // failing checks list their real defects (+ any applied fix), passing checks say
@@ -1958,6 +2095,139 @@ export async function postScanCompleteComment(tedTaskId: string, runId: string) 
   if (process.env.AI_FIX_MODULE_ENABLED !== "true") return
   const text = `<p>✅ <strong>QA scan complete.</strong> AI Fix is now generating and applying corrections in the background — the fix report will follow shortly.</p>`
   await postTedComment(tedTaskId, text, `ext:qacc-scan-complete-${runId}`).catch(() => {})
+}
+
+// The run types that receive the split main-thread summary (scan speed-up plan,
+// Task 1): an early DETECTION summary + the end-of-run fix summary. These are
+// the only run types the product emits.
+const SPLIT_SUMMARY_RUN_TYPES = new Set(["pre_release", "post_release", "internal_qa"])
+
+// Interim DETECTION summary posted to the main (parent) thread the moment the
+// scan finishes detecting issues — BEFORE the AI-fix pass runs. It breaks the
+// ~5-minute silence by telling the client "here's what we found" right away,
+// using the SAME per-check pass/fail roll-up the end-of-run fix summary will
+// show (so the two never disagree).
+//
+// It is deliberately a PLAIN comment: it never carries `aiAssigned` and it
+// never marks the task complete — that stays the job of the end-of-run fix
+// summary (postSectionedReport). Scoped to pre-release / post-release /
+// internal runs, and only when the AI-fix module is on (there is no fix pass,
+// hence no silence, when it's off). Idempotent via the report-family key
+// `ext:qacc-report-detection-summary-<runId>`, which also gives it the same
+// client-facing sanitization + raw portal copy the fix summary gets.
+export async function postDetectionSummary(runId: string, tedTaskId: string): Promise<void> {
+  if (process.env.AI_FIX_MODULE_ENABLED !== "true") return
+
+  const { data: runMeta } = await supabase
+    .from("qa_runs")
+    .select("enabled_checks, project_id, site_url, run_type")
+    .eq("id", runId)
+    .single()
+  const runType = runMeta?.run_type || null
+  if (!SPLIT_SUMMARY_RUN_TYPES.has(String(runType))) return
+
+  // Resolve the client's real domain once, so the sanitized client copy shows
+  // the gogroth/live host instead of the local fallback URL (mirrors
+  // postSectionedReport). Best-effort.
+  let clientDomain: string | null = null
+  try {
+    if (runMeta?.project_id) {
+      const { data: proj } = await supabase
+        .from("projects")
+        .select("name")
+        .eq("id", runMeta.project_id)
+        .single()
+      if (proj?.name) clientDomain = await getClientDomain(proj.name).catch(() => null)
+    }
+  } catch {}
+  const reportCtx = { runType, clientDomain }
+
+  const { data: findings } = await supabase
+    .from("findings")
+    .select("*")
+    .eq("run_id", runId)
+
+  // Join findings back to their page URL so link/image checks classify correctly.
+  const { data: pageRows } = await supabase
+    .from("pages")
+    .select("id, url")
+    .eq("run_id", runId)
+  const pageUrlById = new Map<string, string>(
+    (pageRows || []).map((p: any) => [p.id, p.url]),
+  )
+
+  // Group findings by check and ensure every enabled check is represented — then
+  // derive each check's status from the SAME renderer the final report uses, so
+  // the roll-up here matches the fix summary exactly. The image budget is zeroed
+  // so NO screenshots/images are fetched (we only need the status, not the HTML),
+  // keeping this interim post fast. An empty fixMap means no fix banners appear.
+  const byCheck = new Map<string, any[]>()
+  for (const f of findings || []) {
+    const k = f.check_factor || "other"
+    if (!byCheck.has(k)) byCheck.set(k, [])
+    byCheck.get(k)!.push(f)
+  }
+  for (const c of runMeta?.enabled_checks || []) if (!byCheck.has(c)) byCheck.set(c, [])
+
+  const emptyFixMap = new Map<string, FixReportInfo>()
+  const noImgBudget = { remaining: 0 }
+  const sections: { factor: string; status: "failed" | "passed" | "errored" }[] = []
+  for (const [factor, group] of byCheck) {
+    const { status, html } = await renderCheckSectionHtml(
+      factor,
+      group,
+      emptyFixMap,
+      noImgBudget,
+      pageUrlById,
+    )
+    // Drop errored/empty sections exactly like postSectionedReport does — a tool
+    // lapse is QACC-internal and never shown to the client.
+    if (html) sections.push({ factor, status })
+  }
+
+  const failed = sections.filter((s) => s.status === "failed")
+  const passed = sections.filter((s) => s.status === "passed")
+
+  // Nothing failed → the "all passed" fast path already posted the full report
+  // immediately, so there is no silence to break and no interim note to add.
+  if (failed.length === 0) return
+
+  const failReason = (factor: string): string => {
+    const real = (byCheck.get(factor) || []).filter(isRealDefect)
+    if (!real.length) return ""
+    const raw = String(real[0].title || real[0].description || "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+    return clipText(raw, 140)
+  }
+  // Failed first, then passed — same ordering as the fix summary's roll-up.
+  const rollupItems = [...failed, ...passed]
+    .map((s) => {
+      const label = esc(FRIENDLY[s.factor] || titleCase(s.factor))
+      if (s.status === "failed") {
+        const reason = failReason(s.factor)
+        return `<li>${label} — Failed${reason ? `: ${esc(reason)}` : ""}</li>`
+      }
+      return `<li>${label} — Passed</li>`
+    })
+    .join("")
+
+  const kind = runKind(runType)
+  const body =
+    `<p><strong>${kind} QA — Issues Detected</strong></p>` +
+    (runMeta?.site_url ? `<p>Site: ${esc(runMeta.site_url)}</p>` : "") +
+    `<p><strong>Test cases:</strong> ${failed.length + passed.length} total — ` +
+    `${failed.length} failed, ${passed.length} passed.</p>` +
+    (rollupItems ? `<ul>${rollupItems}</ul>` : "")
+
+  // Plain parent comment: NO aiAssigned, and it does not mark the task complete.
+  await postTedComment(
+    tedTaskId,
+    body,
+    `ext:qacc-report-detection-summary-${runId}`,
+    { runId, projectId: runMeta?.project_id, targetKind: "parent", ...reportCtx },
+  ).catch(() => {})
 }
 
 export async function postFinalReportToTED(
