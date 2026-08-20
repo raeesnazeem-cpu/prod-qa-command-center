@@ -1,6 +1,8 @@
 import { User, Bell, Shield, Globe, LogOut } from "lucide-react"
 import { useState, useEffect } from "react"
-import { useUser, SignOutButton } from "@clerk/react"
+import { useUser } from "@clerk/react"
+import { useNavigate } from "react-router-dom"
+import { useQaccSession } from "@/hooks/useQaccSession"
 import { useRole } from "../hooks/useRole"
 import { useAuthAxios } from "../lib/useAuthAxios"
 import { useSystemSettings } from "../hooks/useSystemSettings"
@@ -10,6 +12,12 @@ import toast from "react-hot-toast"
 export const SettingsPage = () => {
   const { user } = useUser()
   const { role } = useRole()
+  const { logout } = useQaccSession()
+  const navigate = useNavigate()
+  const handleLogout = async () => {
+    await logout()
+    navigate("/login", { replace: true })
+  }
   const { systemSettings, updateMaintenanceMode } = useSystemSettings()
   const axios = useAuthAxios()
   const [googleChatUserId, setGoogleChatUserId] = useState("")
@@ -632,12 +640,13 @@ export const SettingsPage = () => {
             <button className="btn-unified-danger">Delete Account</button>
           </div>
           <div className="px-6 py-4 bg-red-50/50 dark:bg-red-950/30 border-t border-red-50 dark:border-red-900/30 flex justify-end">
-            <SignOutButton>
-              <button className="btn-unified-danger flex items-center space-x-2">
-                <LogOut className="w-4 h-4" />
-                <span>Sign Out</span>
-              </button>
-            </SignOutButton>
+            <button
+              onClick={handleLogout}
+              className="btn-unified-danger flex items-center space-x-2"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Sign Out</span>
+            </button>
           </div>
         </section>
       </div>

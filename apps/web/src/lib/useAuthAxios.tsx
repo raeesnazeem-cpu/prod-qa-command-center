@@ -13,6 +13,9 @@ export const useAuthAxios = (): AxiosInstance => {
       headers: {
         "Content-Type": "application/json",
       },
+      // Sends the qacc_session cookie on every request — required since the
+      // frontend and API are separate origins (see routes/auth.ts).
+      withCredentials: true,
     })
 
     instance.interceptors.request.use(

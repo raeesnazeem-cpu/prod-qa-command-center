@@ -1,10 +1,10 @@
 import { Navigate, Outlet } from "react-router-dom"
-import { useAuth } from "@clerk/react"
+import { useQaccSession } from "@/hooks/useQaccSession"
 
 export const ProtectedRoute = () => {
-  const { isLoaded, isSignedIn } = useAuth()
+  const { session, isLoading } = useQaccSession()
 
-  if (!isLoaded) {
+  if (isLoading) {
     const isDark =
       typeof window !== "undefined" &&
       (localStorage.getItem("theme") === "dark" ||
@@ -35,7 +35,7 @@ export const ProtectedRoute = () => {
     )
   }
 
-  if (!isSignedIn) {
+  if (!session) {
     return <Navigate to="/login" replace />
   }
 

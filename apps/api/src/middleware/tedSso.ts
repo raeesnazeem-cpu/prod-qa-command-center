@@ -1,94 +1,62 @@
-import { createRemoteJWKSet, jwtVerify, decodeJwt, type JWTPayload } from "jose"
+import { createHmac, timingSafeEqual } from "crypto"
 
 // ---------------------------------------------------------------------------
-// TED → QACC Single Sign-On: verify a TED-minted login token.
+// TED → QACC Single Sign-On: verify a TED-minted SSO ticket.
 //
-// TED signs a short-lived JWT ("for QACC only") with its PRIVATE key and
-// publishes matching PUBLIC keys at a JWKS URL. QACC downloads those keys and
-// verifies the token with NO shared password. See docs/qacc-ted-sso/.
+// TED mints a short-lived (5 minute) ticket using the same HMAC-SHA256 scheme
+// it already uses for website-build-tool and g99-web-audit — NOT a JWT/JWKS
+// token. QACC verifies it with a shared secret (TED_SSO_SECRET), which must
+// equal TED's own QACC_SSO_SECRET exactly. A dedicated per-app secret, never
+// BUILD_TOOL_SSO_SECRET or WEB_AUDIT_SSO_SECRET.
 //
-// This module ONLY verifies. clerkAuth.ts decides what to do with the result
-// (it stamps the same shared super_admin identity as a Google login).
+// This module ONLY verifies the one-time ticket used to establish a session
+// (see routes/auth.ts). It is never used per-request — routes/auth.ts signs a
+// QACC-owned qacc_session (lib/qaccSession.ts) that authenticates every
+// subsequent request instead, because a 5-minute ticket isn't suitable as a
+// long-lived bearer credential.
 // ---------------------------------------------------------------------------
 
 // OFF by default — flip SSO_TED_ENABLED=true only after TED's side is live.
 export const SSO_TED_ENABLED = process.env.SSO_TED_ENABLED === "true"
 
-const TED_JWKS_URL = process.env.TED_JWKS_URL || ""
-const TED_JWT_ISSUER = process.env.TED_JWT_ISSUER || "https://ted.growth99.com"
-const TED_JWT_AUDIENCE = process.env.TED_JWT_AUDIENCE || "qacc"
+export interface TedTicketClaims {
+  email: string
+  name: string
+  photo: string
+  exp: number
+}
 
-// Same company domains the Google gate allows. Reuses AUTH_ALLOWED_DOMAINS.
-const ALLOWED_DOMAINS = (
-  process.env.AUTH_ALLOWED_DOMAINS || "growth99.com,growth99.net"
-)
-  .split(",")
-  .map((d) => d.trim().toLowerCase())
-  .filter(Boolean)
+function secret(): string | undefined {
+  return process.env.TED_SSO_SECRET || undefined
+}
 
-// The JWKS key set is fetched lazily and cached (jose refreshes it and handles
-// key rotation on its own). Built once, on first use.
-let jwks: ReturnType<typeof createRemoteJWKSet> | null = null
-function getJwks() {
-  if (!jwks && TED_JWKS_URL) jwks = createRemoteJWKSet(new URL(TED_JWKS_URL))
-  return jwks
+function hmac(payload: string, key: string): string {
+  return createHmac("sha256", key).update(payload, "utf8").digest("base64url")
 }
 
 /**
- * Peek at a token's `iss` WITHOUT verifying it, so clerkAuth can route:
- * TED-issued token → this module; anything else → the Google path.
- * Returns false for non-JWTs and any token not claiming TED as issuer.
+ * Verify a TED SSO ticket: signature (HMAC-SHA256, constant-time compare) and
+ * expiry. There is no `aud`/app-identifier claim in TED's ticket format — app
+ * scoping is enforced entirely by QACC holding a dedicated secret that no
+ * other consumer app is given, matching the existing build-tool/web-audit
+ * design.
  */
-export function isTedIssuedToken(token: string): boolean {
-  if (!SSO_TED_ENABLED) return false
+export function verifyTedSsoTicket(token: string | undefined | null): TedTicketClaims | null {
+  const key = secret()
+  if (!key || !token) return null
   try {
-    const claims: JWTPayload = decodeJwt(token)
-    return claims.iss === TED_JWT_ISSUER
+    const parts = token.split(".")
+    if (parts.length !== 2) return null
+    const [payloadB64, sig] = parts
+    const payloadJson = Buffer.from(payloadB64, "base64url").toString("utf8")
+    const sigBuf = Buffer.from(sig)
+    const expectedBuf = Buffer.from(hmac(payloadJson, key))
+    if (sigBuf.length !== expectedBuf.length || !timingSafeEqual(sigBuf, expectedBuf)) return null
+    const claims: TedTicketClaims = JSON.parse(payloadJson)
+    if (!claims.email || !Number.isFinite(claims.exp)) return null
+    if (Date.now() / 1000 > claims.exp) return null
+    return claims
   } catch {
-    return false
+    return null
   }
-}
-
-export type TedSsoResult =
-  | { ok: true; email: string; sub: string }
-  | { ok: false; status: number; error: string }
-
-/**
- * Fully verify a TED SSO token: signature (via JWKS), issuer, audience (=qacc),
- * expiry, and an allowed company email domain. jose does the crypto — we never
- * hand-roll the checks. On any failure we return a status + safe message; we
- * NEVER log the token itself.
- *
- * Note on replay (`jti`): the token intentionally doubles as QACC's session
- * bearer for its full 2-hour life — the browser attaches it to EVERY request —
- * so it is used many times by design. Single-use `jti` rejection would break
- * the app on the second request. Safety instead rests on: HTTPS-only transit,
- * `aud=qacc` (unusable elsewhere), and the short 2-hour expiry.
- */
-export async function verifyTedSsoToken(token: string): Promise<TedSsoResult> {
-  const keys = getJwks()
-  if (!keys) {
-    // SSO flagged on but TED_JWKS_URL missing — misconfiguration, not the
-    // user's fault. 503 so the frontend can fall back to Google sign-in.
-    return { ok: false, status: 503, error: "SSO not configured" }
-  }
-
-  let payload: JWTPayload
-  try {
-    const res = await jwtVerify(token, keys, {
-      issuer: TED_JWT_ISSUER,
-      audience: TED_JWT_AUDIENCE,
-    })
-    payload = res.payload
-  } catch {
-    return { ok: false, status: 401, error: "Invalid login" }
-  }
-
-  const email = String(payload.email || "").toLowerCase()
-  const domain = email.split("@")[1] || ""
-  if (!email || !ALLOWED_DOMAINS.includes(domain)) {
-    return { ok: false, status: 403, error: "This account is not allowed." }
-  }
-
-  return { ok: true, email, sub: String(payload.sub || "") }
 }

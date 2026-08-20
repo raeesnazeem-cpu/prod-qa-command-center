@@ -58,38 +58,3 @@ export function clearToken(): void {
   }
   delete axios.defaults.headers.common["Authorization"]
 }
-
-// --- TED SSO handoff -------------------------------------------------------
-// TED redirects the browser to https://qacc.raees.dev/sso#token=THE_TOKEN.
-// The token rides in the URL hash (the "#..." part) on purpose: the hash is
-// never sent to servers, never hits server logs, and never leaks in Referer.
-//
-// captureSsoTokenFromUrl() pulls that token out, stores it like any login
-// token (so it's attached to every request as `Authorization: Bearer ...`),
-// and scrubs it from the address bar. The backend does the real verification.
-// Returns true if a usable token was captured. Safe to call more than once.
-export function captureSsoTokenFromUrl(): boolean {
-  try {
-    const hash = window.location.hash || ""
-    const m = hash.match(/[#&]token=([^&]+)/)
-    if (!m) return false
-    const token = decodeURIComponent(m[1])
-    // Scrub the token from the URL no matter what, so it never lingers in
-    // history or gets copy-pasted.
-    scrubHash()
-    if (!tokenIsValid(token)) return false // expired/garbage → normal login
-    setToken(token)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function scrubHash(): void {
-  try {
-    const clean = window.location.pathname + window.location.search
-    window.history.replaceState(null, "", clean || "/")
-  } catch {
-    /* ignore */
-  }
-}

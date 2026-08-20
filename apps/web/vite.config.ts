@@ -14,5 +14,12 @@ export default defineConfig({
   },
   server: {
     allowedHosts: true,
+    // Fixed, not just default: TED's QACC_URL (see ted/.env) is registered
+    // against this exact origin for the SSO return-address check. If this
+    // port is already taken, Vite would otherwise silently bump to the next
+    // free one (e.g. 5174) and every "Continue with TED" login would then
+    // get silently rejected by TED instead of coming back to QACC.
+    port: 5173,
+    strictPort: true,
   },
 })
