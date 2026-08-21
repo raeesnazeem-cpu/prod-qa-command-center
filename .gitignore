@@ -9,11 +9,13 @@ node_modules/
 apps/*/.env
 apps/*/.env.*
 !apps/*/.env.example
+
+# Never commit prod secret env files
+prod.env
+**/prod.env
 packages/*/.env
 packages/*/.env.*
 !packages/*/.env.example
-prod.env
-**/prod.env
 
 # Build outputs
 dist/
