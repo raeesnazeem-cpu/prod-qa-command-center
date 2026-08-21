@@ -1,5 +1,4 @@
 import { Outlet, NavLink } from "react-router-dom"
-import { useUser, UserButton } from "@clerk/react"
 import {
   LayoutDashboard,
   FolderKanban,
@@ -32,12 +31,12 @@ import { useRealtimeNotifications } from "../hooks/useRealtimeNotifications"
 import { useWorkspaceUsers } from "../hooks/useProjects"
 import { useAppStore } from "../store/appStore"
 import { ActiveUsersDropdown } from "../components/ActiveUsersDropdown"
+import { ProfileMenu } from "../components/ProfileMenu"
 
 export const AppLayout = () => {
   const [isCollapsed, setIsCollapsed] = useState(false)
   const [isImpersonateOpen, setIsImpersonateOpen] = useState(false)
   const [impersonateSearch, setImpersonateSearch] = useState("")
-  const { user } = useUser()
   const { role, profile, isLoading, isAdmin } = useRole()
   const { data: users } = useWorkspaceUsers()
   const { user: appUser, setUser } = useAppStore()
@@ -354,19 +353,7 @@ export const AppLayout = () => {
             <NotificationBell />
 
             <div className="flex items-center space-x-4">
-              {user?.firstName && (
-                <span className="text-sm text-slate-700 dark:text-slate-300 font-bold tracking-tight">
-                  {user.firstName}
-                </span>
-              )}
-              <UserButton
-                appearance={{
-                  elements: {
-                    avatarBox:
-                      "w-8 h-8 border border-slate-200 shadow-sm transition-all hover:scale-105",
-                  },
-                }}
-              />
+              <ProfileMenu />
             </div>
           </div>
         </header>

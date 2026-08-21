@@ -28,6 +28,7 @@ import { aiFixRunsRouter } from "./routes/ai-fix-runs"
 import { findingsRouter } from "./routes/findings"
 import { projectsRouter } from "./routes/projects"
 import { tedCommentsRouter } from "./routes/tedComments"
+import { authRouter } from "./routes/auth"
 import { createBullBoard } from "@bull-board/api"
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter"
 import { ExpressAdapter } from "@bull-board/express"
@@ -65,6 +66,10 @@ createBullBoard({
   serverAdapter: serverAdapter,
 })
 app.use("/admin/queues", serverAdapter.getRouter())
+
+// TED SSO login/logout/session endpoints — unauthenticated by definition
+// (this is where a session gets established or cleared in the first place).
+app.use("/api/auth", authRouter)
 
 // Headless API surface — scan trigger + report reads only
 app.use("/api/health", healthRouter)

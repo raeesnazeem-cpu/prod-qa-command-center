@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express"
-import { isTedIssuedToken, verifyTedSsoToken } from "./tedSso"
+import { QACC_SESSION_COOKIE, readCookie, verifyQaccSession } from "../lib/qaccSession"
 
 export interface AuthPayload {
   userId: string
@@ -7,6 +7,8 @@ export interface AuthPayload {
   orgId: string | null
   role: string | null
   email: string | null
+  name: string | null
+  photo: string | null
 }
 
 declare global {
@@ -31,57 +33,41 @@ const DEFAULT_SYSTEM_ORG_ID = "57d2a6b4-3131-493b-9253-fbf8c748487e" // Default 
 // so requireRole() and every downstream reader keep working exactly as before —
 // this is a LOGIN GATE ONLY, not a re-introduction of RBAC. `email` is the one
 // field that reflects the real signed-in human (when the gate is on).
-function stampSystemIdentity(req: Request, email: string, clerkUserId: string) {
+function stampSystemIdentity(
+  req: Request,
+  email: string,
+  clerkUserId: string,
+  name?: string,
+  photo?: string,
+) {
   req.auth = {
     userId: process.env.SYSTEM_USER_ID || DEFAULT_SYSTEM_USER_ID,
     clerkUserId,
     orgId: process.env.SYSTEM_ORG_ID || DEFAULT_SYSTEM_ORG_ID,
     role: "super_admin",
     email,
+    name: name ?? null,
+    photo: photo ?? null,
   }
 }
 
-// --- Login gate config (all env-driven; OFF by default) --------------------
+// --- Login gate config (env-driven; OFF by default) ------------------------
 // The gate is DISABLED unless AUTH_GATE_ENABLED === "true". While disabled,
-// clerkAuth behaves EXACTLY as the old pass-through — zero behavior change — so
-// deploying this code changes nothing until the env flag is flipped (after the
-// frontend Google login is live). This is the safe, reversible rollout switch.
+// clerkAuth behaves EXACTLY as the old pass-through — zero behavior change.
 const AUTH_GATE_ENABLED = process.env.AUTH_GATE_ENABLED === "true"
-// Human logins are limited to these Google Workspace domains.
-const ALLOWED_DOMAINS = (
-  process.env.AUTH_ALLOWED_DOMAINS || "growth99.com,growth99.net"
-)
-  .split(",")
-  .map((d) => d.trim().toLowerCase())
-  .filter(Boolean)
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || ""
-
-// Verify a Google ID token via Google's own tokeninfo endpoint. Google checks
-// the signature and expiry for us and returns the claims (or a non-200 on any
-// invalid/expired token). No extra npm dependency needed.
-async function verifyGoogleIdToken(idToken: string): Promise<any | null> {
-  try {
-    const r = await fetch(
-      "https://oauth2.googleapis.com/tokeninfo?id_token=" +
-        encodeURIComponent(idToken),
-    )
-    if (!r.ok) return null
-    return await r.json()
-  } catch {
-    return null
-  }
-}
 
 /**
- * Headless mode with an optional human login gate.
+ * Headless mode gated by TED SSO only.
  *
- * - Gate OFF (default): unchanged pass-through — stamps the system identity and
- *   trusts every caller. Webhook routes never use this middleware; they stay on
- *   the TED shared secret regardless.
- * - Gate ON (AUTH_GATE_ENABLED=true): requires a valid Google ID token from an
- *   allowed domain (growth99.com / growth99.net). On success it still stamps the
- *   SAME super_admin system identity, so no downstream code / RBAC changes.
- *   No/invalid token → 401; wrong domain → 403.
+ * - Gate OFF (default): unchanged pass-through — stamps the system identity
+ *   and trusts every caller. Webhook routes never use this middleware; they
+ *   stay on the TED shared secret regardless.
+ * - Gate ON (AUTH_GATE_ENABLED=true): requires a valid qacc_session cookie,
+ *   which is established ONLY by POST /api/auth/ted-exchange after a TED SSO
+ *   ticket was verified (see routes/auth.ts). There is deliberately no
+ *   independent bearer-token fallback here — TED SSO is the sole login
+ *   authority for this gate, so a caller cannot reach an authenticated
+ *   identity without first completing the TED → qacc_session exchange.
  */
 export const clerkAuth = async (
   req: Request,
@@ -95,46 +81,13 @@ export const clerkAuth = async (
     return
   }
 
-  // Gate enabled → require a valid, allowed Google login.
-  const authz = req.headers.authorization || ""
-  const token = authz.startsWith("Bearer ") ? authz.slice(7).trim() : ""
-  if (!token) {
+  // TED SSO session cookie — the only credential this gate accepts.
+  const sessionToken = readCookie(req, QACC_SESSION_COOKIE)
+  const session = sessionToken ? verifyQaccSession(sessionToken) : null
+  if (!session) {
     res.status(401).json({ error: "Login required" })
     return
   }
-
-  // SSO path: a TED-issued token (aud=qacc) is verified against TED's public
-  // keys (JWKS). Only tokens whose issuer is TED take this branch; everything
-  // else falls through to the Google backup below. Same super_admin identity.
-  if (isTedIssuedToken(token)) {
-    const ted = await verifyTedSsoToken(token)
-    if (!ted.ok) {
-      res.status(ted.status).json({ error: ted.error })
-      return
-    }
-    stampSystemIdentity(req, ted.email, "ted:" + ted.sub)
-    next()
-    return
-  }
-
-  const info = await verifyGoogleIdToken(token)
-  if (!info || !info.email) {
-    res.status(401).json({ error: "Invalid login" })
-    return
-  }
-  // If a client id is configured, the token must have been minted for our app.
-  if (GOOGLE_CLIENT_ID && info.aud !== GOOGLE_CLIENT_ID) {
-    res.status(401).json({ error: "Invalid login (wrong app)" })
-    return
-  }
-  const emailVerified = info.email_verified === true || info.email_verified === "true"
-  const email = String(info.email).toLowerCase()
-  const domain = email.split("@")[1] || ""
-  if (!emailVerified || !ALLOWED_DOMAINS.includes(domain)) {
-    res.status(403).json({ error: "This account is not allowed." })
-    return
-  }
-
-  stampSystemIdentity(req, email, "google:" + (info.sub || ""))
+  stampSystemIdentity(req, session.email, "ted:" + session.email, session.name, session.photo)
   next()
 }

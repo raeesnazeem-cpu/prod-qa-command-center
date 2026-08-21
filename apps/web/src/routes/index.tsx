@@ -1,7 +1,9 @@
 import { createBrowserRouter, Navigate } from "react-router-dom";
 import { AppLayout } from "@/layouts/AppLayout";
 import { ChatProvider } from "@/contexts/ChatContext";
+import { ProtectedRoute } from "@/components/ProtectedRoute";
 import {
+  LoginPage,
   ProjectsPage,
   ProjectDetailPage,
   RunDetailPage,
@@ -10,29 +12,38 @@ import {
   SsoCallback,
 } from "@/pages";
 
-// Headless mode: no auth routes, no ProtectedRoute. TED owns auth. The UI is a
-// read-only viewer for scans, progress, findings, and dry-run reports.
+// TED owns authentication: "Continue with TED" (LoginPage) mints a signed SSO
+// ticket that QACC's own backend verifies, establishing QACC's own
+// qacc_session cookie (see apps/api/src/routes/auth.ts). ProtectedRoute gates
+// everything except the login page, the TED SSO callback, and the standalone
+// fix-preview link.
 export const router = createBrowserRouter(
   [
     // Standalone, chrome-free carousel opened by the TED "AI Fix" link. Kept
     // OUTSIDE AppLayout so it shows nothing of QACC.
     { path: "/fix-preview/:id", element: <FixPreviewPage /> },
-    // TED SSO landing (chrome-free): grabs the token from the URL hash and
-    // sends the user into the app. See lib/googleAuth captureSsoTokenFromUrl.
+    { path: "/login", element: <LoginPage /> },
+    // TED SSO landing (chrome-free): exchanges ?ted_sso=<ticket> for a
+    // qacc_session cookie. See hooks/useQaccSession exchangeTedTicket.
     { path: "/sso", element: <SsoCallback /> },
     {
-      element: (
-        <ChatProvider>
-          <AppLayout />
-        </ChatProvider>
-      ),
+      element: <ProtectedRoute />,
       children: [
-        { path: "/", element: <Navigate to="/projects" replace /> },
-        { path: "/projects", element: <ProjectsPage /> },
-        { path: "/projects/:id", element: <ProjectDetailPage /> },
-        { path: "/projects/:id/runs/:runId", element: <RunDetailPage /> },
-        { path: "/settings", element: <SettingsPage /> },
-        { path: "*", element: <Navigate to="/projects" replace /> },
+        {
+          element: (
+            <ChatProvider>
+              <AppLayout />
+            </ChatProvider>
+          ),
+          children: [
+            { path: "/", element: <Navigate to="/projects" replace /> },
+            { path: "/projects", element: <ProjectsPage /> },
+            { path: "/projects/:id", element: <ProjectDetailPage /> },
+            { path: "/projects/:id/runs/:runId", element: <RunDetailPage /> },
+            { path: "/settings", element: <SettingsPage /> },
+            { path: "*", element: <Navigate to="/projects" replace /> },
+          ],
+        },
       ],
     },
   ],
