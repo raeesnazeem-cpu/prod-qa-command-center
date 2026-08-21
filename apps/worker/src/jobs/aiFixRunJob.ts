@@ -45,6 +45,7 @@ import fs from "fs"
 import os from "os"
 import path from "path"
 import pino from "pino"
+import pLimit from "p-limit"
 
 const execFileAsync = promisify(execFile)
 const logger = pino({
@@ -105,21 +106,51 @@ interface Edit {
   replace: string
 }
 
-function parseTriage(text: string): { category: string; fix: string; edits: Edit[] } | null {
+// Batched triage: one LLM call carries SEVERAL findings and answers with a JSON
+// ARRAY, each entry tagged with its 0-based `index` into the batch. Returns a
+// result for every finding in the batch (length `n`), defaulting any missing /
+// malformed entry to not_possible — so a garbled response never fabricates a
+// fix and never drops a finding. Each edit is validated per entry (path/find/
+// replace all strings, capped at 5) before it is trusted.
+function parseTriageBatch(
+  text: string,
+  n: number,
+): { category: string; fix: string; edits: Edit[] }[] {
+  const out = Array.from({ length: n }, () => ({
+    category: "not_possible",
+    fix: "",
+    edits: [] as Edit[],
+  }))
   try {
-    const m = text.match(/\{[\s\S]*\}/)
-    if (!m) return null
-    const o = JSON.parse(m[0])
-    const category = String(o.category || "").trim()
-    const edits: Edit[] = Array.isArray(o.edits)
-      ? o.edits
-          .filter((e: any) => e && typeof e.path === "string" && typeof e.find === "string" && typeof e.replace === "string")
-          .slice(0, 5)
-      : []
-    return { category: VALID.has(category) ? category : "not_possible", fix: String(o.fix || "").trim(), edits }
+    const m = text.match(/\[[\s\S]*\]/)
+    if (!m) return out
+    const arr = JSON.parse(m[0])
+    if (!Array.isArray(arr)) return out
+    for (const o of arr) {
+      const idx = Number(o?.index)
+      if (!Number.isInteger(idx) || idx < 0 || idx >= n) continue
+      const category = String(o?.category || "").trim()
+      const edits: Edit[] = Array.isArray(o?.edits)
+        ? o.edits
+            .filter(
+              (e: any) =>
+                e &&
+                typeof e.path === "string" &&
+                typeof e.find === "string" &&
+                typeof e.replace === "string",
+            )
+            .slice(0, 5)
+        : []
+      out[idx] = {
+        category: VALID.has(category) ? category : "not_possible",
+        fix: String(o?.fix || "").trim(),
+        edits,
+      }
+    }
   } catch {
-    return null
+    // Malformed JSON → every finding in the batch keeps its not_possible default.
   }
+  return out
 }
 
 function ownerRepoFromUrl(repoUrl: string): { owner: string; repo: string } | null {
@@ -319,6 +350,13 @@ export async function processAiFixRunJob(job: Job) {
     placeCode?: boolean
   }[] = []
 
+  // Findings that fall through every deterministic handler below need the
+  // generic LLM triage. That triage is slow and INDEPENDENT per finding, so we
+  // don't run it inline — we collect the findings here and triage them
+  // concurrently after this loop (Phase A), then apply + commit serially
+  // (Phase B). The deterministic handlers keep committing inline, unchanged.
+  const llmFindings: any[] = []
+
   for (const f of (findings || []).slice(0, MAX_FINDINGS)) {
     const pageUrl = pageUrlById.get(f.page_id) || ""
     // Lapses (errored/skipped checks) are RECORDED for the internal Dry-run Data
@@ -380,8 +418,8 @@ export async function processAiFixRunJob(job: Job) {
           diff = stdout.slice(0, MAX_DIFF_CHARS)
         } catch {}
         try {
-          await git(["add", "-A"])
-          await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
+          // Edit is in the working tree; all fixes are committed once, together,
+          // right before push (Task 6 — one commit per run, not per finding).
           committed++
           landed = true
         } catch (e: any) {
@@ -565,12 +603,8 @@ export async function processAiFixRunJob(job: Job) {
           diff = stdout.slice(0, MAX_DIFF_CHARS)
         } catch {}
         try {
-          await git(["add", "-A"])
-          await git([
-            "commit",
-            "-m",
-            `fix: ${(f.title || f.check_factor).slice(0, 72)}`,
-          ])
+          // Edit is in the working tree; all fixes are committed once, together,
+          // right before push (Task 6 — one commit per run, not per finding).
           committed++
           landed = true
         } catch (e: any) {
@@ -636,12 +670,8 @@ export async function processAiFixRunJob(job: Job) {
           diff = stdout.slice(0, MAX_DIFF_CHARS)
         } catch {}
         try {
-          await git(["add", "-A"])
-          await git([
-            "commit",
-            "-m",
-            `fix: ${(f.title || f.check_factor).slice(0, 72)}`,
-          ])
+          // Edit is in the working tree; all fixes are committed once, together,
+          // right before push (Task 6 — one commit per run, not per finding).
           committed++
           landed = true
         } catch (e: any) {
@@ -702,8 +732,8 @@ export async function processAiFixRunJob(job: Job) {
           diff = stdout.slice(0, MAX_DIFF_CHARS)
         } catch {}
         try {
-          await git(["add", "-A"])
-          await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
+          // Edit is in the working tree; all fixes are committed once, together,
+          // right before push (Task 6 — one commit per run, not per finding).
           committed++
           landed = true
         } catch (e: any) {
@@ -823,8 +853,8 @@ export async function processAiFixRunJob(job: Job) {
           diff = stdout.slice(0, MAX_DIFF_CHARS)
         } catch {}
         try {
-          await git(["add", "-A"])
-          await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
+          // Edit is in the working tree; all fixes are committed once, together,
+          // right before push (Task 6 — one commit per run, not per finding).
           committed++
           landed = true
         } catch (e: any) {
@@ -931,8 +961,8 @@ export async function processAiFixRunJob(job: Job) {
           diff = stdout.slice(0, MAX_DIFF_CHARS)
         } catch {}
         try {
-          await git(["add", "-A"])
-          await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
+          // Edit is in the working tree; all fixes are committed once, together,
+          // right before push (Task 6 — one commit per run, not per finding).
           committed++
           landed = true
         } catch (e: any) {
@@ -1020,8 +1050,8 @@ export async function processAiFixRunJob(job: Job) {
           diff = stdout.slice(0, MAX_DIFF_CHARS)
         } catch {}
         try {
-          await git(["add", "-A"])
-          await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
+          // Edit is in the working tree; all fixes are committed once, together,
+          // right before push (Task 6 — one commit per run, not per finding).
           committed++
           landed = true
         } catch (e: any) {
@@ -1150,8 +1180,8 @@ export async function processAiFixRunJob(job: Job) {
             diff = stdout.slice(0, MAX_DIFF_CHARS)
           } catch {}
           try {
-            await git(["add", "-A"])
-            await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
+            // Edit is in the working tree; all fixes are committed once, together,
+            // right before push (Task 6 — one commit per run, not per finding).
             committed++
             landed = true
           } catch (e: any) {
@@ -1240,12 +1270,8 @@ export async function processAiFixRunJob(job: Job) {
           diff = stdout.slice(0, MAX_DIFF_CHARS)
         } catch {}
         try {
-          await git(["add", "-A"])
-          await git([
-            "commit",
-            "-m",
-            `fix: ${(f.title || f.check_factor).slice(0, 72)}`,
-          ])
+          // Edit is in the working tree; all fixes are committed once, together,
+          // right before push (Task 6 — one commit per run, not per finding).
           committed++
           landed = true
         } catch (e: any) {
@@ -1276,77 +1302,173 @@ export async function processAiFixRunJob(job: Job) {
       // triage, which reports it honestly as a manual page/DB fix.
     }
 
-    let visual = ""
-    const firstShot = (f.screenshot_url || "").split(",")[0]?.trim()
-    if (firstShot) {
-      try {
-        const resp = await fetch(firstShot)
-        if (resp.ok) {
-          const buf = Buffer.from(await resp.arrayBuffer())
-          visual = await describeImage(buf, "Briefly describe the UI issue in this QA screenshot in 1-2 sentences.").catch(() => "")
+    // Fell through every deterministic handler → generic LLM triage. Triage
+    // (context retrieval + the model call) is the slow, INDEPENDENT part, so we
+    // don't run it inline; collect the finding and triage the whole batch
+    // CONCURRENTLY below (Phase A), then apply + commit SERIALLY (Phase B).
+    llmFindings.push(f)
+  }
+
+  // ===================== Phase A: triage (concurrent) =====================
+  // Two sub-stages, both git-free (read-only + network) so both parallelize:
+  //   A1 — per finding, gather its screenshot description + candidate-file
+  //        context and build that finding's prompt block.
+  //   A2 — send SEVERAL findings per LLM call (a JSON-array response), a few
+  //        batched calls instead of one-per-finding. Fewer round-trips = less
+  //        total wait and less chance of tripping provider rate limits.
+  // Both bounded so we never hammer the provider. Kept at 3 (override via
+  // AI_FIX_TRIAGE_CONCURRENCY); batch size via AI_FIX_TRIAGE_BATCH_SIZE.
+  const TRIAGE_CONCURRENCY = Math.max(
+    1,
+    Number(process.env.AI_FIX_TRIAGE_CONCURRENCY || 3),
+  )
+  const TRIAGE_BATCH_SIZE = Math.max(
+    1,
+    Number(process.env.AI_FIX_TRIAGE_BATCH_SIZE || 4),
+  )
+  type TriageResult = {
+    f: any
+    pageUrl: string
+    repoCtx: Awaited<ReturnType<typeof gatherRepoContext>> | null
+    category: string
+    fix: string
+    edits: Edit[]
+  }
+
+  // --- A1: build each finding's prompt block (concurrent, git-free) ---
+  type Prepared = {
+    f: any
+    pageUrl: string
+    repoCtx: Awaited<ReturnType<typeof gatherRepoContext>> | null
+    block: string
+  }
+  const prepLimit = pLimit(TRIAGE_CONCURRENCY)
+  const prepared: Prepared[] = await Promise.all(
+    llmFindings.map((f) =>
+      prepLimit(async (): Promise<Prepared> => {
+        const pageUrl = pageUrlById.get(f.page_id) || ""
+
+        let visual = ""
+        const firstShot = (f.screenshot_url || "").split(",")[0]?.trim()
+        if (firstShot) {
+          try {
+            const resp = await fetch(firstShot)
+            if (resp.ok) {
+              const buf = Buffer.from(await resp.arrayBuffer())
+              visual = await describeImage(buf, "Briefly describe the UI issue in this QA screenshot in 1-2 sentences.").catch(() => "")
+            }
+          } catch {}
         }
-      } catch {}
-    }
 
-    // Retrieval: pick the files most likely to hold the fix and read them, so
-    // the model writes `find` strings by copying real text instead of guessing.
-    let repoCtx: Awaited<ReturnType<typeof gatherRepoContext>> | null = null
-    if (workDir) {
-      repoCtx = await gatherRepoContext(workDir, repoIndex, f).catch(() => null)
-    }
+        // Retrieval: pick the files most likely to hold the fix and read them, so
+        // the model writes `find` strings by copying real text instead of guessing.
+        let repoCtx: Awaited<ReturnType<typeof gatherRepoContext>> | null = null
+        if (workDir) {
+          repoCtx = await gatherRepoContext(workDir, repoIndex, f).catch(() => null)
+        }
 
-    const system =
-      "You are a senior web engineer fixing automated website QA findings in a code-first WordPress repo (block themes, classic theme templates, patterns, CSS/JS — NOT Elementor). You are given the ACTUAL contents of the candidate files. Decide whether the finding can be fixed by editing this repo, and if so return concrete search/replace edits."
-    const fileSection =
-      repoCtx && repoCtx.files.length > 0
-        ? [
-            "",
-            `Candidate files (${repoCtx.files.length} of the repo's most relevant, contents below):`,
-            repoCtx.files.map((p) => `- ${p}`).join("\n"),
-            "",
-            repoCtx.block,
-          ].join("\n")
-        : workDir
-          ? "\nNo candidate files could be retrieved for this finding — return an empty edits array."
-          : "\nNo repository is available this run, so you cannot return code edits — return an empty edits array. STILL classify whether this finding is fixable (fully_ai/partial_ai) and describe the exact correction you would make in `fix` (concrete and specific, e.g. the corrected text)."
-    const user = [
-      `Finding: ${f.title || f.check_factor}`,
-      repoThemeType !== "unknown"
-        ? `Repository theme type: ${repoThemeType} — ${repoThemeType === "classic" ? "a CLASSIC PHP theme (page-*.php templates + functions.php; content is hardcoded HTML in the PHP template files, NOT theme.json/templates/*.html)" : "a BLOCK/FSE theme (theme.json + templates/*.html + patterns)"}. Prefer edits to the matching file kind.`
-        : "",
-      f.description ? `Details: ${f.description}` : "",
-      f.context_text ? `Context: ${f.context_text}` : "",
-      visual ? `Screenshot shows: ${visual}` : "",
-      repoCtx && repoCtx.anchors.length > 0
-        ? `Literal strings from this finding that were searched for in the repo: ${repoCtx.anchors.map((a) => JSON.stringify(a)).join(", ")}`
-        : "",
-      fileSection,
-      "",
-      'Respond with STRICT JSON only: {"category":"fully_ai|partial_ai|manual|not_possible","fix":"<concise description of the code or config change that resolves this finding>","edits":[{"path":"<one of the candidate file paths above>","find":"<substring copied byte-for-byte from that file>","replace":"<replacement>"}]}',
-      "Rules for `edits`:",
-      "- `path` MUST be one of the candidate file paths listed above. Never invent a path.",
-      "- `find` MUST be copied verbatim from the shown contents of that file, long enough to occur exactly once (include surrounding markup if needed). Never write a snippet from memory.",
-      "- Where contents are shown as excerpts, only quote text that is actually displayed — regions marked as omitted are not available.",
-      "- Return an empty `edits` array when the resolution is a content/config or WordPress admin/database change rather than a source-code edit, or when the repository does not contain the relevant code.",
-    ]
-      .filter(Boolean)
-      .join("\n")
+        const fileSection =
+          repoCtx && repoCtx.files.length > 0
+            ? [
+                "",
+                `Candidate files (${repoCtx.files.length} of the repo's most relevant, contents below):`,
+                repoCtx.files.map((p) => `- ${p}`).join("\n"),
+                "",
+                repoCtx.block,
+              ].join("\n")
+            : workDir
+              ? "\nNo candidate files could be retrieved for this finding — return an empty edits array."
+              : "\nNo repository is available this run, so you cannot return code edits — return an empty edits array. STILL classify whether this finding is fixable (fully_ai/partial_ai) and describe the exact correction you would make in `fix` (concrete and specific, e.g. the corrected text)."
+        // Per-finding block: everything the model needs to judge THIS finding.
+        // The response-format/rules live once in the batch header below, so the
+        // block itself carries no output instructions. `path` scoping is enforced
+        // both in the prompt (candidate files are listed per finding) and again
+        // at apply time (applyEdit rejects any path not in this finding's files).
+        const block = [
+          `Finding: ${f.title || f.check_factor}`,
+          repoThemeType !== "unknown"
+            ? `Repository theme type: ${repoThemeType} — ${repoThemeType === "classic" ? "a CLASSIC PHP theme (page-*.php templates + functions.php; content is hardcoded HTML in the PHP template files, NOT theme.json/templates/*.html)" : "a BLOCK/FSE theme (theme.json + templates/*.html + patterns)"}. Prefer edits to the matching file kind.`
+            : "",
+          f.description ? `Details: ${f.description}` : "",
+          f.context_text ? `Context: ${f.context_text}` : "",
+          visual ? `Screenshot shows: ${visual}` : "",
+          repoCtx && repoCtx.anchors.length > 0
+            ? `Literal strings from this finding that were searched for in the repo: ${repoCtx.anchors.map((a) => JSON.stringify(a)).join(", ")}`
+            : "",
+          fileSection,
+        ]
+          .filter(Boolean)
+          .join("\n")
 
-    let category = "not_possible"
-    let fix = ""
-    let edits: Edit[] = []
-    try {
-      const { text } = await completeText(system, user)
-      const parsed = parseTriage(text)
-      if (parsed) {
-        category = parsed.category
-        fix = parsed.fix || fix
-        edits = parsed.edits
-      }
-    } catch {
-      // Never surface internal AI/model errors in the report. `fix` stays empty
-      // and the reporter falls back to the finding's own title as the proposal.
-    }
+        return { f, pageUrl, repoCtx, block }
+      }),
+    ),
+  )
+
+  // --- A2: batch the LLM triage calls (concurrent) ---
+  const batches: Prepared[][] = []
+  for (let i = 0; i < prepared.length; i += TRIAGE_BATCH_SIZE)
+    batches.push(prepared.slice(i, i + TRIAGE_BATCH_SIZE))
+
+  const system =
+    "You are a senior web engineer fixing automated website QA findings in a code-first WordPress repo (block themes, classic theme templates, patterns, CSS/JS — NOT Elementor). You are given SEVERAL findings, each with the ACTUAL contents of its own candidate files. For each finding, decide whether it can be fixed by editing this repo, and if so return concrete search/replace edits."
+
+  const batchLimit = pLimit(TRIAGE_CONCURRENCY)
+  const triagedNested: TriageResult[][] = await Promise.all(
+    batches.map((batch) =>
+      batchLimit(async (): Promise<TriageResult[]> => {
+        const user = [
+          `You are given ${batch.length} finding${batch.length > 1 ? "s" : ""}, numbered 0..${batch.length - 1} below.`,
+          'Respond with STRICT JSON only — an ARRAY with exactly one object per finding:',
+          '[{"index":<0-based finding number>,"category":"fully_ai|partial_ai|manual|not_possible","fix":"<concise description of the code or config change that resolves that finding>","edits":[{"path":"<one of THAT finding\'s candidate file paths>","find":"<substring copied byte-for-byte from that file>","replace":"<replacement>"}]}]',
+          "Rules for `edits`:",
+          "- `index` MUST match the finding number the edit belongs to.",
+          "- `path` MUST be one of the candidate file paths listed under THAT finding. Never invent a path and never use another finding's file.",
+          "- `find` MUST be copied verbatim from the shown contents of that file, long enough to occur exactly once (include surrounding markup if needed). Never write a snippet from memory.",
+          "- Where contents are shown as excerpts, only quote text that is actually displayed — regions marked as omitted are not available.",
+          "- Return an empty `edits` array for a finding when its resolution is a content/config or WordPress admin/database change rather than a source-code edit, or when the repository does not contain the relevant code.",
+          "",
+          ...batch.map(
+            (p, i) => `===== FINDING ${i} =====\n${p.block}`,
+          ),
+        ].join("\n")
+
+        let parsed = batch.map(() => ({
+          category: "not_possible",
+          fix: "",
+          edits: [] as Edit[],
+        }))
+        try {
+          const { text } = await completeText(system, user)
+          parsed = parseTriageBatch(text, batch.length)
+        } catch {
+          // Never surface internal AI/model errors in the report. Every finding
+          // in the batch keeps its not_possible default; the reporter falls back
+          // to the finding's own title as the proposal.
+        }
+
+        return batch.map((p, i) => ({
+          f: p.f,
+          pageUrl: p.pageUrl,
+          repoCtx: p.repoCtx,
+          category: parsed[i].category,
+          fix: parsed[i].fix,
+          edits: parsed[i].edits,
+        }))
+      }),
+    ),
+  )
+  const triaged: TriageResult[] = triagedNested.flat()
+
+  // ===================== Phase B: serial apply + commit =====================
+  // Applying edits mutates the ONE git working tree + index, so this MUST run
+  // one finding at a time — never concurrently, or git corrupts. Each triage
+  // result carries everything the apply step needs from Phase A.
+  for (const t of triaged) {
+    const { f, pageUrl, repoCtx } = t
+    let category = t.category
+    let fix = t.fix
+    const edits = t.edits
 
     // Apply through applyEdit: whitespace-tolerant, refuses ambiguous or
     // oversized matches, reverts anything that fails post-write verification.
@@ -1409,10 +1531,8 @@ export async function processAiFixRunJob(job: Job) {
           diff = stdout.slice(0, MAX_DIFF_CHARS)
         } catch {}
         try {
-          // Commit each finding on its own so its diff stays isolated; the whole
-          // branch is pushed once at the end to raise a single PR.
-          await git(["add", "-A"])
-          await git(["commit", "-m", `fix: ${(f.title || f.check_factor).slice(0, 72)}`])
+          // Edit is in the working tree; all fixes are committed once, together,
+          // right before push (Task 6 — one commit per run, not per finding).
           committed++
           landed = true
         } catch (e: any) {
@@ -1502,6 +1622,27 @@ export async function processAiFixRunJob(job: Job) {
     })
   }
 
+  // --- Task 6: ONE commit for every fix that landed this run ---
+  // The fix helpers above each wrote their edit to the working tree and bumped
+  // `committed` (the count of fixes, used for the PR title/status), but none of
+  // them committed. Stage + commit them all here — two git spawns instead of the
+  // old add+commit per finding (~2×N). If this commit fails there is nothing real
+  // to push, so the push gate below skips and `commitError` explains why.
+  let commitError = ""
+  if (workDir && committed > 0) {
+    try {
+      await git(["add", "-A"])
+      await git([
+        "commit",
+        "-m",
+        `fix: AI Fix run ${runId} — ${committed} fix${committed > 1 ? "es" : ""}`,
+      ])
+    } catch (e: any) {
+      commitError = String(e?.message || e)
+      logger.error({ runId, error: commitError }, "AI Fix: single commit failed.")
+    }
+  }
+
   // --- Push the branch + open ONE pull request (real beta/post-release repo only) ---
   let prUrl = ""
   let pushed = false
@@ -1509,7 +1650,7 @@ export async function processAiFixRunJob(job: Job) {
   // of a generic "not pushed".
   let pushError = ""
   let prError = ""
-  if (willPush && workDir && committed > 0 && ownerRepo) {
+  if (willPush && workDir && committed > 0 && !commitError && ownerRepo) {
     try {
       await git(["push", "origin", branch])
       pushed = true
@@ -1524,7 +1665,7 @@ export async function processAiFixRunJob(job: Job) {
           title: `AI Fix — run ${runId} (${committed} fix${committed > 1 ? "es" : ""})`,
           head: branch,
           base: "main",
-          body: `Automated corrections from AI Fix for run ${runId}. Each commit maps to one QA finding. Review & merge to deploy (FlyWP).`,
+          body: `Automated corrections from AI Fix for run ${runId}, bundled into a single commit (per-finding mapping is recorded in QACC). Review & merge to deploy (FlyWP).`,
         }),
       })
       const j: any = await r.json().catch(() => ({}))
@@ -1553,11 +1694,13 @@ export async function processAiFixRunJob(job: Job) {
         ? "no GitHub token is configured for this client, so the branch cannot be authenticated to push"
         : committed === 0
           ? "no fix edits landed in the repository, so there was nothing to push"
-          : pushError
-            ? `the git push failed: ${pushError}`
-            : prError
-              ? `the branch pushed but the pull request could not be opened: ${prError}`
-              : "the push did not complete"
+          : commitError
+            ? `the fixes were applied but could not be committed: ${commitError}`
+            : pushError
+              ? `the git push failed: ${pushError}`
+              : prError
+                ? `the branch pushed but the pull request could not be opened: ${prError}`
+                : "the push did not complete"
 
   // --- Output 2: save the full analysis to QACC (Dry-run Data tab) ---
   try {

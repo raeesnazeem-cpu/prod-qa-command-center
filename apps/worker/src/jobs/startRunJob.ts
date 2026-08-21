@@ -6,6 +6,7 @@ import * as activityService from "../services/activityService"
 import { wpPasswordCache } from "../lib/credentialsCache"
 import { resolveThemeType } from "../lib/themeType"
 import { postTedComment } from "../lib/tedSync"
+import { acquireRunSlot, releaseRunSlot } from "../lib/runSlot"
 
 import pino from "pino"
 
@@ -50,6 +51,25 @@ export async function processStartRunJob(job: Job) {
       { runId, status: run.status },
       "Run is cancelled or paused. Aborting start_run job.",
     )
+    return
+  }
+
+  // Global concurrency guard: only ONE QA run executes at a time. Try to claim
+  // the shared run slot. If another run holds it, DON'T start now — re-enqueue
+  // this start_run with a short delay and wait our turn, so no webhook-triggered
+  // run is ever dropped, just queued. The slot is released when the run
+  // completes (markAllTedTasksCompleted) or fails (the catch below).
+  const gotSlot = await acquireRunSlot(runId)
+  if (!gotSlot) {
+    const delayMs = Math.max(
+      1000,
+      Number(process.env.RUN_SLOT_RETRY_DELAY_MS || 15000),
+    )
+    logger.info(
+      { runId, delayMs },
+      "Another QA run is already in progress; deferring this run and retrying.",
+    )
+    await qaQueue.add("start_run", job.data, { delay: delayMs })
     return
   }
 
@@ -400,6 +420,11 @@ export async function processStartRunJob(job: Job) {
     }
   } catch (error: any) {
     logger.error({ runId, error: error.message }, "Error during sitemap crawl")
+
+    // The run failed before it could reach the normal completion path, so free
+    // the global run slot here — otherwise it would stay held until it goes
+    // stale and blocks every queued run in the meantime.
+    await releaseRunSlot(runId)
 
     // Update status to failed if crawling fails
     await supabase
