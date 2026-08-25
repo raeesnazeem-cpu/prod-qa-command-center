@@ -285,7 +285,16 @@ async function resolveBetaSiteUrlFromTED(
     for (const id of ids) {
       const task = await getJson(`https://ted.growth99.com/api/tasks/${id}`)
       // Authoritative check: the task must actually be the beta_site.env template.
-      if (String(task?.automation?.templateKey || "") !== "beta_site.env") continue
+      // Reject only on a POSITIVE mismatch. TED stopped populating `automation` on
+      // GET /api/tasks/{id} (null on every task — verified 2026-08-24), so demanding
+      // a templateKey here rejected the very task the title match above had just
+      // identified, and the `continue` skipped BOTH the payload and comment lookups
+      // below — aborting every pre-release/internal-QA scan for "no beta site url"
+      // while the URL sat in the task's comment all along. When TED sends no
+      // templateKey, the timeline title match is the identity proof; when it does
+      // send one, it must still be beta_site.env.
+      const tk = String(task?.automation?.templateKey || "")
+      if (tk && tk !== "beta_site.env") continue
       const payload: string = task?.automation?.payload || ""
       // Payload first, then the task's comments (the URL is usually typed as a
       // comment — e.g. "Beta URL: https://…" — rather than baked into payload).
