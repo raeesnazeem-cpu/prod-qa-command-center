@@ -48,6 +48,7 @@ import {
   applyFooterLogoGitops,
   applyLearnMoreGitops,
   applyPrivacyPolicyGitops,
+  applySeoOgGitops,
   type GitopsFixResult,
 } from "../lib/gitopsFix"
 import { renderPrivacyPolicy } from "../lib/privacyTemplate"
@@ -213,7 +214,7 @@ function resolveGitFixToken(
 function runGitopsFix(
   f: Finding,
   workDir: string,
-  ctx: { company: string; siteUrl: string },
+  ctx: { company: string; siteUrl: string; pageUrl: string },
 ): GitopsFixResult | null {
   const text = `${f.title || ""} ${f.description || ""}`.toLowerCase()
   const guard = (fn: () => GitopsFixResult): GitopsFixResult => {
@@ -236,6 +237,11 @@ function runGitopsFix(
       return guard(() => applyFooterLogoGitops(workDir))
     case "learn_more_buttons":
       return guard(() => applyLearnMoreGitops(workDir))
+    case "meta_tags":
+    case "text_share":
+      return guard(() =>
+        applySeoOgGitops(workDir, f, { company: ctx.company, pageUrl: ctx.pageUrl }),
+      )
     case "privacy_policy": {
       // Only act on a genuine "missing/blank policy" defect.
       if (!/privacy/.test(text)) return null
@@ -459,6 +465,7 @@ export async function processAiFixRunJob(job: Job) {
       const g = runGitopsFix(f, workDir, {
         company: project?.name || "",
         siteUrl: run?.site_url || "",
+        pageUrl,
       })
       if (g) {
         if (g.applied) committed++

@@ -23,6 +23,7 @@ import {
   findElementorNodes,
   validateResource,
   mediaRefResolves,
+  ALLOWED_SEO_FIELDS,
   ResourceRef,
 } from "./gitopsResource"
 import * as fs from "fs"
@@ -355,4 +356,162 @@ export function applyLearnMoreGitops(workDir: string): GitopsFixResult {
       located.map((l) => `• ${l}`).join("\n"),
     note: "learn_more located; new copy needs review (not auto-applied)",
   }
+}
+
+// ---------------------------------------------------------------------------
+// meta_tags / text_share — Open Graph (share preview) fields in seo.json.
+//
+// Mechanical only: we make the page's EXISTING SEO title/description explicit on
+// the OG tags (rank_math_facebook_*), and point the OG image at a social-share
+// media that already lives in the repo. We never invent copy — if the source
+// value isn't in the repo, we skip that field. og:site_name maps to the
+// site-wide blogname, handled separately (only overwrites a known placeholder).
+// ---------------------------------------------------------------------------
+
+const PLACEHOLDER_SITE_NAME = /^(my site|my blog|wordpress|site title|just another.*)$/i
+
+/** Map a live page URL to its resource dir by URL slug (or front page). */
+function resolveResourceByUrl(workDir: string, pageUrl: string): ResourceRef | null {
+  const resources = listResources(workDir)
+  if (!resources.length) return null
+
+  let pathname = ""
+  try {
+    pathname = new URL(pageUrl).pathname
+  } catch {
+    pathname = pageUrl || ""
+  }
+  const segs = pathname.split("/").filter(Boolean)
+
+  // Homepage ("/") → the configured front page.
+  if (segs.length === 0) {
+    const site = readJson<any>(workDir, "resources/site.json")
+    const frontId = site?.front_page_git_id
+    if (frontId) {
+      const byId = resources.find((r) => r.resource?.git_id === frontId)
+      if (byId) return byId
+    }
+    return resources.find((r) => r.resource?.slug === "home") || null
+  }
+
+  const slug = segs[segs.length - 1].toLowerCase()
+  return resources.find((r) => String(r.resource?.slug || "").toLowerCase() === slug) || null
+}
+
+/**
+ * Write seo.json then validate the whole resource the way the site would; on any
+ * validation issue, roll the file back to its prior state and report a non-fix.
+ * (validateResource reads from disk, so we must write first to validate the new
+ * value — but never leave a bad file behind.)
+ */
+function commitSeoPostValidate(
+  workDir: string,
+  ref: ResourceRef,
+  seo: any,
+  description: string,
+  note: string,
+): GitopsFixResult {
+  // Defensive allowlist check on exactly what we're about to write.
+  for (const key of Object.keys(seo.fields || {})) {
+    if (!ALLOWED_SEO_FIELDS.has(key) && !/_image_id$/.test(key)) {
+      return miss(`refusing to write non-allowlisted seo field "${key}"`)
+    }
+  }
+  const abs = path.join(workDir, ref.seoRel)
+  const existed = fs.existsSync(abs)
+  const prior = existed ? fs.readFileSync(abs, "utf8") : null
+
+  writeJson(workDir, ref.seoRel, seo)
+  const issues = validateResource(workDir, ref)
+  if (issues.length) {
+    if (prior !== null) fs.writeFileSync(abs, prior, "utf8")
+    else fs.rmSync(abs, { force: true })
+    return miss(
+      `validation blocked write: ${issues.map((i) => `${i.file}: ${i.message}`).join("; ")}`,
+    )
+  }
+  return { applied: true, files: [ref.seoRel], description, note }
+}
+
+export function applySeoOgGitops(
+  workDir: string,
+  finding: Finding,
+  ctx: { company: string; pageUrl: string },
+): GitopsFixResult {
+  const title = (finding.title || "").toLowerCase()
+  const wantsOgTitle = /og:title|open graph title/.test(title)
+  const wantsOgDesc = /og:description|open graph description/.test(title)
+  const wantsOgImage = /og:image|open graph image/.test(title)
+  const wantsSiteName = /site name|og:site_name/.test(title)
+
+  if (!wantsOgTitle && !wantsOgDesc && !wantsOgImage && !wantsSiteName) {
+    return miss("finding is not an OG title/description/image/site-name defect")
+  }
+
+  // og:site_name is site-wide (blogname), not per-page. Only replace a known
+  // placeholder with the real business name; a real name is left untouched.
+  if (wantsSiteName && !wantsOgTitle && !wantsOgDesc && !wantsOgImage) {
+    const site = readJson<any>(workDir, "resources/site.json")
+    if (!site) return miss("no resources/site.json in repo")
+    const current = String(site.blogname || "").trim()
+    if (!ctx.company) return miss("no business name available to set og:site_name")
+    if (current && !PLACEHOLDER_SITE_NAME.test(current)) {
+      return miss(`blogname already a real business name ("${current}")`)
+    }
+    site.blogname = ctx.company
+    writeJson(workDir, "resources/site.json", site)
+    return {
+      applied: true,
+      files: ["resources/site.json"],
+      description: `Set the site name (og:site_name source) to "${ctx.company}".`,
+      note: "og:site_name blogname fix applied",
+    }
+  }
+
+  const ref = resolveResourceByUrl(workDir, ctx.pageUrl)
+  if (!ref) return miss(`could not map page URL "${ctx.pageUrl}" to a resource`)
+
+  const seo =
+    readJson<any>(workDir, ref.seoRel) || {
+      schema_version: 1,
+      provider: "rank_math",
+      fields: {},
+    }
+  if (!seo.fields || typeof seo.fields !== "object") seo.fields = {}
+
+  const changes: string[] = []
+
+  if (wantsOgTitle && !seo.fields.rank_math_facebook_title) {
+    const src = seo.fields.rank_math_title || ref.resource?.title
+    if (src) {
+      seo.fields.rank_math_facebook_title = src
+      changes.push(`OG title → "${src}"`)
+    }
+  }
+  if (wantsOgDesc && !seo.fields.rank_math_facebook_description) {
+    const src = seo.fields.rank_math_description
+    if (src) {
+      seo.fields.rank_math_facebook_description = src
+      changes.push("OG description (from the page's SEO description)")
+    }
+  }
+  if (wantsOgImage && !seo.fields.rank_math_facebook_image_id) {
+    const media = findMediaByHint(workDir, /social[-_]?share|og[-_]?image|share[-_]?image/i)
+    if (media) {
+      seo.fields.rank_math_facebook_image_id = media
+      changes.push(`OG image → ${media}`)
+    }
+  }
+
+  if (!changes.length) {
+    return miss("nothing to backfill (OG field already set, or no source value in the repo)")
+  }
+
+  return commitSeoPostValidate(
+    workDir,
+    ref,
+    seo,
+    `Backfilled social-share (Open Graph) metadata on ${ref.groupSlug}: ${changes.join("; ")}.`,
+    `seo_og fix applied to ${ref.seoRel}`,
+  )
 }
