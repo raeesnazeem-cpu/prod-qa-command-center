@@ -20,13 +20,49 @@ export function stripHtml(html: string | null | undefined): string {
     .trim()
 }
 
-/** Fetch a single TED client by id (preferred) or name (case-insensitive). */
-export async function getClient(
-  clientIdOrName: string | number | null | undefined,
-): Promise<any | null> {
-  const token = process.env.TED_API_TOKEN
-  if (!token || clientIdOrName == null) return null
+// ---------------------------------------------------------------------------
+// Client-list cache.
+//
+// GET /clients returns EVERY TED client with their notes HTML — a large payload
+// that does not change during a run. It used to be re-downloaded and re-scanned
+// on every getClient() call, and getClientNotesText / getClientDomain /
+// getReviewsWidgetId / getClientTimeline / resolveBetaSiteRepo all call it
+// internally, so a single run issued roughly 8–15 full-list downloads.
+//
+// One in-flight promise is shared by all callers and memoised for a short TTL,
+// with id/name indexes built once so lookups are O(1) instead of three linear
+// scans. The TTL is deliberately short: TED stays the source of truth, we only
+// collapse the duplicate reads inside one run.
+// ---------------------------------------------------------------------------
 
+const CLIENTS_TTL_MS = Math.max(
+  0,
+  Number(process.env.TED_CLIENTS_CACHE_TTL_MS || 5 * 60 * 1000),
+)
+
+interface ClientIndex {
+  list: any[]
+  byId: Map<string, any>
+  byName: Map<string, any>
+}
+
+let clientsCache: { at: number; promise: Promise<ClientIndex | null> } | null = null
+
+function indexClients(list: any[]): ClientIndex {
+  const byId = new Map<string, any>()
+  const byName = new Map<string, any>()
+  for (const c of list) {
+    const id = String(c?.id ?? "").trim()
+    if (id && !byId.has(id)) byId.set(id, c)
+    const name = (c?.name || "").toLowerCase().trim()
+    if (name && !byName.has(name)) byName.set(name, c)
+  }
+  return { list, byId, byName }
+}
+
+async function fetchClientIndex(): Promise<ClientIndex | null> {
+  const token = process.env.TED_API_TOKEN
+  if (!token) return null
   try {
     const r = await fetch(`${TED_BASE}/clients`, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
@@ -38,18 +74,50 @@ export async function getClient(
     const list: any[] = Array.isArray(body)
       ? body
       : body?.clients || body?.data || body?.items || []
-
-    const wantId = String(clientIdOrName).trim()
-    const wantName = wantId.toLowerCase()
-    return (
-      list.find((c) => String(c?.id) === wantId) ||
-      list.find((c) => (c?.name || "").toLowerCase().trim() === wantName) ||
-      list.find((c) => (c?.name || "").toLowerCase().includes(wantName)) ||
-      null
-    )
+    return indexClients(list)
   } catch {
     return null
   }
+}
+
+/** The client list, fetched at most once per TTL. Failures are not cached. */
+async function getClientIndex(): Promise<ClientIndex | null> {
+  const now = Date.now()
+  if (clientsCache && now - clientsCache.at < CLIENTS_TTL_MS) {
+    return clientsCache.promise
+  }
+  const entry = { at: now, promise: fetchClientIndex() }
+  clientsCache = entry
+  const result = await entry.promise
+  // Never let a failed fetch stick around for the whole TTL — the next caller
+  // should retry rather than inherit a null for five minutes.
+  if (result === null && clientsCache === entry) clientsCache = null
+  return result
+}
+
+/** Drop the cached client list (call between runs, or after a known TED write). */
+export function clearClientCache(): void {
+  clientsCache = null
+}
+
+/** Fetch a single TED client by id (preferred) or name (case-insensitive). */
+export async function getClient(
+  clientIdOrName: string | number | null | undefined,
+): Promise<any | null> {
+  if (clientIdOrName == null) return null
+
+  const idx = await getClientIndex()
+  if (!idx) return null
+
+  const wantId = String(clientIdOrName).trim()
+  const wantName = wantId.toLowerCase()
+  return (
+    idx.byId.get(wantId) ||
+    idx.byName.get(wantName) ||
+    // Substring match stays a scan — it has no useful index and is the last resort.
+    idx.list.find((c) => (c?.name || "").toLowerCase().includes(wantName)) ||
+    null
+  )
 }
 
 /** Convenience: the client's notes as plain text ("" if unavailable). */
@@ -139,6 +207,31 @@ async function tedGetJson(pathAndQuery: string): Promise<any | null> {
   }
 }
 
+// A client's timeline is read by both getClientTimeline() (project_plan,
+// paid_media) and repoFromTedTimeline() (the AI-fix repo lookup) in the same
+// run. Same short-TTL treatment as the client list: share one in-flight fetch,
+// never cache a failure.
+const timelineCache = new Map<string, { at: number; promise: Promise<any | null> }>()
+
+async function tedGetTimeline(clientId: string | number): Promise<any | null> {
+  const key = String(clientId)
+  const now = Date.now()
+  const hit = timelineCache.get(key)
+  if (hit && now - hit.at < CLIENTS_TTL_MS) return hit.promise
+
+  const entry = { at: now, promise: tedGetJson(`/clients/${key}/timeline`) }
+  timelineCache.set(key, entry)
+  const result = await entry.promise
+  if (result === null && timelineCache.get(key) === entry) timelineCache.delete(key)
+  return result
+}
+
+/** Drop all cached TED reads. Call when a run finishes. */
+export function clearTedCaches(): void {
+  clearClientCache()
+  timelineCache.clear()
+}
+
 /**
  * Resolve the beta site's GitHub repo for a client. Mirrors the betaSiteUrl
  * resolution: timeline → beta_site.env task → automation.payload has a
@@ -190,7 +283,7 @@ export async function tedTaskCommentsText(
 async function repoFromTedTimeline(
   clientId: string | number,
 ): Promise<string | null> {
-  const timeline = await tedGetJson(`/clients/${clientId}/timeline`)
+  const timeline = await tedGetTimeline(clientId)
   if (!timeline) return null
 
   // Prefer activeTasks (carry automation.templateKey); else timeline title match.
@@ -251,7 +344,7 @@ export async function getClientTimeline(
   const clientId = client?.id
   if (!clientId) return []
 
-  const tl = await tedGetJson(`/clients/${clientId}/timeline`)
+  const tl = await tedGetTimeline(clientId)
   if (!tl) return []
 
   const seen = new Set<string>()

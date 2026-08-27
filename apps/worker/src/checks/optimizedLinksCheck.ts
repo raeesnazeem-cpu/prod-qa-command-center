@@ -253,10 +253,48 @@ const logger = pino({
   },
 })
 
-// Global caches — keyed by runId so they survive across multiple jobs in a single run
+// Global caches — keyed by runId so they survive across multiple jobs in a single run.
+//
+// These MUST be released when a run finishes: the worker is long-lived, so an
+// entry left behind holds every probed URL's promise (and result) for that run
+// forever. releaseLinkCaches() is called from the run-completion path; the
+// age-based sweep below is the backstop for runs that die without completing.
 const runLinkPromises = new Map<string, Map<string, Promise<LinkCheckResult>>>()
 const runCacheMetadata = new Map<string, { createdAt: number }>()
 const runTotalExtractedLinks = new Map<string, number>()
+
+/** Drop a finished run's link caches. Idempotent; safe to call more than once. */
+export function releaseLinkCaches(runId: string): void {
+  runLinkPromises.delete(runId)
+  runCacheMetadata.delete(runId)
+  runTotalExtractedLinks.delete(runId)
+}
+
+/**
+ * Backstop for runs that never reached the completion path (crash, kill, lost
+ * job). Anything older than the TTL is dropped regardless of run state.
+ */
+const LINK_CACHE_MAX_AGE_MS = Math.max(
+  60_000,
+  Number(process.env.LINK_CACHE_MAX_AGE_MS || 30 * 60 * 1000),
+)
+
+/** Concurrent link probes. Sized for the 2 vCPU / 4 GB production box. */
+const LINK_PROBE_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.LINK_PROBE_CONCURRENCY || 12),
+)
+
+export function sweepStaleLinkCaches(now = Date.now()): number {
+  let dropped = 0
+  for (const [runId, meta] of runCacheMetadata) {
+    if (now - meta.createdAt > LINK_CACHE_MAX_AGE_MS) {
+      releaseLinkCaches(runId)
+      dropped++
+    }
+  }
+  return dropped
+}
 
 type LinkCheckResult = { status: number; reason: string } | null
 
@@ -355,14 +393,17 @@ export async function checkOptimizedLinks(
   const pageUrl = pageRecord.url
   const runId = pageRecord.run_id
 
+  // Drop caches left by runs that never completed. Cheap (a scan of a map that
+  // should normally hold one or two entries) and it bounds worst-case growth
+  // even if a completion path is ever missed.
+  sweepStaleLinkCaches()
+
   // Clear stale in-memory caches when this is a retry, but avoid race conditions
   if (runId && pageRecord.isRetry) {
     const meta = runCacheMetadata.get(runId)
     // Only clear if the cache is older than 5 minutes (meaning it's from the original run, not a concurrent retry job)
     if (meta && Date.now() - meta.createdAt > 5 * 60 * 1000) {
-      runLinkPromises.delete(runId)
-      runCacheMetadata.delete(runId)
-      runTotalExtractedLinks.delete(runId)
+      releaseLinkCaches(runId)
     }
   }
 
@@ -417,7 +458,12 @@ export async function checkOptimizedLinks(
       text: string
     }[] = []
     
-    const checkLimit = pLimit(50)
+    // Link probes are I/O-bound, but each one still costs a TLS handshake, and
+    // production runs qa-api + qa-worker on a single 2 vCPU / 4 GB box with
+    // WORKER_CONCURRENCY=3 — so 50 in flight here can mean 150 process-wide,
+    // alongside live browser contexts. 12 keeps the fan-out worthwhile without
+    // starving the browsers (override per-environment if the box grows).
+    const checkLimit = pLimit(LINK_PROBE_CONCURRENCY)
 
     if (!runLinkPromises.has(runId)) {
       runLinkPromises.set(runId, new Map())

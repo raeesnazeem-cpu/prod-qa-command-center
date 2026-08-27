@@ -1,5 +1,7 @@
 import { supabase } from "./supabase"
 import pino from "pino"
+import { releaseLinkCaches } from "../checks/optimizedLinksCheck"
+import { clearTedCaches } from "./tedClient"
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -53,6 +55,11 @@ export async function acquireRunSlot(runId: string): Promise<boolean> {
 
 // Release the global run slot if this run still owns it. Idempotent and safe to
 // call from several completion paths. Never throws.
+//
+// This is also where a run's in-memory caches are dropped: every completion
+// path funnels through here, so it is the one place guaranteed to run once a
+// run is over. The worker process is long-lived, so anything keyed by runId
+// that is not released here leaks for the lifetime of the container.
 export async function releaseRunSlot(runId: string): Promise<void> {
   try {
     const { error } = await supabase.rpc("release_run_slot", { p_run_id: runId })
@@ -61,5 +68,15 @@ export async function releaseRunSlot(runId: string): Promise<void> {
     }
   } catch (e: any) {
     logger.warn({ runId, error: e?.message }, "release_run_slot threw")
+  } finally {
+    // Cache cleanup must happen even when the RPC fails — a wedged lock is a
+    // scheduling problem, a leaked cache is a memory problem, and the second
+    // one must not be caused by the first.
+    try {
+      releaseLinkCaches(runId)
+      clearTedCaches()
+    } catch (e: any) {
+      logger.warn({ runId, error: e?.message }, "run cache cleanup failed")
+    }
   }
 }

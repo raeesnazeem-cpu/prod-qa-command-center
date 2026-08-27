@@ -1,4 +1,15 @@
 import { Finding } from "@qacc/shared"
+import pLimit from "p-limit"
+
+/**
+ * Concurrent plugin lookups. Each slug costs two independent requests (the
+ * site's readme.txt and api.wordpress.org). Kept modest: production runs
+ * qa-api + qa-worker on one 2 vCPU / 4 GB box with WORKER_CONCURRENCY=3.
+ */
+const PLUGIN_CHECK_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.PLUGIN_CHECK_CONCURRENCY || 6),
+)
 
 /**
  * =========================================================================
@@ -57,11 +68,41 @@ async function fetchText(url: string, timeoutMs = 15000): Promise<string | null>
   }
 }
 
+// Both plugin checks (`plugin_number` and `verify_plugin_updates`) discover
+// slugs from the same homepage HTML. When both are enabled they ran back to
+// back and downloaded that page twice. One short-lived memo per base URL
+// collapses it to a single fetch; the TTL keeps the check honest across runs
+// rather than pinning a site's HTML for the worker's lifetime.
+const SLUG_CACHE_TTL_MS = Math.max(
+  0,
+  Number(process.env.PLUGIN_SLUG_CACHE_TTL_MS || 5 * 60 * 1000),
+)
+const slugCache = new Map<string, { at: number; promise: Promise<string[]> }>()
+
 /**
  * Discover installed plugin slugs credential-free by scanning the homepage
  * HTML for `/wp-content/plugins/<slug>/` asset references.
  */
 async function discoverPluginSlugs(baseUrl: string): Promise<string[]> {
+  const now = Date.now()
+  const hit = slugCache.get(baseUrl)
+  if (hit && now - hit.at < SLUG_CACHE_TTL_MS) return hit.promise
+
+  const entry = { at: now, promise: discoverPluginSlugsUncached(baseUrl) }
+  slugCache.set(baseUrl, entry)
+  const result = await entry.promise.catch((e) => {
+    if (slugCache.get(baseUrl) === entry) slugCache.delete(baseUrl)
+    throw e
+  })
+  // An empty result usually means the homepage fetch failed — don't cache it,
+  // or a transient blip silently reports "no plugins" for the whole TTL.
+  if (result.length === 0 && slugCache.get(baseUrl) === entry) {
+    slugCache.delete(baseUrl)
+  }
+  return result
+}
+
+async function discoverPluginSlugsUncached(baseUrl: string): Promise<string[]> {
   const html = await fetchText(baseUrl)
   const slugs = new Set<string>()
   if (html) {
@@ -177,17 +218,37 @@ export async function checkPluginUpdatesCredentialFree(
     const indeterminate: string[] = []
     const upToDate: string[] = []
 
-    let i = 0
-    for (const slug of slugs) {
-      i++
-      if (onProgress)
-        await onProgress(
-          15 + Math.round((i / Math.max(slugs.length, 1)) * 75),
-          `Checking ${slug}...`,
-        )
-      const installed = await readInstalledVersion(url, slug)
-      const latest = await readLatestVersion(slug)
+    // Two levels of parallelism, both safe: the site's readme.txt and the
+    // wp.org registry are different hosts and independent of each other, and
+    // one slug's result never affects another's. A typical G99 site carries
+    // 20-40 plugins, so the old strictly-serial version issued 40-80
+    // back-to-back requests with 15 s timeouts.
+    //
+    // Concurrency stays modest — this shares a 2 vCPU / 4 GB box with the API
+    // and up to WORKER_CONCURRENCY other jobs.
+    const limit = pLimit(PLUGIN_CHECK_CONCURRENCY)
+    let done = 0
 
+    const results = await Promise.all(
+      slugs.map((slug) =>
+        limit(async () => {
+          const [installed, latest] = await Promise.all([
+            readInstalledVersion(url, slug),
+            readLatestVersion(slug),
+          ])
+          done++
+          if (onProgress)
+            await onProgress(
+              15 + Math.round((done / Math.max(slugs.length, 1)) * 75),
+              `Checking ${slug}...`,
+            )
+          return { slug, installed, latest }
+        }),
+      ),
+    )
+
+    // Classified in slug order so the report reads the same as before.
+    for (const { slug, installed, latest } of results) {
       if (!installed || !latest) {
         // Premium / custom plugin, or no public record → cannot assert.
         indeterminate.push(

@@ -1,19 +1,44 @@
 import { Page as PlaywrightPage } from 'playwright';
 import { Finding } from '@qacc/shared';
 
-export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Promise<Finding[]> {
-  // Use eval('import()') hack for ESM-only packages in CJS environment
-  const nspellModule = await eval('import("nspell")');
-  const dictionaryEnModule = await eval('import("dictionary-en")');
-  
-  const nspell = nspellModule.default;
-  const dictionaryEn = dictionaryEnModule.default;
+// Building an nspell instance parses the entire English hunspell dictionary —
+// tens of MB of work. It used to happen inside checkSpelling(), i.e. once per
+// page, which made spelling by far the most expensive per-page check in a
+// multi-page crawl. The dictionary is immutable and the allowlist is static, so
+// one instance is built lazily and shared by every page in the process.
+//
+// Held as a promise so concurrent callers await the same build instead of
+// racing to start their own.
+let spellPromise: Promise<any> | null = null;
 
-  const spell = nspell(dictionaryEn);
-  
-  // Tech-specific allowlist
-  const techAllowlist = ['WordPress', 'Elementor', 'plugin', 'monorepo', 'QACC', 'Vite'];
-  techAllowlist.forEach(word => spell.add(word));
+function getSpeller(): Promise<any> {
+  if (!spellPromise) {
+    spellPromise = (async () => {
+      // Use eval('import()') hack for ESM-only packages in CJS environment
+      const nspellModule = await eval('import("nspell")');
+      const dictionaryEnModule = await eval('import("dictionary-en")');
+
+      const nspell = nspellModule.default;
+      const dictionaryEn = dictionaryEnModule.default;
+
+      const spell = nspell(dictionaryEn);
+
+      // Tech-specific allowlist
+      const techAllowlist = ['WordPress', 'Elementor', 'plugin', 'monorepo', 'QACC', 'Vite'];
+      techAllowlist.forEach((word: string) => spell.add(word));
+
+      return spell;
+    })().catch((e) => {
+      // A failed build must not poison every later page.
+      spellPromise = null;
+      throw e;
+    });
+  }
+  return spellPromise;
+}
+
+export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Promise<Finding[]> {
+  const spell = await getSpeller();
 
   const allowlistSet = new Set([
     'wordpress', 'elementor', 'plugin', 'plugins', 'woocommerce', 'shopify',

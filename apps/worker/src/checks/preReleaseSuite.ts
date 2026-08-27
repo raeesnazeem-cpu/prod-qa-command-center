@@ -2,8 +2,25 @@ import { Page as PlaywrightPage } from "playwright"
 import { Finding } from "@qacc/shared"
 import axios from "axios"
 import * as cheerio from "cheerio"
+import pLimit from "p-limit"
 import type { ThemeType } from "../lib/themeType"
 import pino from "pino"
+
+/** A discovered page and its browser-tab title. */
+interface PageInfo {
+  url: string
+  title: string
+}
+
+// Bounds for the URL/tab comparison crawl. Concurrency is deliberately modest:
+// production runs qa-api + qa-worker on one 2 vCPU / 4 GB box with
+// WORKER_CONCURRENCY=3, and this check can run while browser contexts are open.
+const MAX_CRAWL_PAGES = 60
+const MAX_TITLE_FETCHES = 50
+const URL_COMPARE_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.URL_COMPARE_CONCURRENCY || 8),
+)
 
 // Header/banner selectors. Block/FSE themes expose the header as a
 // template-part (`.wp-block-template-part`, `#masthead`, `<header>`); many
@@ -2024,78 +2041,113 @@ export async function checkUrlTabComparison(
   allDevUrls: string[],
   onProgress?: (progress: number, message: string) => Promise<void>,
 ): Promise<Finding[]> {
-  const { chromium } = require("playwright")
+  // Path of a URL, normalised for comparison ("" -> "/", no trailing slash).
+  // Falls back to the raw string so an unparseable URL still compares to itself.
+  const pathOf = (u: string): string => {
+    try {
+      return new URL(u).pathname.replace(/\/$/, "") || "/"
+    } catch {
+      return u
+    }
+  }
 
-  // Helper: fetch tab title for a URL using playwright
-  // Helper: fetch tab title for a URL using playwright
-  // Helper: fetch tab title for a URL using axios & cheerio
+  const extractTitle = (html: unknown): string =>
+    cheerio.load(String(html || ""))("title").text().trim() || "(no title)"
+
+  // Fetch titles for URLs we did NOT crawl ourselves (the run supplies dev URLs
+  // without titles). Bounded fan-out rather than a serial loop — these are
+  // independent 10 s-timeout requests, so serialising them was the single
+  // slowest part of this check.
   async function fetchTabTitles(
-    browser: any, // kept for signature compatibility
     urls: string[],
     label: string,
     baseProg: number,
-  ): Promise<{ url: string; title: string }[]> {
-    const results: { url: string; title: string }[] = []
-    const targetUrls = urls.slice(0, 50)
+  ): Promise<PageInfo[]> {
+    const targetUrls = urls.slice(0, MAX_TITLE_FETCHES)
+    let done = 0
+    const limit = pLimit(URL_COMPARE_CONCURRENCY)
 
-    for (let i = 0; i < targetUrls.length; i++) {
-      const url = targetUrls[i]
-      if (onProgress) {
-        const cur = baseProg + Math.round((i / targetUrls.length) * 20)
-        await onProgress(
-          cur,
-          `Collecting ${label} title ${i + 1} of ${targetUrls.length}: ${url.replace(/^https?:\/\//, "")}`,
-        )
-      }
-      try {
-        const response = await axios.get(url, {
-          timeout: 10000,
-          validateStatus: () => true,
-        })
-        const $ = cheerio.load(response.data || "")
-        const titleText = $("title").text().trim() || "(no title)"
-        results.push({ url, title: titleText })
-      } catch (e) {
-        results.push({ url, title: "(error loading)" })
-      }
-    }
-    return results
+    return Promise.all(
+      targetUrls.map((url) =>
+        limit(async () => {
+          let title: string
+          try {
+            const response = await axios.get(url, {
+              timeout: 10000,
+              validateStatus: () => true,
+            })
+            title = extractTitle(response.data)
+          } catch {
+            title = "(error loading)"
+          }
+          done++
+          if (onProgress) {
+            const cur = baseProg + Math.round((done / targetUrls.length) * 20)
+            await onProgress(
+              cur,
+              `Collecting ${label} title ${done} of ${targetUrls.length}: ${url.replace(/^https?:\/\//, "")}`,
+            )
+          }
+          return { url, title }
+        }),
+      ),
+    )
   }
 
-  // Helper: crawl sitemap of a site and return all page URLs
-  // Helper: crawl sitemap of a site and return all page URLs using axios & cheerio
-  async function crawlSiteUrls(
-    browser: any, // kept for signature compatibility
+  // Crawl a site and return each page WITH its <title>.
+  //
+  // The title is read from the HTML we already downloaded during the crawl.
+  // Previously the crawl threw the HTML away and a second pass re-downloaded
+  // every page just to read <title>, roughly doubling the request count.
+  //
+  // Traversal is breadth-first, one level at a time, with the level fetched
+  // concurrently. `queued` is a Set: the old frontier test was
+  // `!toVisit.includes(clean)`, a linear scan run for every anchor on every
+  // page — O(links x frontier).
+  async function crawlSite(
     baseUrl: string,
     label: string,
     baseProg: number,
-  ): Promise<string[]> {
-    const visited = new Set<string>()
-    const toVisit = [baseUrl]
-    const found: string[] = []
-
+  ): Promise<PageInfo[]> {
     const baseHost = new URL(baseUrl).hostname.replace(/^www\./, "")
+    const queued = new Set<string>([baseUrl])
+    const found: PageInfo[] = []
+    let frontier: string[] = [baseUrl]
+    const limit = pLimit(URL_COMPARE_CONCURRENCY)
 
-    while (toVisit.length > 0 && found.length < 60) {
+    while (frontier.length > 0 && found.length < MAX_CRAWL_PAGES) {
       if (onProgress) {
-        const cur = baseProg + Math.round((found.length / 60) * 15)
+        const cur = baseProg + Math.round((found.length / MAX_CRAWL_PAGES) * 15)
         await onProgress(
           cur,
-          `Discovering ${label} URLs: found ${found.length}/60`,
+          `Discovering ${label} URLs: found ${found.length}/${MAX_CRAWL_PAGES}`,
         )
       }
-      const current = toVisit.shift()!
 
-      if (visited.has(current)) continue
-      visited.add(current)
-      found.push(current)
+      // Never fetch more than the remaining budget.
+      const batch = frontier.slice(0, MAX_CRAWL_PAGES - found.length)
+      frontier = frontier.slice(batch.length)
 
-      try {
-        const response = await axios.get(current, {
-          timeout: 10000,
-          validateStatus: () => true,
-        })
-        const $ = cheerio.load(response.data || "")
+      const fetched = await Promise.all(
+        batch.map((url) =>
+          limit(async () => {
+            try {
+              const response = await axios.get(url, {
+                timeout: 10000,
+                validateStatus: () => true,
+              })
+              return { url, html: String(response.data || "") }
+            } catch {
+              return { url, html: "" }
+            }
+          }),
+        ),
+      )
+
+      const nextLevel: string[] = []
+      for (const { url, html } of fetched) {
+        const $ = cheerio.load(html)
+        found.push({ url, title: extractTitle(html) })
 
         $("a[href]").each((_: any, a: any) => {
           try {
@@ -2103,7 +2155,7 @@ export async function checkUrlTabComparison(
             if (!rawHref) return
 
             // Automatically resolve relative URLs (e.g. "/about" -> "https://domain.com/about")
-            const urlObj = new URL(rawHref, current)
+            const urlObj = new URL(rawHref, url)
             const href = urlObj.href
 
             if (
@@ -2112,17 +2164,18 @@ export async function checkUrlTabComparison(
               !href.match(/\.(pdf|jpg|jpeg|png|gif|svg|zip|mp4|webm)$/i)
             ) {
               const clean = href.replace(/\/$/, "")
-              if (!visited.has(clean) && !toVisit.includes(clean)) {
-                toVisit.push(clean)
+              if (!queued.has(clean)) {
+                queued.add(clean)
+                nextLevel.push(clean)
               }
             }
           } catch (e) {
             // skip invalid URLs
           }
         })
-      } catch (e) {
-        // skip failed pages
       }
+
+      frontier = frontier.concat(nextLevel)
     }
 
     return found
@@ -2130,20 +2183,17 @@ export async function checkUrlTabComparison(
 
   let browser: any = null
   try {
-    // Step 1: Use provided dev URLs (already crawled by the run) if available, else crawl
-    const devUrls =
+    // Step 1: dev pages. URLs supplied by the run carry no titles, so those
+    // still need a title pass; a self-crawl already returns them.
+    const devPages: PageInfo[] =
       allDevUrls.length > 0
-        ? allDevUrls
-        : await crawlSiteUrls(null, devSiteUrl, "dev site", 0)
+        ? await fetchTabTitles(allDevUrls, "dev site", 0)
+        : await crawlSite(devSiteUrl, "dev site", 0)
 
-    // Step 2: Crawl live site
-    const liveUrls = await crawlSiteUrls(null, liveSiteUrl, "live site", 15)
+    // Step 2: live pages — crawled with titles in the same pass.
+    const livePages = await crawlSite(liveSiteUrl, "live site", 30)
 
-    // Step 3: Fetch tab titles for both
-    const devPages = await fetchTabTitles(null, devUrls, "dev site", 30)
-    const livePages = await fetchTabTitles(null, liveUrls, "live site", 60)
-
-    // Step 4: Build context_text as JSON string
+    // Step 3: Build context_text as JSON string
     if (onProgress) await onProgress(90, "Analyzing discrepancies...")
 
     const contextData = {
@@ -2151,42 +2201,13 @@ export async function checkUrlTabComparison(
       livePages,
     }
 
-    const devPaths = devPages.map((p) => {
-      try {
-        return new URL(p.url).pathname.replace(/\/$/, "") || "/"
-      } catch {
-        return p.url
-      }
-    })
-    const livePaths = livePages.map((p) => {
-      try {
-        return new URL(p.url).pathname.replace(/\/$/, "") || "/"
-      } catch {
-        return p.url
-      }
-    })
+    // Set membership instead of `.some()` inside `.filter()` — the diff was
+    // O(n x m) over two lists that can each hold 50+ pages.
+    const devPaths = new Set(devPages.map((p) => pathOf(p.url)))
+    const livePaths = new Set(livePages.map((p) => pathOf(p.url)))
 
-    const missingInDev = livePages.filter((lp) => {
-      const livePath = (() => {
-        try {
-          return new URL(lp.url).pathname.replace(/\/$/, "") || "/"
-        } catch {
-          return lp.url
-        }
-      })()
-      return !devPaths.some((dp) => dp === livePath)
-    })
-
-    const missingInLive = devPages.filter((dp) => {
-      const devPath = (() => {
-        try {
-          return new URL(dp.url).pathname.replace(/\/$/, "") || "/"
-        } catch {
-          return dp.url
-        }
-      })()
-      return !livePaths.some((lp) => lp === devPath)
-    })
+    const missingInDev = livePages.filter((lp) => !devPaths.has(pathOf(lp.url)))
+    const missingInLive = devPages.filter((dp) => !livePaths.has(pathOf(dp.url)))
 
     const totalMissing = missingInDev.length + missingInLive.length
 
