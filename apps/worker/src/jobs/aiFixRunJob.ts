@@ -1,4 +1,5 @@
 import { Job } from "bullmq"
+import { Finding } from "@qacc/shared"
 import { supabase } from "../lib/supabase"
 import { completeText, describeImage } from "../lib/aiFallback"
 import { resolveBetaSiteRepo, getReviewsWidgetId } from "../lib/tedClient"
@@ -39,6 +40,17 @@ import {
 } from "../lib/backendFix"
 import { applySpellingFix } from "../lib/spellingFix"
 import { detectFromRepoDir, type ThemeType } from "../lib/themeType"
+import { detectRepoKind, type RepoKind } from "../lib/gitopsResource"
+import {
+  applySpellingGitops,
+  applyBackendGitops,
+  applyFaviconGitops,
+  applyFooterLogoGitops,
+  applyLearnMoreGitops,
+  applyPrivacyPolicyGitops,
+  type GitopsFixResult,
+} from "../lib/gitopsFix"
+import { renderPrivacyPolicy } from "../lib/privacyTemplate"
 import { execFile } from "child_process"
 import { promisify } from "util"
 import fs from "fs"
@@ -189,6 +201,59 @@ function resolveGitFixToken(
   return undefined
 }
 
+/**
+ * Route a finding to a GitOps (resources/*.json) fix handler.
+ *
+ * Returns a result when this factor has a GitOps handler (applied or a
+ * located-only proposal), or null when it doesn't — in which case the caller
+ * falls through to the theme-file chain / generic LLM triage. Never throws:
+ * a handler error degrades to a non-applied result so one bad fix can't abort
+ * the run.
+ */
+function runGitopsFix(
+  f: Finding,
+  workDir: string,
+  ctx: { company: string; siteUrl: string },
+): GitopsFixResult | null {
+  const text = `${f.title || ""} ${f.description || ""}`.toLowerCase()
+  const guard = (fn: () => GitopsFixResult): GitopsFixResult => {
+    try {
+      return fn()
+    } catch (e: any) {
+      return { applied: false, files: [], description: "", note: `gitops handler threw: ${e?.message}` }
+    }
+  }
+
+  switch (f.check_factor) {
+    case "spelling":
+    case "grammar":
+      return guard(() => applySpellingGitops(workDir, f))
+    case "backend_check":
+      return guard(() => applyBackendGitops(workDir, f))
+    case "favicon":
+      return guard(() => applyFaviconGitops(workDir))
+    case "footer_logo":
+      return guard(() => applyFooterLogoGitops(workDir))
+    case "learn_more_buttons":
+      return guard(() => applyLearnMoreGitops(workDir))
+    case "privacy_policy": {
+      // Only act on a genuine "missing/blank policy" defect.
+      if (!/privacy/.test(text)) return null
+      const { html } = renderPrivacyPolicy({ company: ctx.company, url: ctx.siteUrl })
+      // Created as a draft for human review (publish is a deliberate follow-up).
+      return guard(() =>
+        applyPrivacyPolicyGitops(workDir, {
+          company: ctx.company,
+          contentHtml: html,
+          publish: false,
+        }),
+      )
+    }
+    default:
+      return null
+  }
+}
+
 export async function processAiFixRunJob(job: Job) {
   const { runId, tedTaskId } = job.data
   if (!runId || !tedTaskId) {
@@ -281,6 +346,10 @@ export async function processAiFixRunJob(job: Job) {
   // signal (it sees the actual template files). Drives the classic-vs-block
   // variant of the deterministic fixes (e.g. 404.php vs templates/404.html).
   let repoThemeType: ThemeType = "unknown"
+  // Repo shape: a GitOps content repo (resources/*.json + g99-control) takes a
+  // completely different fix path than a theme repo — the theme-file handlers
+  // write parts/footer.html / functions.php, none of which exist here.
+  let repoKind: RepoKind = "theme"
   let committed = 0
   const branch = `qacc-ai-fix/${runId}`
   const git = (args: string[]) => execFileAsync("git", ["-C", workDir, ...args], { maxBuffer: 1024 * 1024 * 16 })
@@ -297,7 +366,11 @@ export async function processAiFixRunJob(job: Job) {
       await git(["checkout", "-b", branch]) // all fixes go on one branch → one PR
       repoIndex = await buildRepoIndex(workDir)
       repoThemeType = detectFromRepoDir(workDir)
-      logger.info({ runId, files: repoIndex.length, themeType: repoThemeType, source: "github" }, "AI Fix: repo cloned and indexed")
+      repoKind = detectRepoKind(workDir)
+      logger.info(
+        { runId, files: repoIndex.length, themeType: repoThemeType, repoKind, source: "github" },
+        "AI Fix: repo cloned and indexed",
+      )
     } catch (e: any) {
       logger.error({ runId, error: e.message }, "AI Fix: clone failed; triaging without repo context.")
       workDir = ""
@@ -374,6 +447,47 @@ export async function processAiFixRunJob(job: Job) {
         lapse: true,
       })
       continue
+    }
+
+    // --- GitOps content repo: JSON/Elementor fix path --------------------
+    // In a GitOps repo the fix targets are resources/*.json + elementor.json,
+    // not theme files. Route the mechanical fixes here and `continue` so the
+    // theme-file handlers below never run against a repo that has no theme.
+    // Findings this router does not handle fall through to the generic LLM
+    // pass, which can still grep/edit the JSON resources directly.
+    if (repoKind === "gitops" && workDir) {
+      const g = runGitopsFix(f, workDir, {
+        company: project?.name || "",
+        siteUrl: run?.site_url || "",
+      })
+      if (g) {
+        if (g.applied) committed++
+        let diff = ""
+        if (g.applied && g.files.length) {
+          try {
+            const { stdout } = await git(["diff", "--unified=3", "--", ...g.files])
+            diff = stdout.slice(0, MAX_DIFF_CHARS)
+          } catch {}
+        }
+        analysis.push({
+          findingId: f.id ? String(f.id) : null,
+          check_factor: f.check_factor,
+          title: f.title || f.check_factor,
+          pageUrl,
+          category: g.applied ? "fully_ai" : "manual",
+          fix: g.description || g.note,
+          applied: g.applied,
+          // Located-but-not-applied (needs review) is a proposal, not a lapse.
+          proposed: !g.applied,
+          lapse: false,
+          filesOffered: g.files,
+          filesChanged: g.applied ? g.files : [],
+          editNotes: [g.note],
+          diff,
+        })
+        continue
+      }
+      // g === null → this factor has no GitOps handler; fall through.
     }
 
     // --- Dead/Broken Links: never auto-fix -------------------------------
