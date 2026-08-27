@@ -707,3 +707,77 @@ export async function applyChatbotGitops(
   )
   return res
 }
+
+// ---------------------------------------------------------------------------
+// false_breakpoint — LOCATE the overflowing Elementor element in the repo.
+//
+// The scan reports horizontal-overflow culprits by their LIVE DOM selector
+// (e.g. `div.elementor-element.elementor-element-5d285f8`). It does NOT auto-fix
+// the width: overflow has many causes (a fixed px width, an unwrapped image, a
+// wide table, a negative margin) and the right correction is element-specific —
+// a blanket width/overflow rule risks hiding content or breaking the design.
+//
+// What IS deterministic and additive: when a culprit selector carries the
+// Elementor element id, map it to the exact repo node (which resource file and
+// which widget) so a human edits the right JSON. Culprits with no element id
+// are theme/plugin markup with no repo target → fall through to manual.
+// ---------------------------------------------------------------------------
+
+/** Find the resource + node that owns a given Elementor element id. */
+function locateElementorNodeById(
+  workDir: string,
+  id: string,
+): { groupSlug: string; elementorRel: string; label: string } | null {
+  for (const ref of listResources(workDir)) {
+    const elementor = readJson<any>(workDir, ref.elementorRel)
+    if (!elementor) continue
+    const hit = findElementorNodes(elementor, (n) => String(n.id || "") === id)[0]
+    if (hit) {
+      const label = hit.widgetType
+        ? `${hit.widgetType} widget`
+        : hit.elType
+          ? `${hit.elType}`
+          : "element"
+      return { groupSlug: ref.groupSlug, elementorRel: ref.elementorRel, label }
+    }
+  }
+  return null
+}
+
+export function applyFalseBreakpointGitops(workDir: string, finding: Finding): GitopsFixResult {
+  const hay = `${finding.description || ""}\n${finding.context_text || ""}`
+  // Elementor wraps every element in `.elementor-element-<id>` (7–8 hex).
+  const ids = Array.from(
+    new Set(
+      Array.from(hay.matchAll(/elementor-element-([0-9a-f]{7,8})\b/gi)).map((m) => m[1].toLowerCase()),
+    ),
+  )
+  if (!ids.length) {
+    return miss(
+      "overflow culprit is not tied to an Elementor element id — review the culprit selectors listed in the finding manually",
+    )
+  }
+
+  const located: string[] = []
+  for (const id of ids) {
+    const node = locateElementorNodeById(workDir, id)
+    if (node) {
+      located.push(`${node.groupSlug} → ${node.label} (element ${id}) in ${node.elementorRel}`)
+    }
+  }
+  if (!located.length) {
+    return miss(
+      `overflow culprit element id(s) ${ids.join(", ")} not found in any repo resource (likely header/footer template or theme/plugin markup)`,
+    )
+  }
+
+  return {
+    applied: false,
+    files: [],
+    description:
+      `The horizontal-overflow culprit maps to ${located.length} Elementor element(s) in the repo. ` +
+      `Set a responsive width/overflow on the right element (the correct value is design-specific, so it is not auto-written):\n` +
+      located.map((l) => `• ${l}`).join("\n"),
+    note: `false_breakpoint located ${located.length} repo element(s); width fix needs review (not auto-applied)`,
+  }
+}

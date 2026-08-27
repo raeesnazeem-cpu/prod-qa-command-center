@@ -51,6 +51,7 @@ import {
   applySeoOgGitops,
   applyAccessibilityGitops,
   applyChatbotGitops,
+  applyFalseBreakpointGitops,
   type GitopsFixResult,
 } from "../lib/gitopsFix"
 import { renderPrivacyPolicy } from "../lib/privacyTemplate"
@@ -258,6 +259,8 @@ async function runGitopsFix(
       )
     case "accessibility_check":
       return guard(() => applyAccessibilityGitops(workDir, f))
+    case "false_breakpoint":
+      return guard(() => applyFalseBreakpointGitops(workDir, f))
     case "chatbot_consultation":
       return guardAsync(() =>
         applyChatbotGitops(workDir, f, {
