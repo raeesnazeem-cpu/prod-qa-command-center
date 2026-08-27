@@ -50,6 +50,7 @@ import {
   applyPrivacyPolicyGitops,
   applySeoOgGitops,
   applyAccessibilityGitops,
+  applyChatbotGitops,
   type GitopsFixResult,
 } from "../lib/gitopsFix"
 import { renderPrivacyPolicy } from "../lib/privacyTemplate"
@@ -212,15 +213,27 @@ function resolveGitFixToken(
  * a handler error degrades to a non-applied result so one bad fix can't abort
  * the run.
  */
-function runGitopsFix(
+async function runGitopsFix(
   f: Finding,
   workDir: string,
-  ctx: { company: string; siteUrl: string; pageUrl: string },
-): GitopsFixResult | null {
+  ctx: {
+    company: string
+    siteUrl: string
+    pageUrl: string
+    projectId?: string | null
+  },
+): Promise<GitopsFixResult | null> {
   const text = `${f.title || ""} ${f.description || ""}`.toLowerCase()
   const guard = (fn: () => GitopsFixResult): GitopsFixResult => {
     try {
       return fn()
+    } catch (e: any) {
+      return { applied: false, files: [], description: "", note: `gitops handler threw: ${e?.message}` }
+    }
+  }
+  const guardAsync = async (fn: () => Promise<GitopsFixResult>): Promise<GitopsFixResult> => {
+    try {
+      return await fn()
     } catch (e: any) {
       return { applied: false, files: [], description: "", note: `gitops handler threw: ${e?.message}` }
     }
@@ -245,6 +258,13 @@ function runGitopsFix(
       )
     case "accessibility_check":
       return guard(() => applyAccessibilityGitops(workDir, f))
+    case "chatbot_consultation":
+      return guardAsync(() =>
+        applyChatbotGitops(workDir, f, {
+          projectId: ctx.projectId,
+          projectName: ctx.company,
+        }),
+      )
     case "privacy_policy": {
       // Only act on a genuine "missing/blank policy" defect.
       if (!/privacy/.test(text)) return null
@@ -465,10 +485,11 @@ export async function processAiFixRunJob(job: Job) {
     // Findings this router does not handle fall through to the generic LLM
     // pass, which can still grep/edit the JSON resources directly.
     if (repoKind === "gitops" && workDir) {
-      const g = runGitopsFix(f, workDir, {
+      const g = await runGitopsFix(f, workDir, {
         company: project?.name || "",
         siteUrl: run?.site_url || "",
         pageUrl,
+        projectId: run?.project_id,
       })
       if (g) {
         if (g.applied) committed++

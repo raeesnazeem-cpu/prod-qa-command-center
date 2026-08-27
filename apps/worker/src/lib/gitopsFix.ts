@@ -16,6 +16,7 @@
 
 import { Finding } from "@qacc/shared"
 import { parseSpellingFinding } from "./spellingFix"
+import { getSingleScriptCodeFromBasecamp } from "./basecampClient"
 import {
   readJson,
   writeJson,
@@ -577,4 +578,132 @@ export function applyAccessibilityGitops(workDir: string, finding: Finding): Git
       (more > 0 ? `\n• …and ${more} more` : ""),
     note: `accessibility located ${emptyAlt.length} empty-alt media (alt text needs review, not auto-applied)`,
   }
+}
+
+// ---------------------------------------------------------------------------
+// chatbot_consultation — inject the Growth99 "Cliff Hanger" integration snippet
+// into the site-wide FOOTER template as an Elementor HTML widget.
+//
+// The JSON format does NOT forbid this: the reconciler stores an HTML widget's
+// settings.html verbatim (no script stripping), so a <script> survives. What
+// makes it non-trivial are three real preconditions, each caught here as a
+// clean non-fix (never a throw) rather than a broken write:
+//   1. The footer template must have a design in the repo — the one site-wide
+//      carrier. An empty/absent footer means nowhere to inject (and the
+//      validator refuses empty-elements writes anyway).
+//   2. The exact snippet + this client's business id come from Basecamp
+//      ("G99+ Cliff Hanger Code"); we never rebuild it. No message → no fix.
+//   3. Load order: the snippet is a mount <div> + a <script>. Appending the
+//      WHOLE snippet at the END of the footer guarantees the div exists and the
+//      page is parsed before the script runs — so correct placement IS the
+//      load-order fix, no separate step.
+// ---------------------------------------------------------------------------
+
+const INTEGRATION_MARK = "chatbot.growth99.com/assets/js/integration.js"
+
+/** A footer elementor_library template ref, or null. */
+function findFooterTemplate(workDir: string): ResourceRef | null {
+  const resources = listResources(workDir)
+  return (
+    resources.find((r) => {
+      const slug = String(r.resource?.slug || "").toLowerCase()
+      const title = String(r.resource?.title || "").toLowerCase()
+      const type = String(r.resource?.type || "").toLowerCase()
+      const isTemplate = r.groupSlug.startsWith("templates/") || type === "elementor_library"
+      return isTemplate && (slug === "footer" || /\bfooter\b/.test(title) || /\bfooter\b/.test(slug))
+    }) || null
+  )
+}
+
+/** A fresh 7-hex Elementor element id not already used in `taken`. */
+function newElementorId(taken: Set<string>): string {
+  for (let i = 0; i < 1000; i++) {
+    const id = Math.floor(Math.random() * 0x10000000)
+      .toString(16)
+      .padStart(7, "0")
+      .slice(0, 7)
+    if (!taken.has(id)) {
+      taken.add(id)
+      return id
+    }
+  }
+  // Astronomically unlikely fallback.
+  return (Date.now().toString(16) + "0000000").slice(0, 7)
+}
+
+export async function applyChatbotGitops(
+  workDir: string,
+  finding: Finding,
+  ctx: { projectId?: string | null; projectName?: string | null },
+): Promise<GitopsFixResult> {
+  // Only act on the "not installed" defect (script absent from the source). The
+  // "needs manual review" case means the script IS present but not rendering —
+  // a load-order/theme issue, not a missing-code one — so re-injecting would
+  // only duplicate it.
+  if (!/not installed/i.test(finding.title || "")) {
+    return miss("chatbot finding is not the 'not installed' case (nothing to inject)")
+  }
+
+  // Precondition 1: a footer template with a real design must exist.
+  const footer = findFooterTemplate(workDir)
+  if (!footer) {
+    return miss("no footer elementor template in repo — cannot inject site-wide (backfill footer first)")
+  }
+  const elementor = readJson<any>(workDir, footer.elementorRel)
+  if (!elementor || !Array.isArray(elementor.elements) || elementor.elements.length === 0) {
+    return miss(
+      "footer template has no design yet (empty elements) — backfill the footer before injecting the chatbot",
+    )
+  }
+
+  // Idempotency: bail if the integration script is already anywhere in the footer.
+  const already = findElementorNodes(
+    elementor,
+    (n) => typeof n.settings?.html === "string" && n.settings.html.includes(INTEGRATION_MARK),
+  )
+  if (already.length) {
+    return miss("Cliff Hanger integration script already present in the footer template")
+  }
+
+  // Precondition 2: the exact snippet + business id come from Basecamp.
+  const ss = await getSingleScriptCodeFromBasecamp(ctx.projectId, ctx.projectName).catch(
+    () => null,
+  )
+  if (!ss || !ss.found || !ss.snippet) {
+    return miss(
+      "Cliff Hanger code not found in Basecamp for this project — add it under 'G99+ Cliff Hanger Code' first",
+    )
+  }
+
+  // Build a new top-level container holding one HTML widget with the snippet,
+  // and APPEND it (precondition 3: last in the footer → correct load order).
+  const taken = new Set<string>()
+  findElementorNodes(elementor, (n) => {
+    if (n.id) taken.add(String(n.id))
+    return false
+  })
+  const widgetNode = {
+    id: newElementorId(taken),
+    elType: "widget",
+    settings: { html: ss.snippet },
+    elements: [] as any[],
+    widgetType: "html",
+  }
+  const containerNode = {
+    id: newElementorId(taken),
+    elType: "container",
+    settings: {},
+    elements: [widgetNode],
+    isInner: false,
+  }
+  elementor.elements.push(containerNode)
+
+  const res = commitResource(
+    workDir,
+    footer,
+    [{ rel: footer.elementorRel, value: elementor }],
+    `Installed the Growth99 chatbot (Cliff Hanger, business id ${ss.businessId}) as an HTML widget at the end of the footer template, so it loads site-wide.`,
+    `chatbot_consultation injected into ${footer.elementorRel}`,
+  )
+  return res
 }
