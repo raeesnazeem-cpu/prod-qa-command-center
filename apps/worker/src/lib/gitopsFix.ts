@@ -515,3 +515,66 @@ export function applySeoOgGitops(
     `seo_og fix applied to ${ref.seoRel}`,
   )
 }
+
+// ---------------------------------------------------------------------------
+// accessibility_check — LOCATE media that renders as <img> with no alt text.
+//
+// Alt text describes an image, so the "correct" value is a judgement call we
+// never guess. But the fixable data IS in the repo: every image's alt lives in
+// its media sidecar (resources/media/<ref>.json). We report the sidecars with
+// an empty alt so a human/AI fills them — the per-finding LLM retrieval is
+// theme-oriented and won't surface these JSON sidecars on its own.
+// ---------------------------------------------------------------------------
+
+export function applyAccessibilityGitops(workDir: string, finding: Finding): GitopsFixResult {
+  const title = (finding.title || "").toLowerCase()
+  const desc = (finding.description || "").toLowerCase()
+  // Match ONLY the real missing-alt defect ("Accessibility: Images missing alt"
+  // / "N image(s) have no alt attribute"). The passing finding ("No
+  // accessibility issues found") also lists "alt text" in its description, so a
+  // bare /alt/ test would wrongly fire on a page that passed. Labels/lang/
+  // headings have no editable JSON target here → fall through.
+  const isMissingAlt = /images missing alt/.test(title) || /no alt attribute/.test(desc)
+  if (!isMissingAlt) {
+    return miss("accessibility finding is not a missing-alt-text defect")
+  }
+
+  const dir = path.join(workDir, "resources/media")
+  let entries: string[] = []
+  try {
+    entries = fs.readdirSync(dir).filter((f) => f.endsWith(".json"))
+  } catch {
+    return miss("no resources/media directory in repo")
+  }
+
+  const emptyAlt: string[] = []
+  for (const f of entries) {
+    const sidecar = readJson<{ ref?: string; file?: string; alt?: string }>(
+      workDir,
+      `resources/media/${f}`,
+    )
+    if (!sidecar) continue
+    const alt = String(sidecar.alt ?? "").trim()
+    if (alt === "") {
+      emptyAlt.push(sidecar.file || sidecar.ref || f.replace(/\.json$/, ""))
+    }
+  }
+
+  if (!emptyAlt.length) {
+    return miss("every media sidecar already has alt text")
+  }
+
+  const CAP = 25
+  const shown = emptyAlt.slice(0, CAP)
+  const more = emptyAlt.length - shown.length
+  return {
+    applied: false,
+    files: [],
+    description:
+      `${emptyAlt.length} media file(s) in the repo have empty alt text. ` +
+      `Add descriptive alt to each media sidecar (resources/media/<ref>.json → "alt"):\n` +
+      shown.map((f) => `• ${f}`).join("\n") +
+      (more > 0 ? `\n• …and ${more} more` : ""),
+    note: `accessibility located ${emptyAlt.length} empty-alt media (alt text needs review, not auto-applied)`,
+  }
+}

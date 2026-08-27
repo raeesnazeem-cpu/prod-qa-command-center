@@ -49,6 +49,7 @@ import {
   applyLearnMoreGitops,
   applyPrivacyPolicyGitops,
   applySeoOgGitops,
+  applyAccessibilityGitops,
   type GitopsFixResult,
 } from "../lib/gitopsFix"
 import { renderPrivacyPolicy } from "../lib/privacyTemplate"
@@ -242,6 +243,8 @@ function runGitopsFix(
       return guard(() =>
         applySeoOgGitops(workDir, f, { company: ctx.company, pageUrl: ctx.pageUrl }),
       )
+    case "accessibility_check":
+      return guard(() => applyAccessibilityGitops(workDir, f))
     case "privacy_policy": {
       // Only act on a genuine "missing/blank policy" defect.
       if (!/privacy/.test(text)) return null
