@@ -55,6 +55,7 @@ import {
   applyStickyHeaderGitops,
   applyHeroMediaGitops,
   applyContactFormGitops,
+  applySingleScriptGitops,
   type GitopsFixResult,
 } from "../lib/gitopsFix"
 import { renderPrivacyPolicy } from "../lib/privacyTemplate"
@@ -271,6 +272,13 @@ async function runGitopsFix(
     case "chatbot_consultation":
       return guardAsync(() =>
         applyChatbotGitops(workDir, f, {
+          projectId: ctx.projectId,
+          projectName: ctx.company,
+        }),
+      )
+    case "single_script":
+      return guardAsync(() =>
+        applySingleScriptGitops(workDir, f, {
           projectId: ctx.projectId,
           projectName: ctx.company,
         }),
