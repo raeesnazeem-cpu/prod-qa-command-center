@@ -54,6 +54,7 @@ import {
   applyFalseBreakpointGitops,
   applyStickyHeaderGitops,
   applyHeroMediaGitops,
+  applyContactFormGitops,
   type GitopsFixResult,
 } from "../lib/gitopsFix"
 import { renderPrivacyPolicy } from "../lib/privacyTemplate"
@@ -274,6 +275,8 @@ async function runGitopsFix(
           projectName: ctx.company,
         }),
       )
+    case "contact_form":
+      return guard(() => applyContactFormGitops(workDir, f, { pageUrl: ctx.pageUrl }))
     case "privacy_policy": {
       // Only act on a genuine "missing/blank policy" defect.
       if (!/privacy/.test(text)) return null

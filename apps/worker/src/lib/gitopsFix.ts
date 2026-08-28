@@ -26,6 +26,7 @@ import {
   mediaRefResolves,
   ALLOWED_SEO_FIELDS,
   ResourceRef,
+  ElementorNode,
 } from "./gitopsResource"
 import * as fs from "fs"
 import * as path from "path"
@@ -946,4 +947,115 @@ export function applyHeroMediaGitops(workDir: string, finding: Finding): GitopsF
       located.map((l) => `• ${l}`).join("\n"),
     note: `hero_media located ${located.length} repo node(s); image edit needs review (not auto-applied)`,
   }
+}
+
+// ---------------------------------------------------------------------------
+// contact_form — replicate the client's contact form onto a page missing it, by
+// COPYING the exact block from a page that already has it.
+//
+// The check verifies the contact form is present PER PAGE (one "not found"
+// finding per page that lacks it). Rather than guess where/how to paste the
+// embed, we copy the pattern the site already uses: find a donor page whose
+// elementor already contains the Growth99 form, deep-clone the whole top-level
+// container that holds it, regenerate every element id, and insert it into the
+// target page at the same position the donor uses. This carries the client's
+// real embed AND its real placement/wrapper — no rebuilt template.
+//
+// If NO page has the form yet, there is no pattern to copy — we do NOT blind-
+// paste; the fix reports that the embed must be added to one page first (or
+// placed by hand). Gated on a populated target page; idempotent when present.
+// ---------------------------------------------------------------------------
+
+const CONTACT_FORM_MARKS = [
+  "widget-ui.growth99.com/assets/widgets/new-form.html",
+  "app.growth99.com/assets/static/form.html",
+  "app.growth99.com/assets/js/form-tracking.js",
+]
+
+const nodeHasFormMark = (n: ElementorNode): boolean =>
+  typeof n.settings?.html === "string" && CONTACT_FORM_MARKS.some((m) => n.settings!.html.includes(m))
+
+/** Deep-clone an elementor subtree, assigning every node a fresh unique id. */
+function cloneWithNewIds(node: any, taken: Set<string>): any {
+  const copy: any = Array.isArray(node) ? [] : {}
+  for (const k of Object.keys(node)) {
+    if (k === "id" && typeof node.id === "string") {
+      copy.id = newElementorId(taken)
+    } else if (k === "elements" && Array.isArray(node.elements)) {
+      copy.elements = node.elements.map((c: any) => cloneWithNewIds(c, taken))
+    } else if (node[k] && typeof node[k] === "object") {
+      copy[k] = cloneWithNewIds(node[k], taken)
+    } else {
+      copy[k] = node[k]
+    }
+  }
+  return copy
+}
+
+export function applyContactFormGitops(
+  workDir: string,
+  finding: Finding,
+  ctx: { pageUrl?: string | null },
+): GitopsFixResult {
+  if (!/not found/i.test(finding.title || "")) {
+    return miss("contact_form finding is not the 'not found' case (nothing to inject)")
+  }
+
+  const target = resolveResourceByUrl(workDir, ctx.pageUrl || "")
+  if (!target) {
+    return miss(`could not map page URL "${ctx.pageUrl || ""}" to a resource — cannot place the contact form`)
+  }
+  const elementor = readJson<any>(workDir, target.elementorRel)
+  if (!elementor || !Array.isArray(elementor.elements) || elementor.elements.length === 0) {
+    return miss(
+      `page ${target.groupSlug} has no design yet (empty elements) — backfill it before placing the form`,
+    )
+  }
+
+  // Idempotency: the embed is already on this page.
+  if (findElementorNodes(elementor, nodeHasFormMark).length) {
+    return miss(`contact form already present on ${target.groupSlug}`)
+  }
+
+  // Find a DONOR page that already has the form, and the top-level container in
+  // it that holds the form (so we copy the real wrapper + placement).
+  let donorRef: ResourceRef | null = null
+  let donorIndex = -1
+  let donorContainer: any = null
+  for (const ref of listResources(workDir)) {
+    if (ref.resourceRel === target.resourceRel) continue
+    const doc = readJson<any>(workDir, ref.elementorRel)
+    if (!doc || !Array.isArray(doc.elements)) continue
+    const idx = doc.elements.findIndex((top: any) => findElementorNodes(top, nodeHasFormMark).length)
+    if (idx >= 0) {
+      donorRef = ref
+      donorIndex = idx
+      donorContainer = doc.elements[idx]
+      break
+    }
+  }
+  if (!donorContainer) {
+    return miss(
+      "no page in the repo has the contact form yet — nothing to copy the pattern from; add the embed to one page (or place it by hand) first",
+    )
+  }
+
+  // Clone the donor's form container with fresh ids (unique within the target),
+  // and insert it at the same relative position the donor uses.
+  const taken = new Set<string>()
+  findElementorNodes(elementor, (n) => {
+    if (n.id) taken.add(String(n.id))
+    return false
+  })
+  const clone = cloneWithNewIds(donorContainer, taken)
+  const insertAt = Math.min(donorIndex, elementor.elements.length)
+  elementor.elements.splice(insertAt, 0, clone)
+
+  return commitResource(
+    workDir,
+    target,
+    [{ rel: target.elementorRel, value: elementor }],
+    `Added the contact form to ${target.groupSlug} by copying the exact block already used on ${donorRef!.groupSlug} (same embed and placement).`,
+    `contact_form copied from ${donorRef!.groupSlug} into ${target.elementorRel}`,
+  )
 }
