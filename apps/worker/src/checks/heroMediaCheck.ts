@@ -77,6 +77,22 @@ const REGION_SELECTORS_CLASSIC = [
   "[role='main'] > *:first-child",
 ]
 
+// Elementor builds the hero as a top-level Section (v2: `.elementor-top-section`)
+// or Container (v3: `.e-con.e-parent`), NOT a Cover block or a `main > section`.
+// Its background is almost always a CSS `background-image` on that node (from the
+// element's `background_image` setting), so once the region resolves to the first
+// Elementor top section the existing css-background probe finds the image. These
+// are tried FIRST on Elementor pages so they win over the generic
+// `main > div:first-of-type` (which would match the whole `.elementor` wrapper).
+const REGION_SELECTORS_ELEMENTOR = [
+  ".elementor-top-section",
+  ".elementor > .elementor-section-wrap > .elementor-top-section",
+  ".e-con.e-parent",
+  ".elementor > .e-con",
+  ".elementor-section",
+  ".e-con",
+]
+
 function regionSelectorsFor(themeType?: ThemeType): string[] {
   return themeType === "classic" ? REGION_SELECTORS_CLASSIC : REGION_SELECTORS
 }
@@ -99,7 +115,12 @@ export async function checkHeroMedia(
       await onProgress(10, "Opened browser, checking for hero media...")
 
     // --- 1. PROBE THE HERO REGION AND ITS MEDIA -----------------------------
-    const probe: HeroProbe = await page.evaluate(async (selectors) => {
+    const probe: HeroProbe = await page.evaluate(async (args) => {
+      const { base, elementor } = args
+      // On an Elementor page, resolve the hero against Elementor's own top-level
+      // section/container first, then fall back to the theme selectors.
+      const isElementor = !!document.querySelector(".elementor, [data-elementor-type]")
+      const selectors = isElementor ? [...elementor, ...base] : base
       const MAX_TOP = 1200 // a hero starts near the top of the document
       const MIN_HEIGHT = 180
 
@@ -291,7 +312,7 @@ export async function checkHeroMedia(
         cssBackground,
         brokenImages,
       }
-    }, regionSelectors)
+    }, { base: regionSelectors, elementor: REGION_SELECTORS_ELEMENTOR })
 
     // --- 2. EVIDENCE SCREENSHOT OF THE RESOLVED REGION ----------------------
     if (runId) {
