@@ -851,3 +851,99 @@ export function applyStickyHeaderGitops(workDir: string, finding: Finding): Gito
     `top_bar_sticky sticky set on ${header.elementorRel}`,
   )
 }
+
+// ---------------------------------------------------------------------------
+// hero_media — LOCATE the hero image in the repo (homepage).
+//
+// These repos hand-author the hero as raw HTML inside an Elementor HTML widget
+// (settings.html), not a structured image/background_image node. So there is no
+// safe deterministic value to auto-write — the "right" hero image is a judgement
+// call, and string-editing an HTML blob is fragile. What IS deterministic and
+// additive: pin the exact repo node (which resource, which html widget) that
+// holds the hero — matched by the failing image URL the finding carries, else by
+// hero markup markers — so a human edits the right blob. Video autoplay/stream
+// findings have no JSON target and fall through.
+// ---------------------------------------------------------------------------
+
+/** The configured front-page resource (hero check is homepage-only). */
+function findFrontPageResource(workDir: string): ResourceRef | null {
+  const resources = listResources(workDir)
+  const site = readJson<any>(workDir, "resources/site.json")
+  const frontId = site?.front_page_git_id
+  if (frontId) {
+    const byId = resources.find((r) => r.resource?.git_id === frontId)
+    if (byId) return byId
+  }
+  return resources.find((r) => String(r.resource?.slug || "").toLowerCase() === "home") || null
+}
+
+const HERO_MARKUP = /c-hero|hero__media|hero-section|hero-banner|class="[^"]*\bhero\b/i
+
+export function applyHeroMediaGitops(workDir: string, finding: Finding): GitopsFixResult {
+  const title = (finding.title || "").toLowerCase()
+  // Only image-presence / broken-image cases map to the repo. Video autoplay,
+  // stream-timing and "loading delay" findings are not JSON-fixable here.
+  const imageCase =
+    /image failed to load|background image failed to load|broken image in the hero|no hero media found|no fallback image/i.test(
+      title,
+    )
+  if (!imageCase) {
+    return miss("hero finding is not an image-presence case with a repo target")
+  }
+
+  const front = findFrontPageResource(workDir)
+  if (!front) return miss("could not resolve the front-page resource in the repo")
+  const elementor = readJson<any>(workDir, front.elementorRel)
+  if (!elementor) return miss("front-page resource has no elementor.json")
+
+  const hay = `${finding.description || ""}\n${finding.context_text || ""}`
+  const urls = Array.from(new Set(Array.from(hay.matchAll(/https?:\/\/[^\s"'<>)]+/gi)).map((m) => m[0])))
+  const site = readJson<any>(workDir, "resources/site.json")
+  const siteHost = String(site?.source_url || "").replace(/^https?:\/\//i, "").replace(/\/.*$/, "")
+
+  // 1) Prefer the html widget that literally contains the failing image URL.
+  const located: string[] = []
+  for (const url of urls) {
+    const hit = findElementorNodes(
+      elementor,
+      (n) => typeof n.settings?.html === "string" && n.settings.html.includes(url),
+    )[0]
+    if (hit) {
+      let host = ""
+      try {
+        host = new URL(url).host.replace(/^www\./i, "")
+      } catch {}
+      const foreign = host && siteHost && !host.endsWith(siteHost.replace(/^www\./i, ""))
+      located.push(
+        `${front.groupSlug} → html widget (element ${hit.id}) in ${front.elementorRel} — image ${url}` +
+          (foreign ? ` (⚠ points at ${host}, not this site — replace with a repo media ref / {{SITE_URL}})` : ""),
+      )
+    }
+  }
+
+  // 2) Otherwise, pin the hero html widget by its markup markers.
+  if (!located.length) {
+    const hero = findElementorNodes(
+      elementor,
+      (n) => typeof n.settings?.html === "string" && HERO_MARKUP.test(n.settings.html),
+    )[0]
+    if (hero) {
+      located.push(
+        `${front.groupSlug} → hero html widget (element ${hero.id}) in ${front.elementorRel} — edit the hero image in its markup`,
+      )
+    }
+  }
+
+  if (!located.length) {
+    return miss("could not pin a hero element in the front-page elementor (hero may be in a template or theme)")
+  }
+
+  return {
+    applied: false,
+    files: [],
+    description:
+      `Located the hero in the repo (the hero image is hand-authored HTML, so the correct image is set by hand — not auto-written):\n` +
+      located.map((l) => `• ${l}`).join("\n"),
+    note: `hero_media located ${located.length} repo node(s); image edit needs review (not auto-applied)`,
+  }
+}

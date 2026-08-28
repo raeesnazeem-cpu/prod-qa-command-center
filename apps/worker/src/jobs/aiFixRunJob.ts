@@ -53,6 +53,7 @@ import {
   applyChatbotGitops,
   applyFalseBreakpointGitops,
   applyStickyHeaderGitops,
+  applyHeroMediaGitops,
   type GitopsFixResult,
 } from "../lib/gitopsFix"
 import { renderPrivacyPolicy } from "../lib/privacyTemplate"
@@ -264,6 +265,8 @@ async function runGitopsFix(
       return guard(() => applyFalseBreakpointGitops(workDir, f))
     case "top_bar_sticky":
       return guard(() => applyStickyHeaderGitops(workDir, f))
+    case "hero_media":
+      return guard(() => applyHeroMediaGitops(workDir, f))
     case "chatbot_consultation":
       return guardAsync(() =>
         applyChatbotGitops(workDir, f, {
