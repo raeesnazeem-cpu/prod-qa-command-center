@@ -1,74 +1,63 @@
 import { Page as PlaywrightPage } from "playwright"
 import { Finding } from "@qacc/shared"
+import {
+  detectUserwayInSource,
+  resolveRequiredUserwayTier,
+  USERWAY_ACCOUNTS,
+  type UserwayTier,
+} from "../lib/userway"
 
 /**
- * Accessibility Check (all pages) — deterministic WCAG spot-checks via DOM:
- * images missing alt, missing <html lang>, missing <title>, unlabeled form
- * fields, controls with no accessible name, skipped heading levels.
- * Shared-page check: (page, pageRecord). check_factor "accessibility_check".
- * (Distinct from the legacy `accessibility` bundle key.)
+ * Accessibility Check — UserWay widget + HubSpot plan cross-check.
+ *
+ * G99 ships ADA compliance via a site-wide UserWay widget, in one of two shared
+ * accounts chosen by the client's HubSpot "Accessibility Plan Add-On"
+ * (`accessibility_plan_add_on`): Complete → PRO widget, Basic → FREE widget.
+ *
+ * This check reads which UserWay account (if any) is on the rendered site and
+ * compares it to the tier the HubSpot plan requires:
+ *   • correct tier installed            → PASS ("Pro"/"Basic" compliance)
+ *   • installed but wrong tier / account → FAIL "plan mismatch" (fix corrects it)
+ *   • not installed                      → FAIL "not installed" (fix adds it)
+ *   • present but no HubSpot plan to check against → PASS with a note
+ *
+ * The widget is site-wide, so this runs ONCE per run (the caller invokes it on
+ * the homepage only) and takes the TED/HubSpot client name for the plan lookup.
+ * check_factor stays "accessibility_check".
  */
+
+const tierLabel = (t: UserwayTier): string => (t === "pro" ? "Pro" : "Basic")
+
 export async function checkAccessibility(
   page: PlaywrightPage,
-  _pageRecord: any,
+  projectName?: string | null,
 ): Promise<Finding[]> {
   const pageUrl = page.url()
+  const factor = "accessibility_check"
   try {
-    const issues: { type: string; detail: string }[] = await page.evaluate(() => {
-      const out: { type: string; detail: string }[] = []
+    const html = (await page.content().catch(() => "")) || ""
+    const installed = detectUserwayInSource(html)
+    const { tier: requiredTier, planRaw } = await resolveRequiredUserwayTier(projectName).catch(
+      () => ({ tier: null as UserwayTier | null, planRaw: null as string | null }),
+    )
 
-      const imgs = Array.from(document.querySelectorAll("img"))
-      const noAlt = imgs.filter((i) => !i.hasAttribute("alt"))
-      if (noAlt.length) out.push({ type: "Images missing alt", detail: `${noAlt.length} image(s) have no alt attribute.` })
+    const ctxBase =
+      `URL: ${pageUrl}\n` +
+      `Installed: ${installed.present ? installed.tier || `unknown account (${installed.account || "?"})` : "none"}\n` +
+      `HubSpot accessibility_plan_add_on: ${planRaw || "n/a"}\n` +
+      `Required tier: ${requiredTier || "unknown"}`
 
-      if (!document.documentElement.getAttribute("lang"))
-        out.push({ type: "Missing lang", detail: "The <html> element has no lang attribute." })
-
-      if (!document.title || !document.title.trim())
-        out.push({ type: "Missing title", detail: "The document has no <title>." })
-
-      const fields = Array.from(
-        document.querySelectorAll("input:not([type=hidden]):not([type=submit]):not([type=button]), select, textarea"),
-      )
-      const unlabeled = fields.filter((el) => {
-        const id = el.getAttribute("id")
-        const hasLabel = !!(id && document.querySelector(`label[for="${id}"]`))
-        const aria = el.getAttribute("aria-label") || el.getAttribute("aria-labelledby")
-        return !hasLabel && !aria
-      })
-      if (unlabeled.length) out.push({ type: "Unlabeled form fields", detail: `${unlabeled.length} form field(s) have no associated label.` })
-
-      const controls = Array.from(document.querySelectorAll("button, a[href]"))
-      const noName = controls.filter((el) => {
-        const txt = (el.textContent || "").trim()
-        const aria = el.getAttribute("aria-label") || el.getAttribute("title")
-        const imgAlt = el.querySelector("img[alt]")?.getAttribute("alt")?.trim()
-        return !txt && !aria && !imgAlt
-      })
-      if (noName.length) out.push({ type: "Controls without a name", detail: `${noName.length} button(s)/link(s) have no accessible name.` })
-
-      const levels = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6")).map((h) => parseInt(h.tagName[1]))
-      let skip = false
-      let prev = 0
-      for (const lvl of levels) {
-        if (prev && lvl - prev > 1) {
-          skip = true
-          break
-        }
-        prev = lvl
-      }
-      if (skip) out.push({ type: "Heading order", detail: "Heading levels skip a level (e.g. h2 → h4)." })
-
-      return out
-    })
-
-    if (!issues || issues.length === 0) {
+    // --- not installed ----------------------------------------------------
+    if (!installed.present) {
+      const desc = requiredTier
+        ? `No UserWay accessibility widget is installed on the site. The HubSpot Accessibility Plan Add-On is "${planRaw}", so the ${tierLabel(requiredTier)} UserWay widget (data-account ${USERWAY_ACCOUNTS[requiredTier]}) should be installed site-wide.`
+        : `No UserWay accessibility widget is installed, and HubSpot has no Accessibility Plan Add-On for this client to say which tier to install. Confirm the plan in HubSpot.`
       return [
         {
-          check_factor: "accessibility_check",
-          title: "No accessibility issues found",
-          description: "No common WCAG issues (alt text, form labels, lang, title, control names, heading order) were detected on this page.",
-          context_text: `URL: ${pageUrl}`,
+          check_factor: factor,
+          title: "Accessibility: UserWay widget not installed",
+          description: desc,
+          context_text: ctxBase,
           screenshot_url: null,
           status: "open",
           ai_generated: false,
@@ -76,22 +65,57 @@ export async function checkAccessibility(
       ]
     }
 
-    return issues.map(
-      (r) =>
-        ({
-          check_factor: "accessibility_check",
-          title: `Accessibility: ${r.type}`,
-          description: r.detail,
-          context_text: `URL: ${pageUrl}`,
+    // --- installed, and we know the required tier -------------------------
+    if (requiredTier) {
+      if (installed.tier === requiredTier) {
+        return [
+          {
+            check_factor: factor,
+            title: `Accessibility: UserWay compliant (${tierLabel(requiredTier)})`,
+            description: `The ${tierLabel(requiredTier)} UserWay accessibility widget is installed and matches the HubSpot Accessibility Plan Add-On ("${planRaw}"). No accessibility issues found — ${tierLabel(requiredTier)} UserWay Accessibility compliance.`,
+            context_text: ctxBase,
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding,
+        ]
+      }
+      // wrong tier, or an unrecognised UserWay account → mismatch
+      const have = installed.tier
+        ? `the ${tierLabel(installed.tier)} UserWay widget`
+        : `an unrecognised UserWay account (${installed.account || "?"})`
+      return [
+        {
+          check_factor: factor,
+          title: "Accessibility: UserWay plan mismatch",
+          description: `The site has ${have}, but the HubSpot Accessibility Plan Add-On is "${planRaw}", which requires the ${tierLabel(requiredTier)} UserWay widget (data-account ${USERWAY_ACCOUNTS[requiredTier]}). Update the site to the ${tierLabel(requiredTier)} widget.`,
+          context_text: ctxBase,
           screenshot_url: null,
           status: "open",
           ai_generated: false,
-        }) as Finding,
-    )
+        } as Finding,
+      ]
+    }
+
+    // --- installed, but no HubSpot plan to verify against -----------------
+    const haveNote = installed.tier
+      ? `the ${tierLabel(installed.tier)} UserWay widget`
+      : `a UserWay widget on a non-G99 account (${installed.account || "?"})`
+    return [
+      {
+        check_factor: factor,
+        title: "Accessibility: UserWay present (plan unverified)",
+        description: `The site has ${haveNote}, but HubSpot has no Accessibility Plan Add-On for this client, so it could not be verified against the plan. No accessibility issues found — confirm the intended tier in HubSpot.`,
+        context_text: ctxBase,
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
   } catch (e: any) {
     return [
       {
-        check_factor: "accessibility_check",
+        check_factor: factor,
         title: "Accessibility Check Failed",
         description: `The accessibility check encountered an error: ${e.message}.`,
         context_text: `URL: ${pageUrl}`,

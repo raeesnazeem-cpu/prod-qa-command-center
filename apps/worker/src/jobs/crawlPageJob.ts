@@ -649,13 +649,20 @@ export async function processCrawlPageJob(job: Job) {
           }),
         )
       }
+      // Accessibility = UserWay widget + HubSpot plan check. It is site-wide, so
+      // run it ONCE per run (on the homepage only) with the client name for the
+      // HubSpot lookup — not once per crawled page.
       if (enabledChecks.includes("accessibility_check")) {
-        scheduleOnSharedPage(() =>
-          checkAccessibility(page, screenshots).catch((e) => {
-            logger.error("Accessibility check failed:", e)
-            return lapse("accessibility_check")(e)
-          }),
-        )
+        const strip = (u: string) =>
+          (u || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "").toLowerCase()
+        if (strip(pageUrl) === strip(run.site_url)) {
+          scheduleOnSharedPage(() =>
+            checkAccessibility(page, projectName).catch((e) => {
+              logger.error("Accessibility check failed:", e)
+              return lapse("accessibility_check")(e)
+            }),
+          )
+        }
       }
 
       if (enabledChecks.includes("image_quality")) {

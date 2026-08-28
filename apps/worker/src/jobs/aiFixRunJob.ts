@@ -261,7 +261,7 @@ async function runGitopsFix(
         applySeoOgGitops(workDir, f, { company: ctx.company, pageUrl: ctx.pageUrl }),
       )
     case "accessibility_check":
-      return guard(() => applyAccessibilityGitops(workDir, f))
+      return guardAsync(() => applyAccessibilityGitops(workDir, f, { projectName: ctx.company }))
     case "false_breakpoint":
       return guard(() => applyFalseBreakpointGitops(workDir, f))
     case "top_bar_sticky":

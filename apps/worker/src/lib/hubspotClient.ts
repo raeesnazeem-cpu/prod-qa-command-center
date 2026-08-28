@@ -31,6 +31,7 @@ const COMPANY_PROPS = [
   "domain",
   "website",
   "growth99_plan",
+  "accessibility_plan_add_on",
   "paid_search_strategist",
   "seo_strategist",
   "select_if_deal_has_lead_generation",
@@ -86,6 +87,7 @@ export interface HubspotClientData {
   name: string
   domain: string | null
   plan: string | null // growth99_plan
+  accessibilityPlan: string | null // accessibility_plan_add_on: "Complete" | "Basic"
   paidSearchStrategist: string | null // resolved owner name, else raw id
   hasLeadGenFlag: boolean // select_if_deal_has_lead_generation === "true"
   details: {
@@ -165,6 +167,7 @@ export async function resolveHubspotClientData(
     name: p.name || clientName || "",
     domain: p.domain || domain || null,
     plan: (p.growth99_plan || "").trim() || null,
+    accessibilityPlan: (p.accessibility_plan_add_on || "").trim() || null,
     paidSearchStrategist: await ownerName(p.paid_search_strategist),
     hasLeadGenFlag: String(p.select_if_deal_has_lead_generation) === "true",
     details: {

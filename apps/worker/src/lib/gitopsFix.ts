@@ -18,6 +18,12 @@ import { Finding } from "@qacc/shared"
 import { parseSpellingFinding } from "./spellingFix"
 import { getSingleScriptCodeFromBasecamp } from "./basecampClient"
 import {
+  resolveRequiredUserwayTier,
+  userwaySnippet,
+  USERWAY_ACCOUNTS,
+  tierLabel,
+} from "./userway"
+import {
   readJson,
   writeJson,
   listResources,
@@ -519,65 +525,80 @@ export function applySeoOgGitops(
 }
 
 // ---------------------------------------------------------------------------
-// accessibility_check — LOCATE media that renders as <img> with no alt text.
+// accessibility_check — install/correct the UserWay widget as a global script.
 //
-// Alt text describes an image, so the "correct" value is a judgement call we
-// never guess. But the fixable data IS in the repo: every image's alt lives in
-// its media sidecar (resources/media/<ref>.json). We report the sidecars with
-// an empty alt so a human/AI fills them — the per-finding LLM retrieval is
-// theme-oriented and won't surface these JSON sidecars on its own.
+// G99 ships ADA compliance via a site-wide UserWay widget, tier chosen by the
+// client's HubSpot "Accessibility Plan Add-On" (Complete → PRO, Basic → FREE).
+// The scan flags when the site has the wrong tier or none; this fix writes the
+// correct widget as an Elementor custom-code snippet (body end, all pages) —
+// the same resource shape the repo already uses for global JS
+// (resources/cpt/elementor_snippet/<slug>/cpt.json). It is self-contained, so
+// it lands even when the header/footer templates are empty.
+//
+// The required tier comes from HubSpot (source of truth), keyed on the project
+// name — never from the finding text. No HubSpot plan → we can't pick a tier,
+// so it's a clean non-fix.
 // ---------------------------------------------------------------------------
 
-export function applyAccessibilityGitops(workDir: string, finding: Finding): GitopsFixResult {
+const USERWAY_SNIPPET_DIR = "resources/cpt/elementor_snippet/userway-accessibility"
+
+export async function applyAccessibilityGitops(
+  workDir: string,
+  finding: Finding,
+  ctx: { projectName?: string | null },
+): Promise<GitopsFixResult> {
   const title = (finding.title || "").toLowerCase()
-  const desc = (finding.description || "").toLowerCase()
-  // Match ONLY the real missing-alt defect ("Accessibility: Images missing alt"
-  // / "N image(s) have no alt attribute"). The passing finding ("No
-  // accessibility issues found") also lists "alt text" in its description, so a
-  // bare /alt/ test would wrongly fire on a page that passed. Labels/lang/
-  // headings have no editable JSON target here → fall through.
-  const isMissingAlt = /images missing alt/.test(title) || /no alt attribute/.test(desc)
-  if (!isMissingAlt) {
-    return miss("accessibility finding is not a missing-alt-text defect")
+  // Act only on the two real defects: wrong tier or not installed.
+  const isDefect = /not installed/.test(title) || /mismatch/.test(title)
+  if (!isDefect) {
+    return miss("accessibility finding is not a UserWay not-installed/mismatch defect")
   }
 
-  const dir = path.join(workDir, "resources/media")
-  let entries: string[] = []
-  try {
-    entries = fs.readdirSync(dir).filter((f) => f.endsWith(".json"))
-  } catch {
-    return miss("no resources/media directory in repo")
-  }
-
-  const emptyAlt: string[] = []
-  for (const f of entries) {
-    const sidecar = readJson<{ ref?: string; file?: string; alt?: string }>(
-      workDir,
-      `resources/media/${f}`,
+  const { tier, planRaw } = await resolveRequiredUserwayTier(ctx.projectName).catch(() => ({
+    tier: null as "pro" | "free" | null,
+    planRaw: null as string | null,
+  }))
+  if (!tier) {
+    return miss(
+      "HubSpot has no Accessibility Plan Add-On for this client — cannot decide PRO vs FREE UserWay tier",
     )
-    if (!sidecar) continue
-    const alt = String(sidecar.alt ?? "").trim()
-    if (alt === "") {
-      emptyAlt.push(sidecar.file || sidecar.ref || f.replace(/\.json$/, ""))
-    }
   }
 
-  if (!emptyAlt.length) {
-    return miss("every media sidecar already has alt text")
+  const relPath = `${USERWAY_SNIPPET_DIR}/cpt.json`
+  const account = USERWAY_ACCOUNTS[tier]
+
+  // Idempotency: already the correct tier's account installed via this snippet.
+  const existing = readJson<any>(workDir, relPath)
+  if (existing && typeof existing.content === "string" && existing.content.includes(`data-account="${account}"`)) {
+    return miss(`UserWay ${tierLabel(tier)} widget already installed (data-account ${account})`)
   }
 
-  const CAP = 25
-  const shown = emptyAlt.slice(0, CAP)
-  const more = emptyAlt.length - shown.length
+  const snippet = {
+    schema_version: 1,
+    git_id: "cpt-elementor-snippet-userway-accessibility",
+    type: "elementor_snippet",
+    slug: "userway-accessibility",
+    title: "UserWay Accessibility Widget",
+    status: "publish",
+    content: userwaySnippet(tier),
+    meta: {
+      _elementor_location: "body_end",
+      _elementor_conditions: ["include/general"],
+    },
+    media: [] as any[],
+  }
+  // Guard: never write empty/garbage content (would ship a broken global script).
+  if (!snippet.content.includes(account)) {
+    return miss("internal: generated UserWay snippet is missing the account id")
+  }
+  writeJson(workDir, relPath, snippet)
+
+  const verb = existing ? "Corrected" : "Installed"
   return {
-    applied: false,
-    files: [],
-    description:
-      `${emptyAlt.length} media file(s) in the repo have empty alt text. ` +
-      `Add descriptive alt to each media sidecar (resources/media/<ref>.json → "alt"):\n` +
-      shown.map((f) => `• ${f}`).join("\n") +
-      (more > 0 ? `\n• …and ${more} more` : ""),
-    note: `accessibility located ${emptyAlt.length} empty-alt media (alt text needs review, not auto-applied)`,
+    applied: true,
+    files: [relPath],
+    description: `${verb} the ${tierLabel(tier)} UserWay accessibility widget (data-account ${account}) as a site-wide Elementor custom-code snippet (loads at body end on all pages), matching the HubSpot Accessibility Plan Add-On ("${planRaw}").`,
+    note: `accessibility_check UserWay ${tier} snippet written to ${relPath}`,
   }
 }
 
