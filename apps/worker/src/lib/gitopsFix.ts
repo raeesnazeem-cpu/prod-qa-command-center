@@ -781,3 +781,73 @@ export function applyFalseBreakpointGitops(workDir: string, finding: Finding): G
     note: `false_breakpoint located ${located.length} repo element(s); width fix needs review (not auto-applied)`,
   }
 }
+
+// ---------------------------------------------------------------------------
+// top_bar_sticky — make the header sticky in the header template.
+//
+// The check measures whether the header stays pinned on scroll. When it does
+// NOT, the fix is deterministic: Elementor pins a header by setting motion-
+// effect keys on the header's outermost section/container — `sticky: "top"`
+// and `sticky_on: ["desktop","tablet","mobile"]` — which the reconciler writes
+// straight through. We set them on the header template's top-level node,
+// leaving every element id and existing setting untouched.
+//
+// Gated like the chatbot fix: the header template must have a design in the
+// repo (empty header = nothing to pin, and the validator refuses empty writes).
+// ---------------------------------------------------------------------------
+
+/** A header elementor_library template ref, or null (never the footer). */
+function findHeaderTemplate(workDir: string): ResourceRef | null {
+  return (
+    listResources(workDir).find((r) => {
+      const slug = String(r.resource?.slug || "").toLowerCase()
+      const title = String(r.resource?.title || "").toLowerCase()
+      const type = String(r.resource?.type || "").toLowerCase()
+      const isTemplate = r.groupSlug.startsWith("templates/") || type === "elementor_library"
+      const isHeader = slug === "header" || /\bheader\b/.test(title) || /\bheader\b/.test(slug)
+      const isFooter = /\bfooter\b/.test(slug) || /\bfooter\b/.test(title)
+      return isTemplate && isHeader && !isFooter
+    }) || null
+  )
+}
+
+export function applyStickyHeaderGitops(workDir: string, finding: Finding): GitopsFixResult {
+  const signal = `${finding.description || ""}\n${finding.context_text || ""}`.toLowerCase()
+  // Only act when the check actually measured "not sticky". "Pinned" / an
+  // unmeasured ("n/a") run is not a confirmed defect → don't guess.
+  const notSticky = /not pinned|did not stay pinned|did not stay/i.test(signal)
+  const isPinned = /stayed pinned|sticky observed: pinned/i.test(signal)
+  if (!notSticky || isPinned) {
+    return miss("header stickiness was not measured as failing (nothing to fix)")
+  }
+
+  const header = findHeaderTemplate(workDir)
+  if (!header) {
+    return miss("no header elementor template in repo — cannot set sticky (backfill header first)")
+  }
+  const elementor = readJson<any>(workDir, header.elementorRel)
+  if (!elementor || !Array.isArray(elementor.elements) || elementor.elements.length === 0) {
+    return miss(
+      "header template has no design yet (empty elements) — backfill the header before making it sticky",
+    )
+  }
+
+  const top = elementor.elements[0]
+  if (!top || typeof top !== "object") {
+    return miss("header template's top-level node is not an element")
+  }
+  top.settings = top.settings || {}
+  if (top.settings.sticky) {
+    return miss(`header top element already has sticky="${top.settings.sticky}"`)
+  }
+  top.settings.sticky = "top"
+  top.settings.sticky_on = ["desktop", "tablet", "mobile"]
+
+  return commitResource(
+    workDir,
+    header,
+    [{ rel: header.elementorRel, value: elementor }],
+    "Made the header sticky: set the header container to pin to the top on scroll (desktop, tablet and mobile) in the header template.",
+    `top_bar_sticky sticky set on ${header.elementorRel}`,
+  )
+}
