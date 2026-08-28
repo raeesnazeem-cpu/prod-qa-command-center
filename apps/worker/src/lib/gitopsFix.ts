@@ -567,10 +567,16 @@ export async function applyAccessibilityGitops(
   const relPath = `${USERWAY_SNIPPET_DIR}/cpt.json`
   const account = USERWAY_ACCOUNTS[tier]
 
-  // Idempotency: already the correct tier's account installed via this snippet.
+  // Idempotency: skip only when the correct tier's account is installed AND the
+  // priority is already 10 (a wrong priority still gets corrected).
   const existing = readJson<any>(workDir, relPath)
-  if (existing && typeof existing.content === "string" && existing.content.includes(`data-account="${account}"`)) {
-    return miss(`UserWay ${tierLabel(tier)} widget already installed (data-account ${account})`)
+  if (
+    existing &&
+    typeof existing.content === "string" &&
+    existing.content.includes(`data-account="${account}"`) &&
+    existing.menu_order === 10
+  ) {
+    return miss(`UserWay ${tierLabel(tier)} widget already installed at priority 10 (data-account ${account})`)
   }
 
   const snippet = {
@@ -580,6 +586,9 @@ export async function applyAccessibilityGitops(
     slug: "userway-accessibility",
     title: "UserWay Accessibility Widget",
     status: "publish",
+    // Elementor custom-code priority is stored as the post menu_order; the
+    // widget must load at priority 10.
+    menu_order: 10,
     content: userwaySnippet(tier),
     meta: {
       _elementor_location: "body_end",
