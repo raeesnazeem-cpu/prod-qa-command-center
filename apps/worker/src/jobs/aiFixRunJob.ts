@@ -56,6 +56,7 @@ import {
   applyHeroMediaGitops,
   applyContactFormGitops,
   applySingleScriptGitops,
+  applyReviewsWidgetGitops,
   type GitopsFixResult,
 } from "../lib/gitopsFix"
 import { renderPrivacyPolicy } from "../lib/privacyTemplate"
@@ -279,6 +280,16 @@ async function runGitopsFix(
     case "single_script":
       return guardAsync(() =>
         applySingleScriptGitops(workDir, f, {
+          projectId: ctx.projectId,
+          projectName: ctx.company,
+        }),
+      )
+    case "project_plan":
+      // Only the Accelerator reviews-widget defect has a GitOps fix; other
+      // project_plan findings (plan confirmation) fall through.
+      if (!/reviews widget missing/i.test(f.title || "")) return null
+      return guardAsync(() =>
+        applyReviewsWidgetGitops(workDir, f, {
           projectId: ctx.projectId,
           projectName: ctx.company,
         }),

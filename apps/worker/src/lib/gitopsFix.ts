@@ -16,7 +16,12 @@
 
 import { Finding } from "@qacc/shared"
 import { parseSpellingFinding } from "./spellingFix"
-import { getSingleScriptCodeFromBasecamp } from "./basecampClient"
+import {
+  getSingleScriptCodeFromBasecamp,
+  getReviewsWidgetFromBasecamp,
+} from "./basecampClient"
+import { getReviewsWidgetId } from "./tedClient"
+import { reviewsEmbedSnippet } from "./reviewsWidgetFix"
 import {
   resolveRequiredUserwayTier,
   userwaySnippet,
@@ -1089,5 +1094,161 @@ export function applyContactFormGitops(
     [{ rel: target.elementorRel, value: elementor }],
     `Added the contact form to ${target.groupSlug} by copying the exact block already used on ${donorRef!.groupSlug} (same embed and placement).`,
     `contact_form copied from ${donorRef!.groupSlug} into ${target.elementorRel}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// project_plan → reviews widget — install the Growth99 reviews widget on the
+// reviews page (Accelerator-plan sites).
+//
+// The plan check flags "Reviews widget missing (Accelerator plan)" when the
+// /reviews page has no widget. The exact embed (id/bid differ per client) comes
+// from Basecamp "Review and Reputation Code" (the ReviewsWidget iframe URL),
+// TED notes as fallback — never rebuilt. We place it as an Elementor HTML widget
+// on the reviews page (creating the page if it doesn't exist). Idempotent when
+// the widget is already there; a missing id/bid is a clean non-fix.
+// ---------------------------------------------------------------------------
+
+const REVIEWS_MARK = "reviews.growth99.com/widget"
+
+function findReviewsPage(workDir: string): ResourceRef | null {
+  return (
+    listResources(workDir).find(
+      (r) =>
+        String(r.resource?.type || "").toLowerCase() === "page" &&
+        String(r.resource?.slug || "").toLowerCase() === "reviews",
+    ) || null
+  )
+}
+
+/** Build a top-level container holding one HTML widget with the centered embed. */
+function reviewsContainer(html: string, taken: Set<string>): any {
+  return {
+    id: newElementorId(taken),
+    elType: "container",
+    settings: {},
+    elements: [
+      {
+        id: newElementorId(taken),
+        elType: "widget",
+        settings: { html },
+        elements: [],
+        widgetType: "html",
+      },
+    ],
+    isInner: false,
+  }
+}
+
+export async function applyReviewsWidgetGitops(
+  workDir: string,
+  finding: Finding,
+  ctx: { projectId?: string | null; projectName?: string | null },
+): Promise<GitopsFixResult> {
+  if (!/reviews widget missing/i.test(finding.title || "")) {
+    return miss("project_plan finding is not the reviews-widget-missing defect")
+  }
+
+  // Widget id/bid: Basecamp "Review and Reputation Code", then TED notes.
+  let widget = await getReviewsWidgetFromBasecamp(ctx.projectId, ctx.projectName).catch(() => null)
+  if (!widget?.id) widget = await getReviewsWidgetId(ctx.projectName).catch(() => null)
+  if (!widget?.id) {
+    return miss(
+      "reviews widget id/bid not found in Basecamp ('Review and Reputation Code') or TED — add it first",
+    )
+  }
+
+  const embed = reviewsEmbedSnippet(widget.id, widget.bid)
+  const html = `<div style="max-width:1100px;margin:0 auto;text-align:center">\n${embed}\n</div>`
+
+  const page = findReviewsPage(workDir)
+
+  // --- reviews page exists: populate/append, then validate post-write -------
+  if (page) {
+    const elementor =
+      readJson<any>(workDir, page.elementorRel) || {
+        schema_version: 1,
+        elementor_version: "3.0.0",
+        document_settings: {},
+        elements: [],
+      }
+    if (!Array.isArray(elementor.elements)) elementor.elements = []
+
+    if (
+      findElementorNodes(
+        elementor,
+        (n) => typeof n.settings?.html === "string" && n.settings.html.includes(REVIEWS_MARK),
+      ).length
+    ) {
+      return miss(`reviews widget already present on ${page.groupSlug}`)
+    }
+
+    const taken = new Set<string>()
+    findElementorNodes(elementor, (n) => {
+      if (n.id) taken.add(String(n.id))
+      return false
+    })
+    elementor.elements.push(reviewsContainer(html, taken))
+
+    // commitResource validates the OLD (empty) elementor on disk before writing,
+    // which would wrongly block populating an empty reviews page — so write then
+    // validate, rolling back on any issue.
+    const abs = path.join(workDir, page.elementorRel)
+    const prior = fs.existsSync(abs) ? fs.readFileSync(abs, "utf8") : null
+    writeJson(workDir, page.elementorRel, elementor)
+    const issues = validateResource(workDir, page)
+    if (issues.length) {
+      if (prior !== null) fs.writeFileSync(abs, prior, "utf8")
+      else fs.rmSync(abs, { force: true })
+      return miss(
+        `validation blocked write: ${issues.map((i) => `${i.file}: ${i.message}`).join("; ")}`,
+      )
+    }
+    return {
+      applied: true,
+      files: [page.elementorRel],
+      description: `Added the Growth99 reviews widget (id ${widget.id}) to ${page.groupSlug} as an Elementor HTML widget.`,
+      note: `reviews widget injected into ${page.elementorRel}`,
+    }
+  }
+
+  // --- reviews page missing: create it with the widget ----------------------
+  const slug = "reviews"
+  const dirRel = `resources/pages/${slug}`
+  const taken = new Set<string>()
+  const resource = {
+    schema_version: 1,
+    git_id: "page-reviews",
+    type: "page",
+    slug,
+    title: "Reviews",
+    status: "publish",
+    publication_approved: true,
+    excerpt: "",
+    menu_order: 0,
+    content: "",
+  }
+  const elementor = {
+    schema_version: 1,
+    elementor_version: "3.0.0",
+    document_settings: {},
+    elements: [reviewsContainer(html, taken)],
+  }
+  const ref: ResourceRef = {
+    groupSlug: `pages/${slug}`,
+    resourceRel: `${dirRel}/resource.json`,
+    elementorRel: `${dirRel}/elementor.json`,
+    seoRel: `${dirRel}/seo.json`,
+    resource,
+  }
+  return commitResource(
+    workDir,
+    ref,
+    [
+      { rel: ref.resourceRel, value: resource },
+      { rel: ref.elementorRel, value: elementor },
+    ],
+    `Created the reviews page with the Growth99 reviews widget (id ${widget.id}).`,
+    `reviews page created at ${dirRel}`,
   )
 }
