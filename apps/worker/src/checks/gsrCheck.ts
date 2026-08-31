@@ -1,6 +1,10 @@
 import { Page as PlaywrightPage } from "playwright"
 import { Finding } from "@qacc/shared"
 
+// How many SERP pages to walk. Previously the while-loop said 15 while the
+// pagination guard said 5, so 5 was the real bound and 15 was misleading.
+const MAX_SERP_PAGES = 5
+
 export async function checkGsr(
   page: PlaywrightPage,
   pageRecord: any,
@@ -31,10 +35,11 @@ export async function checkGsr(
     if (onProgress) await onProgress(70, "Waiting for results to load...")
 
     const serps: any[] = []
+    const seenSerpUrls = new Set<string>()
     let hasNextPage = true
     let pagesChecked = 0
 
-    while (hasNextPage && pagesChecked < 15) {
+    while (hasNextPage && pagesChecked < MAX_SERP_PAGES) {
       pagesChecked++
 
       await newPage.waitForTimeout(3000)
@@ -115,9 +120,12 @@ export async function checkGsr(
         return results
       })
 
-      // Deduplicate and push
+      // Deduplicate and push. Membership is a Set of URLs rather than a
+      // `serps.find(...)` scan per result — with up to 5 pages of ~100 results
+      // the old form ran on the order of 125k comparisons.
       pageSerps.forEach((s: any) => {
-        if (!serps.find((r) => r.url === s.url)) {
+        if (!seenSerpUrls.has(s.url)) {
+          seenSerpUrls.add(s.url)
           serps.push(s)
         }
       })
@@ -145,7 +153,7 @@ export async function checkGsr(
         return nextLink ? getGoogleUrl(nextLink.href) : null
       })
 
-      if (nextUrl && pagesChecked < 5) {
+      if (nextUrl && pagesChecked < MAX_SERP_PAGES) {
         if (onProgress) await onProgress(85, `Loading next page...`)
         const scraperNextUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(nextUrl)}&premium=true`
         await newPage.goto(scraperNextUrl, {

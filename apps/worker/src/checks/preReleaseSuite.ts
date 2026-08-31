@@ -2,8 +2,25 @@ import { Page as PlaywrightPage } from "playwright"
 import { Finding } from "@qacc/shared"
 import axios from "axios"
 import * as cheerio from "cheerio"
+import pLimit from "p-limit"
 import type { ThemeType } from "../lib/themeType"
 import pino from "pino"
+
+/** A discovered page and its browser-tab title. */
+interface PageInfo {
+  url: string
+  title: string
+}
+
+// Bounds for the URL/tab comparison crawl. Concurrency is deliberately modest:
+// production runs qa-api + qa-worker on one 2 vCPU / 4 GB box with
+// WORKER_CONCURRENCY=3, and this check can run while browser contexts are open.
+const MAX_CRAWL_PAGES = 60
+const MAX_TITLE_FETCHES = 50
+const URL_COMPARE_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.URL_COMPARE_CONCURRENCY || 8),
+)
 
 // Header/banner selectors. Block/FSE themes expose the header as a
 // template-part (`.wp-block-template-part`, `#masthead`, `<header>`); many
@@ -456,8 +473,25 @@ export async function checkFooterLogo(
 
         await footer.scrollIntoViewIfNeeded().catch(() => {})
 
-        // 5s delay AFTER scrolling to let the logo and dynamic content load
-        await newPage.waitForTimeout(5000)
+        // Wait for the footer's own images to finish decoding rather than a
+        // blind 5 s — the logo is the thing we're screenshotting, so wait on it.
+        // Capped at 3 s so a perpetually-loading tracker pixel can't stall us.
+        await newPage
+          .waitForFunction(
+            () => {
+              const f =
+                document.querySelector("footer") ||
+                document.querySelector(
+                  '[role="contentinfo"], .site-footer, .footer, #footer',
+                )
+              if (!f) return true
+              return Array.from(f.querySelectorAll("img")).every(
+                (img) => (img as HTMLImageElement).complete,
+              )
+            },
+            { timeout: 3000 },
+          )
+          .catch(() => {})
 
         // Capture only the footer element
         const buffer = await footer.screenshot()
@@ -669,8 +703,11 @@ export async function checkSingleScript(
     if (onProgress)
       await onProgress(30, `Loading page and waiting for external scripts...`)
 
+    // domcontentloaded, not networkidle: a WP site with chat/analytics widgets
+    // rarely goes idle, so networkidle just burns the full 30 s timeout. The
+    // script-request poll below is the real "external scripts settled" signal.
     await newPage
-      .goto(url, { waitUntil: "networkidle", timeout: 30000 })
+      .goto(url, { waitUntil: "domcontentloaded", timeout: 30000 })
       .catch(() => {})
 
     await newPage.evaluate(() => window.scrollBy(0, 500)).catch(() => {})
@@ -678,15 +715,14 @@ export async function checkSingleScript(
       .waitForSelector("#feature-buttons", { timeout: 15000 })
       .catch(() => {})
 
-    // Wait for JS network requests to settle (max 15s)
+    // Wait for JS network requests to settle (max 15s). This is what actually
+    // gives the integration loader time to inject its sub-scripts, so the blind
+    // 20 s sleep that used to follow was pure dead time on top of a real signal.
     let waited = 0
     while (activeJsRequests > 0 && waited < 15000) {
       await newPage.waitForTimeout(500)
       waited += 500
     }
-
-    // Give external scripts 20 more seconds to parse, inject sub-scripts, and modify the DOM
-    await newPage.waitForTimeout(20000)
 
     // Desktop screenshot
     const desktopBuffer = await newPage.screenshot({ fullPage: false })
@@ -698,7 +734,7 @@ export async function checkSingleScript(
     // Tablet screenshot
     if (onProgress) await onProgress(50, `Capturing tablet view...`)
     await newPage.setViewportSize({ width: 768, height: 1024 })
-    await newPage.waitForTimeout(1000) // allow layout to shift
+    await newPage.waitForTimeout(250) // brief settle after viewport reflow
     const tabletBuffer = await newPage.screenshot({ fullPage: false })
     tabletUrl = await uploadScreenshot(
       tabletBuffer,
@@ -708,7 +744,7 @@ export async function checkSingleScript(
     // Mobile screenshot
     if (onProgress) await onProgress(60, `Capturing mobile view...`)
     await newPage.setViewportSize({ width: 375, height: 812 })
-    await newPage.waitForTimeout(1000) // allow layout to shift
+    await newPage.waitForTimeout(250) // brief settle after viewport reflow
     const mobileBuffer = await newPage.screenshot({ fullPage: false })
     mobileUrl = await uploadScreenshot(
       mobileBuffer,
@@ -857,10 +893,14 @@ export async function checkTopBarAndStickyHeader(
       await onProgress(10, "Navigating to homepage to check top bar...")
 
     await newPage
-      .goto(url, { waitUntil: "networkidle", timeout: 30000 })
+      .goto(url, { waitUntil: "domcontentloaded", timeout: 30000 })
       .catch(() => {})
 
-    await newPage.waitForTimeout(5000)
+    // Wait for the header itself rather than a blind 5 s — it's what we
+    // screenshot and measure. Capped so a headerless page fails fast.
+    await newPage
+      .waitForSelector(headerSelector, { timeout: 5000, state: "attached" })
+      .catch(() => {})
     if (onProgress) await onProgress(40, "Taking screenshot of the header...")
 
     const headerElement = newPage
@@ -1565,9 +1605,18 @@ export async function checkChatbotAndConsultation(
 
   const factor = "chatbot_consultation"
 
-  // 1. Let every JS-injected widget settle, then screenshot the loaded page.
-  await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {})
-  await page.waitForTimeout(5000)
+  // 1. Let the JS-injected widget settle, then screenshot the loaded page.
+  // The launcher is injected by integration.js after it loads, so wait for the
+  // launcher (or its script) to appear rather than a 20 s networkidle + blind
+  // 5 s — a chat/analytics-heavy WP page never actually reaches networkidle.
+  await page
+    .waitForSelector(
+      'script[src*="chatbot.growth99.com/assets/js/integration.js"], iframe[src*="growth99"], [class*="chat" i][class*="launch" i], [id*="chat" i][class*="widget" i]',
+      { timeout: 8000, state: "attached" },
+    )
+    .catch(() => {})
+  // Small settle so the launcher finishes painting before the screenshot.
+  await page.waitForTimeout(1500)
   const shot = await page.screenshot().catch(() => null)
   let screenshotUrl: string | null = null
   if (shot && runId) {
@@ -1957,9 +2006,11 @@ export async function checkCallnowLinks(
       await onProgress(80, "Verifying Call Now button on mobile view...")
 
     await mobilePage
-      .goto(url, { waitUntil: "networkidle", timeout: 30000 })
+      .goto(url, { waitUntil: "domcontentloaded", timeout: 30000 })
       .catch(() => {})
-    await mobilePage.waitForTimeout(5000)
+    // Brief settle for the Call-Now button to paint (evidence screenshot only);
+    // was a blind 5 s on top of networkidle.
+    await mobilePage.waitForTimeout(1200)
     const mobileBuffer = await mobilePage.screenshot({ fullPage: false })
     mobileScreenshotUrl = await uploadScreenshot(
       mobileBuffer,
@@ -2024,78 +2075,113 @@ export async function checkUrlTabComparison(
   allDevUrls: string[],
   onProgress?: (progress: number, message: string) => Promise<void>,
 ): Promise<Finding[]> {
-  const { chromium } = require("playwright")
+  // Path of a URL, normalised for comparison ("" -> "/", no trailing slash).
+  // Falls back to the raw string so an unparseable URL still compares to itself.
+  const pathOf = (u: string): string => {
+    try {
+      return new URL(u).pathname.replace(/\/$/, "") || "/"
+    } catch {
+      return u
+    }
+  }
 
-  // Helper: fetch tab title for a URL using playwright
-  // Helper: fetch tab title for a URL using playwright
-  // Helper: fetch tab title for a URL using axios & cheerio
+  const extractTitle = (html: unknown): string =>
+    cheerio.load(String(html || ""))("title").text().trim() || "(no title)"
+
+  // Fetch titles for URLs we did NOT crawl ourselves (the run supplies dev URLs
+  // without titles). Bounded fan-out rather than a serial loop — these are
+  // independent 10 s-timeout requests, so serialising them was the single
+  // slowest part of this check.
   async function fetchTabTitles(
-    browser: any, // kept for signature compatibility
     urls: string[],
     label: string,
     baseProg: number,
-  ): Promise<{ url: string; title: string }[]> {
-    const results: { url: string; title: string }[] = []
-    const targetUrls = urls.slice(0, 50)
+  ): Promise<PageInfo[]> {
+    const targetUrls = urls.slice(0, MAX_TITLE_FETCHES)
+    let done = 0
+    const limit = pLimit(URL_COMPARE_CONCURRENCY)
 
-    for (let i = 0; i < targetUrls.length; i++) {
-      const url = targetUrls[i]
-      if (onProgress) {
-        const cur = baseProg + Math.round((i / targetUrls.length) * 20)
-        await onProgress(
-          cur,
-          `Collecting ${label} title ${i + 1} of ${targetUrls.length}: ${url.replace(/^https?:\/\//, "")}`,
-        )
-      }
-      try {
-        const response = await axios.get(url, {
-          timeout: 10000,
-          validateStatus: () => true,
-        })
-        const $ = cheerio.load(response.data || "")
-        const titleText = $("title").text().trim() || "(no title)"
-        results.push({ url, title: titleText })
-      } catch (e) {
-        results.push({ url, title: "(error loading)" })
-      }
-    }
-    return results
+    return Promise.all(
+      targetUrls.map((url) =>
+        limit(async () => {
+          let title: string
+          try {
+            const response = await axios.get(url, {
+              timeout: 10000,
+              validateStatus: () => true,
+            })
+            title = extractTitle(response.data)
+          } catch {
+            title = "(error loading)"
+          }
+          done++
+          if (onProgress) {
+            const cur = baseProg + Math.round((done / targetUrls.length) * 20)
+            await onProgress(
+              cur,
+              `Collecting ${label} title ${done} of ${targetUrls.length}: ${url.replace(/^https?:\/\//, "")}`,
+            )
+          }
+          return { url, title }
+        }),
+      ),
+    )
   }
 
-  // Helper: crawl sitemap of a site and return all page URLs
-  // Helper: crawl sitemap of a site and return all page URLs using axios & cheerio
-  async function crawlSiteUrls(
-    browser: any, // kept for signature compatibility
+  // Crawl a site and return each page WITH its <title>.
+  //
+  // The title is read from the HTML we already downloaded during the crawl.
+  // Previously the crawl threw the HTML away and a second pass re-downloaded
+  // every page just to read <title>, roughly doubling the request count.
+  //
+  // Traversal is breadth-first, one level at a time, with the level fetched
+  // concurrently. `queued` is a Set: the old frontier test was
+  // `!toVisit.includes(clean)`, a linear scan run for every anchor on every
+  // page — O(links x frontier).
+  async function crawlSite(
     baseUrl: string,
     label: string,
     baseProg: number,
-  ): Promise<string[]> {
-    const visited = new Set<string>()
-    const toVisit = [baseUrl]
-    const found: string[] = []
-
+  ): Promise<PageInfo[]> {
     const baseHost = new URL(baseUrl).hostname.replace(/^www\./, "")
+    const queued = new Set<string>([baseUrl])
+    const found: PageInfo[] = []
+    let frontier: string[] = [baseUrl]
+    const limit = pLimit(URL_COMPARE_CONCURRENCY)
 
-    while (toVisit.length > 0 && found.length < 60) {
+    while (frontier.length > 0 && found.length < MAX_CRAWL_PAGES) {
       if (onProgress) {
-        const cur = baseProg + Math.round((found.length / 60) * 15)
+        const cur = baseProg + Math.round((found.length / MAX_CRAWL_PAGES) * 15)
         await onProgress(
           cur,
-          `Discovering ${label} URLs: found ${found.length}/60`,
+          `Discovering ${label} URLs: found ${found.length}/${MAX_CRAWL_PAGES}`,
         )
       }
-      const current = toVisit.shift()!
 
-      if (visited.has(current)) continue
-      visited.add(current)
-      found.push(current)
+      // Never fetch more than the remaining budget.
+      const batch = frontier.slice(0, MAX_CRAWL_PAGES - found.length)
+      frontier = frontier.slice(batch.length)
 
-      try {
-        const response = await axios.get(current, {
-          timeout: 10000,
-          validateStatus: () => true,
-        })
-        const $ = cheerio.load(response.data || "")
+      const fetched = await Promise.all(
+        batch.map((url) =>
+          limit(async () => {
+            try {
+              const response = await axios.get(url, {
+                timeout: 10000,
+                validateStatus: () => true,
+              })
+              return { url, html: String(response.data || "") }
+            } catch {
+              return { url, html: "" }
+            }
+          }),
+        ),
+      )
+
+      const nextLevel: string[] = []
+      for (const { url, html } of fetched) {
+        const $ = cheerio.load(html)
+        found.push({ url, title: extractTitle(html) })
 
         $("a[href]").each((_: any, a: any) => {
           try {
@@ -2103,7 +2189,7 @@ export async function checkUrlTabComparison(
             if (!rawHref) return
 
             // Automatically resolve relative URLs (e.g. "/about" -> "https://domain.com/about")
-            const urlObj = new URL(rawHref, current)
+            const urlObj = new URL(rawHref, url)
             const href = urlObj.href
 
             if (
@@ -2112,17 +2198,18 @@ export async function checkUrlTabComparison(
               !href.match(/\.(pdf|jpg|jpeg|png|gif|svg|zip|mp4|webm)$/i)
             ) {
               const clean = href.replace(/\/$/, "")
-              if (!visited.has(clean) && !toVisit.includes(clean)) {
-                toVisit.push(clean)
+              if (!queued.has(clean)) {
+                queued.add(clean)
+                nextLevel.push(clean)
               }
             }
           } catch (e) {
             // skip invalid URLs
           }
         })
-      } catch (e) {
-        // skip failed pages
       }
+
+      frontier = frontier.concat(nextLevel)
     }
 
     return found
@@ -2130,20 +2217,17 @@ export async function checkUrlTabComparison(
 
   let browser: any = null
   try {
-    // Step 1: Use provided dev URLs (already crawled by the run) if available, else crawl
-    const devUrls =
+    // Step 1: dev pages. URLs supplied by the run carry no titles, so those
+    // still need a title pass; a self-crawl already returns them.
+    const devPages: PageInfo[] =
       allDevUrls.length > 0
-        ? allDevUrls
-        : await crawlSiteUrls(null, devSiteUrl, "dev site", 0)
+        ? await fetchTabTitles(allDevUrls, "dev site", 0)
+        : await crawlSite(devSiteUrl, "dev site", 0)
 
-    // Step 2: Crawl live site
-    const liveUrls = await crawlSiteUrls(null, liveSiteUrl, "live site", 15)
+    // Step 2: live pages — crawled with titles in the same pass.
+    const livePages = await crawlSite(liveSiteUrl, "live site", 30)
 
-    // Step 3: Fetch tab titles for both
-    const devPages = await fetchTabTitles(null, devUrls, "dev site", 30)
-    const livePages = await fetchTabTitles(null, liveUrls, "live site", 60)
-
-    // Step 4: Build context_text as JSON string
+    // Step 3: Build context_text as JSON string
     if (onProgress) await onProgress(90, "Analyzing discrepancies...")
 
     const contextData = {
@@ -2151,42 +2235,13 @@ export async function checkUrlTabComparison(
       livePages,
     }
 
-    const devPaths = devPages.map((p) => {
-      try {
-        return new URL(p.url).pathname.replace(/\/$/, "") || "/"
-      } catch {
-        return p.url
-      }
-    })
-    const livePaths = livePages.map((p) => {
-      try {
-        return new URL(p.url).pathname.replace(/\/$/, "") || "/"
-      } catch {
-        return p.url
-      }
-    })
+    // Set membership instead of `.some()` inside `.filter()` — the diff was
+    // O(n x m) over two lists that can each hold 50+ pages.
+    const devPaths = new Set(devPages.map((p) => pathOf(p.url)))
+    const livePaths = new Set(livePages.map((p) => pathOf(p.url)))
 
-    const missingInDev = livePages.filter((lp) => {
-      const livePath = (() => {
-        try {
-          return new URL(lp.url).pathname.replace(/\/$/, "") || "/"
-        } catch {
-          return lp.url
-        }
-      })()
-      return !devPaths.some((dp) => dp === livePath)
-    })
-
-    const missingInLive = devPages.filter((dp) => {
-      const devPath = (() => {
-        try {
-          return new URL(dp.url).pathname.replace(/\/$/, "") || "/"
-        } catch {
-          return dp.url
-        }
-      })()
-      return !livePaths.some((lp) => lp === devPath)
-    })
+    const missingInDev = livePages.filter((lp) => !devPaths.has(pathOf(lp.url)))
+    const missingInLive = devPages.filter((dp) => !livePaths.has(pathOf(dp.url)))
 
     const totalMissing = missingInDev.length + missingInLive.length
 
@@ -2322,11 +2377,14 @@ export async function checkPluginUpdates(
       ? `${url}wp-admin/plugins.php`
       : `${url}/wp-admin/plugins.php`
     await newPage
-      .goto(pluginsUrl, { waitUntil: "networkidle", timeout: 30000 })
+      .goto(pluginsUrl, { waitUntil: "domcontentloaded", timeout: 30000 })
       .catch(() => {})
 
-    // Wait for the plugins list to fully load
-    await newPage.waitForTimeout(5000)
+    // Wait for the actual plugins table rather than a blind 5 s. wp-admin is a
+    // server-rendered page, so #the-list is present on domcontentloaded.
+    await newPage
+      .waitForSelector("#the-list, .wp-list-table", { timeout: 5000 })
+      .catch(() => {})
     if (onProgress) await onProgress(80, "Taking screenshot of plugins list...")
 
     const buffer = await newPage
@@ -2595,9 +2653,9 @@ export async function checkLogoOnChatbot(
     const page = await context.newPage()
 
     if (onProgress) await onProgress(10, "Loading homepage for chatbot logo check...")
-    await page.goto(url, { waitUntil: "networkidle", timeout: 30000 }).catch(() => {})
-    // Let a lazily-injected launcher mount.
-    await page.waitForTimeout(6000)
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {})
+    // The launcher waitFor below (12 s, visible) is the real "widget mounted"
+    // signal, so the blind 6 s that used to sit here was redundant on top of it.
 
     if (onProgress) await onProgress(40, "Locating the chatbot toggle...")
     const launcher = page.locator(LAUNCHER_SELECTOR).first()

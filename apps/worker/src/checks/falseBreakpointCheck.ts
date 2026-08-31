@@ -120,9 +120,25 @@ export async function checkFalseBreakpoints(
 
           // Keep only leaf-most offenders (an offender containing another
           // offender is just an ancestor inheriting the overflow — noise).
-          const leaves = offenders.filter(
-            (el) => !offenders.some((o) => o !== el && el.contains(o)),
-          )
+          //
+          // Walk each offender's ancestor chain once and mark any ancestor that
+          // is itself an offender. That is O(offenders x depth); the previous
+          // `offenders.some(... el.contains(o))` form was O(offenders^2) with a
+          // DOM containment test per pair, and a broken layout can easily put
+          // hundreds of elements in this list.
+          const offenderSet = new Set(offenders)
+          const hasOffenderDescendant = new Set<Element>()
+          for (const el of offenders) {
+            let p: Element | null = el.parentElement
+            while (p) {
+              if (offenderSet.has(p)) {
+                if (hasOffenderDescendant.has(p)) break // chain already marked
+                hasOffenderDescendant.add(p)
+              }
+              p = p.parentElement
+            }
+          }
+          const leaves = offenders.filter((el) => !hasOffenderDescendant.has(el))
 
           for (const el of leaves) {
             const r = el.getBoundingClientRect()

@@ -55,7 +55,16 @@ import {
 } from "../checks/postReleaseSuite"
 import { checkGsr } from "../checks/gsrCheck"
 import type { ThemeType } from "../lib/themeType"
+import pLimit from "p-limit"
 import pino from "pino"
+
+// How many browser-owning / HTTP checks may run at once on a single page.
+// Sized for the production box (2 vCPU / 4 GB shared with qa-api) and
+// multiplied by WORKER_CONCURRENCY, so keep it small unless the box grows.
+const CHECK_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.CHECK_CONCURRENCY || 2),
+)
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -169,34 +178,70 @@ export async function processCrawlPageJob(job: Job) {
   let currentCheckProgress: Record<string, { progress: number; step: string }> =
     pageData?.check_progress || {}
 
+  // Progress writes are serialised and coalesced.
+  //
+  // Every update rewrites the WHOLE check_progress object. While checks ran
+  // strictly one at a time that was safe, but once they overlap, two
+  // unsynchronised writes can land out of order and the older snapshot
+  // clobbers the newer one, momentarily dropping a sibling check's progress.
+  //
+  // Mutating the shared object stays synchronous, so in-memory state is always
+  // current. The flush below persists whatever the latest state is, one write
+  // at a time, collapsing bursts into a single write — which also keeps the DB
+  // chatter down now that many checks report progress concurrently.
+  let progressFlush: Promise<void> = Promise.resolve()
+  let progressQueued = false
+
+  const flushCheckProgress = (): Promise<void> => {
+    // A queued flush has not snapshotted yet, so it will carry our mutation.
+    if (progressQueued) return progressFlush
+
+    progressQueued = true
+    progressFlush = progressFlush.then(async () => {
+      progressQueued = false
+      const snapshot = { ...currentCheckProgress }
+
+      const { error: progressError } = await supabase
+        .from("pages")
+        .update({ check_progress: snapshot })
+        .eq("id", pageId)
+
+      if (progressError) {
+        logger.error(
+          { pageId, error: progressError.message },
+          "Failed to update check progress",
+        )
+      }
+
+      const progressChannel = supabase.channel(`run:${runId}`)
+      await progressChannel.send({
+        type: "broadcast",
+        event: "page_progress",
+        payload: {
+          pageId,
+          check_progress: snapshot,
+        },
+      })
+    })
+    // Progress reporting must never break the chain (or the check that awaited
+    // it). A rejected link would stall every later flush.
+    progressFlush = progressFlush.catch((e: any) => {
+      progressQueued = false
+      logger.warn(
+        { pageId, error: e?.message },
+        "check progress flush failed; continuing",
+      )
+    })
+    return progressFlush
+  }
+
   const updateCheckProgress = async (
     checkKey: string,
     progress: number,
     step: string,
   ) => {
     currentCheckProgress[checkKey] = { progress, step }
-
-    const { error: progressError } = await supabase
-      .from("pages")
-      .update({ check_progress: currentCheckProgress })
-      .eq("id", pageId)
-
-    if (progressError) {
-      logger.error(
-        { pageId, error: progressError.message, progress, step },
-        "Failed to update check progress",
-      )
-    }
-
-    const progressChannel = supabase.channel(`run:${runId}`)
-    await progressChannel.send({
-      type: "broadcast",
-      event: "page_progress",
-      payload: {
-        pageId,
-        check_progress: currentCheckProgress,
-      },
-    })
+    await flushCheckProgress()
   }
 
   try {
@@ -355,6 +400,43 @@ export async function processCrawlPageJob(job: Job) {
       const enabledChecks = job.data.overrideChecks || run?.enabled_checks || []
       const checkPromises: Promise<any[]>[] = []
 
+      // ---------------------------------------------------------------------
+      // Check scheduling.
+      //
+      // Two lanes, because the checks are not interchangeable:
+      //
+      //   scheduleOnSharedPage — anything that reads or mutates the crawled
+      //     `page`. Serial (one at a time), which is exactly how these behaved
+      //     before, so no check can observe another's DOM changes. It matters:
+      //     hero_media writes marker attributes and drives video playback, and
+      //     chatbot_consultation clicks a live widget and screenshots it.
+      //
+      //   schedule — checks that open their own browser context or are pure
+      //     HTTP. These are independent of the shared page and of each other,
+      //     and they are the slow ones, so this is where the parallelism pays.
+      //
+      // The lanes run concurrently with each other; within a lane the limit
+      // applies. Concurrency is deliberately small: production runs qa-api and
+      // qa-worker on one 2 vCPU / 4 GB box, and WORKER_CONCURRENCY (default 3)
+      // means this whole block can already be live three times over. Each
+      // browser-owning check costs a context, so a large limit here trades
+      // wall-clock for OOM risk rather than buying speed.
+      //
+      // Previously this array was awaited via `await Promise.all(checkPromises)`
+      // after almost every push — 23 times, on an array that was never cleared
+      // — so each homepage check effectively ran alone. Off the homepage there
+      // was no limit at all, which is the opposite failure. Both are fixed
+      // here: one bounded model for every page.
+      const concurrentLane = pLimit(CHECK_CONCURRENCY)
+      const sharedPageLane = pLimit(1)
+
+      const schedule = (factory: () => Promise<any[]>) => {
+        checkPromises.push(concurrentLane(factory))
+      }
+      const scheduleOnSharedPage = (factory: () => Promise<any[]>) => {
+        checkPromises.push(sharedPageLane(factory))
+      }
+
       // Fetch project details and settings for pre-release checks
       let projectName = ""
       let devUrls: string[] = []
@@ -390,7 +472,7 @@ export async function processCrawlPageJob(job: Job) {
         const isHomepage = normalize(pageUrl) === normalize(run.site_url)
 
         if (isHomepage) {
-          checkPromises.push(
+          scheduleOnSharedPage(() =>
             checkHeroMedia(page, screenshots, runId, async (p, m) => {
               await updateCheckProgress("hero_media", p, m)
               await new Promise((resolve) => setTimeout(resolve, 1500))
@@ -405,13 +487,13 @@ export async function processCrawlPageJob(job: Job) {
       if (enabledChecks.includes("visual_regression")) {
         // broken_links retired — dead_links (optimizedLinksCheck) supersets it
         // (all assets + cross-page dedup) and is the one TED actually enqueues.
-        checkPromises.push(
+        scheduleOnSharedPage(() =>
           checkExternalLinks(page, screenshots).catch((e) => {
             logger.error("External links check failed:", e)
             return lapse("external_links")(e)
           }),
         )
-        checkPromises.push(
+        scheduleOnSharedPage(() =>
           checkImageCompliance(page, screenshots).catch((e) => {
             logger.error("Image compliance check failed:", e)
             return lapse("image_compliance")(e)
@@ -420,26 +502,26 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("accessibility")) {
-        checkPromises.push(
+        scheduleOnSharedPage(() =>
           checkMeta(page, screenshots).catch((e) => {
             logger.error("Meta check failed:", e)
             return lapse("meta_tags")(e)
           }),
         )
-        checkPromises.push(
+        scheduleOnSharedPage(() =>
           checkDummyContent(page, screenshots).catch((e) => {
             logger.error("Dummy content check failed:", e)
             return lapse("dummy_content")(e)
           }),
         )
-        checkPromises.push(
+        scheduleOnSharedPage(() =>
           checkSpelling(page, screenshots).catch((e) => {
             logger.error("Spelling check failed:", e)
             return lapse("spelling")(e)
           }),
         )
         if (hasForms) {
-          checkPromises.push(
+          scheduleOnSharedPage(() =>
             checkForms(page, screenshots, runId).catch((e) => {
               logger.error("Forms check failed:", e)
               return lapse("forms")(e)
@@ -449,7 +531,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("console_errors")) {
-        checkPromises.push(
+        scheduleOnSharedPage(() =>
           checkConsoleErrors(page, screenshots, consoleErrors, criticalErrors).catch((e) => {
             logger.error("Console errors check failed:", e)
             return lapse("console_errors")(e)
@@ -458,7 +540,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("dead_links")) {
-        checkPromises.push(
+        schedule(() =>
           (async () => {
             try {
               return await checkOptimizedLinks(
@@ -483,8 +565,12 @@ export async function processCrawlPageJob(job: Job) {
         )
       }
 
+      // contact_form reaches into sharedBrowser.contexts()[0].pages()[0] — the
+      // live crawled page — and fills and submits the form on it. That is the
+      // most invasive shared-page mutation in the suite, so it runs on the
+      // serial lane where nothing else can observe the page mid-submission.
       if (enabledChecks.includes("contact_form")) {
-        checkPromises.push(
+        scheduleOnSharedPage(() =>
           (async () => {
             try {
               return await checkGrowth99ContactForm(
@@ -505,7 +591,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("learn_more_buttons")) {
-        checkPromises.push(
+        schedule(() =>
           (async () => {
             try {
               return await checkLearnMoreButtons(
@@ -524,9 +610,8 @@ export async function processCrawlPageJob(job: Job) {
         )
       }
 
-
       if (enabledChecks.includes("false_breakpoint")) {
-        checkPromises.push(
+        schedule(() =>
           checkFalseBreakpoints(pageUrl, runId, browser, async (p, m) => {
             await updateCheckProgress("false_breakpoint", p, m)
           }).catch((e) => {
@@ -537,7 +622,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("functionality_check")) {
-        checkPromises.push(
+        schedule(() =>
           checkFunctionality(pageUrl, runId, browser, async (p, m) => {
             await updateCheckProgress("functionality_check", p, m)
           }).catch((e) => {
@@ -549,7 +634,7 @@ export async function processCrawlPageJob(job: Job) {
 
       // Spelling / Grammar / Accessibility — all-pages, shared-page checks.
       if (enabledChecks.includes("spelling")) {
-        checkPromises.push(
+        scheduleOnSharedPage(() =>
           checkSpelling(page, screenshots).catch((e) => {
             logger.error("Spelling check failed:", e)
             return lapse("spelling")(e)
@@ -557,24 +642,31 @@ export async function processCrawlPageJob(job: Job) {
         )
       }
       if (enabledChecks.includes("grammar")) {
-        checkPromises.push(
+        scheduleOnSharedPage(() =>
           checkGrammar(page, screenshots).catch((e) => {
             logger.error("Grammar check failed:", e)
             return lapse("grammar")(e)
           }),
         )
       }
+      // Accessibility = UserWay widget + HubSpot plan check. It is site-wide, so
+      // run it ONCE per run (on the homepage only) with the client name for the
+      // HubSpot lookup — not once per crawled page.
       if (enabledChecks.includes("accessibility_check")) {
-        checkPromises.push(
-          checkAccessibility(page, screenshots).catch((e) => {
-            logger.error("Accessibility check failed:", e)
-            return lapse("accessibility_check")(e)
-          }),
-        )
+        const strip = (u: string) =>
+          (u || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "").toLowerCase()
+        if (strip(pageUrl) === strip(run.site_url)) {
+          scheduleOnSharedPage(() =>
+            checkAccessibility(page, projectName).catch((e) => {
+              logger.error("Accessibility check failed:", e)
+              return lapse("accessibility_check")(e)
+            }),
+          )
+        }
       }
 
       if (enabledChecks.includes("image_quality")) {
-        checkPromises.push(
+        schedule(() =>
           checkImageQuality(pageUrl, runId, browser, async (p, m) => {
             await updateCheckProgress("image_quality", p, m)
           }).catch((e) => {
@@ -584,18 +676,22 @@ export async function processCrawlPageJob(job: Job) {
         )
       }
 
-
       if (run?.is_woocommerce && enabledChecks.includes("woocommerce")) {
-        checkPromises.push(
+        schedule(() =>
           (async () => {
-            const wooPage = await context.newPage()
+            // newPage() and close() are inside the try/catch: both can throw
+            // (a dead context, a page that never settles), and an escaping
+            // rejection here would take down the whole page's result set
+            // rather than being recorded as this one check's lapse.
+            let wooPage: Awaited<ReturnType<typeof context.newPage>> | null = null
             try {
+              wooPage = await context.newPage()
               return await checkWooCommerce(wooPage, run.site_url, run)
             } catch (e) {
               logger.error("WooCommerce check failed:", e)
               return lapse("woocommerce")(e)
             } finally {
-              await wooPage.close()
+              await wooPage?.close().catch(() => {})
             }
           })(),
         )
@@ -611,9 +707,8 @@ export async function processCrawlPageJob(job: Job) {
 
       // --- HOMEPAGE-ONLY CHECKS ---
       if (isHomepage) {
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("privacy_policy")) {
-          checkPromises.push(
+          schedule(() =>
             checkPrivacyPolicy(
               pageUrl,
               runId,
@@ -628,9 +723,8 @@ export async function processCrawlPageJob(job: Job) {
             }),
           )
         }
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("footer_logo")) {
-          checkPromises.push(
+          schedule(() =>
             checkFooterLogo(pageUrl, runId, pageId, browser, async (p, m) => {
               await updateCheckProgress("footer_logo", p, m)
             }).catch((e) => {
@@ -640,9 +734,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("hamburger_menu")) {
-          checkPromises.push(
+          schedule(() =>
             checkHamburgerMenu(
               pageUrl,
               runId,
@@ -658,9 +751,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("blog_verification")) {
-          checkPromises.push(
+          schedule(() =>
             checkBlogVerification(
               pageUrl,
               runId,
@@ -676,29 +768,15 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         // video_recording is NOT a per-page check. It is a post-verification
         // barrier (video_recording_check) that runs after every other check
         // passes — see apps/worker/src/jobs/videoRecordingJob.ts.
 
-        await Promise.all(checkPromises)
-        if (
-          enabledChecks.includes("single_script") &&
-          false /* Defer to end */
-        ) {
-          checkPromises.push(
-            checkSingleScript(pageUrl, runId, pageId, browser, async (p, m) => {
-              await updateCheckProgress("single_script", p, m)
-            }).catch((e) => {
-              logger.error("Single script check failed:", e)
-              return lapse("single_script")(e)
-            }),
-          )
-        }
+        // single_script is dispatched at the end of this block, not here — the
+        // `&& false` copy that used to sit at this spot was unreachable.
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("top_bar_sticky")) {
-          checkPromises.push(
+          schedule(() =>
             checkTopBarAndStickyHeader(
               pageUrl,
               runId,
@@ -714,9 +792,8 @@ export async function processCrawlPageJob(job: Job) {
             }),
           )
         }
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("favicon")) {
-          checkPromises.push(
+          schedule(() =>
             checkFavicon(pageUrl, runId, pageId, browser, async (p, m) => {
               await updateCheckProgress("favicon", p, m)
             }).catch((e) => {
@@ -726,9 +803,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("chatbot_consultation")) {
-          checkPromises.push(
+          scheduleOnSharedPage(() =>
             checkChatbotAndConsultation(page, runId, {
               projectId: run.project_id,
               projectName,
@@ -740,9 +816,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("logo_chatbot")) {
-          checkPromises.push(
+          schedule(() =>
             checkLogoOnChatbot(
               pageUrl,
               runId,
@@ -759,9 +834,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("text_share")) {
-          checkPromises.push(
+          scheduleOnSharedPage(() =>
             checkTextShareMetadata(page, projectName).catch((e) => {
               logger.error("Text share metadata check failed:", e)
               return lapse("text_share")(e)
@@ -769,9 +843,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("callnow_links")) {
-          checkPromises.push(
+          schedule(() =>
             checkCallnowLinks(
               pageUrl,
               runId,
@@ -788,9 +861,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("url_tab_compare") && run.live_site_url) {
-          checkPromises.push(
+          schedule(() =>
             checkUrlTabComparison(
               pageUrl,
               run.live_site_url,
@@ -807,9 +879,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("verify_plugin_updates")) {
-          checkPromises.push(
+          schedule(() =>
             checkPluginUpdatesCredentialFree(
               pageUrl,
               runId,
@@ -825,9 +896,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("plugin_number")) {
-          checkPromises.push(
+          schedule(() =>
             checkPluginCount(
               pageUrl,
               runId,
@@ -843,9 +913,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("live_site_link")) {
-          checkPromises.push(
+          schedule(() =>
             checkLiveSiteLink(
               {
                 notesUrl: run.live_site_url,
@@ -865,9 +934,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("page_speed")) {
-          checkPromises.push(
+          schedule(() =>
             checkPageSpeed(pageUrl, runId, pageId, async (p, m) => {
               await updateCheckProgress("page_speed", p, m)
             }).catch((e) => {
@@ -877,9 +945,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("backend_check")) {
-          checkPromises.push(
+          schedule(() =>
             checkBackend(
               pageUrl,
               runId,
@@ -896,9 +963,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("review_reputation_check")) {
-          checkPromises.push(
+          schedule(() =>
             checkReviewReputation(
               pageUrl,
               runId,
@@ -914,9 +980,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("gbp_check")) {
-          checkPromises.push(
+          schedule(() =>
             checkGbp(
               run.project_id,
               run.live_site_url || run.site_url,
@@ -930,9 +995,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("social_share_heading")) {
-          checkPromises.push(
+          schedule(() =>
             checkSocialShareHeading(
               pageUrl,
               runId,
@@ -948,9 +1012,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("single_script")) {
-          checkPromises.push(
+          schedule(() =>
             checkSingleScript(pageUrl, runId, pageId, browser, async (p, m) => {
               await updateCheckProgress("single_script", p, m)
             }).catch((e) => {
@@ -960,9 +1023,8 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
 
-        await Promise.all(checkPromises)
         if (enabledChecks.includes("gsr_check")) {
-          checkPromises.push(
+          schedule(() =>
             checkGsr(
               page,
               { url: run.live_site_url || pageUrl },
@@ -991,36 +1053,48 @@ export async function processCrawlPageJob(job: Job) {
 
       // Attach a .then to stream findings into DB the instant each individual check finishes
 
+      // Each check's findings are written as soon as that check resolves. The
+      // whole body is guarded: one check's insert (or a check that rejected
+      // outright rather than returning a lapse) must not reject Promise.all
+      // below and fail the entire page, discarding every other check's work.
       const streamingPromises = checkPromises.map((p) =>
-        p.then(async (results) => {
-          if (results && results.length > 0) {
-            const findingsToInsert = results.map((f) => ({
-              ...f,
-              page_id: pageId,
-              run_id: runId,
-            }))
+        p
+          .then(async (results) => {
+            if (results && results.length > 0) {
+              const findingsToInsert = results.map((f) => ({
+                ...f,
+                page_id: pageId,
+                run_id: runId,
+              }))
 
-            const isGsrCheck = findingsToInsert[0]?.check_factor === "gsr_check"
-            if (isGsrCheck) {
-              await supabase
+              const isGsrCheck =
+                findingsToInsert[0]?.check_factor === "gsr_check"
+              if (isGsrCheck) {
+                await supabase
+                  .from("findings")
+                  .delete()
+                  .eq("run_id", runId)
+                  .eq("page_id", pageId)
+                  .eq("check_factor", "gsr_check")
+              }
+
+              const { error: insertError } = await supabase
                 .from("findings")
-                .delete()
-                .eq("run_id", runId)
-                .eq("page_id", pageId)
-                .eq("check_factor", "gsr_check")
+                .insert(findingsToInsert)
+              if (insertError) {
+                logger.error(
+                  { pageId, error: insertError.message },
+                  "Failed to stream insert finding",
+                )
+              }
             }
-
-            const { error: insertError } = await supabase
-              .from("findings")
-              .insert(findingsToInsert)
-            if (insertError) {
-              logger.error(
-                { pageId, error: insertError.message },
-                "Failed to stream insert finding",
-              )
-            }
-          }
-        }),
+          })
+          .catch((e: any) => {
+            logger.error(
+              { pageId, error: e?.message },
+              "Check or its finding insert threw; other checks continue",
+            )
+          }),
       )
 
       // Wait for all streamed checks to finish
