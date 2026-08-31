@@ -1252,3 +1252,91 @@ export async function applyReviewsWidgetGitops(
     `reviews page created at ${dirRel}`,
   )
 }
+
+// ---------------------------------------------------------------------------
+// dead_links — LOCATE each broken link in the repo (fix side, locate-only).
+//
+// The scan lists broken URLs (404 etc.) with their source page, but not the
+// correct target — retargeting/removing a dead link is a content decision, so we
+// never auto-write it. What IS deterministic and additive: for each dead URL,
+// find the exact repo node that carries it — an Elementor button link.url, an
+// href inside an html/text-editor widget, or a classic resource.json.content —
+// so a human edits the right JSON. Dead URLs not found in any page resource live
+// in the nav/menu/theme (not page JSON) and are reported as such.
+// ---------------------------------------------------------------------------
+
+/** Repo locations (resource + node) that carry `url`. */
+function locateUrlInRepo(workDir: string, url: string): string[] {
+  const hits: string[] = []
+  for (const ref of listResources(workDir)) {
+    const elementor = readJson<any>(workDir, ref.elementorRel)
+    if (elementor) {
+      const nodes = findElementorNodes(elementor, (n) => {
+        const s = n.settings
+        if (!s || typeof s !== "object") return false
+        // Elementor button/link widgets store the target in settings.link.url.
+        if (s.link && typeof s.link.url === "string" && s.link.url === url) return true
+        // href inside html/text-editor/heading markup, or a plain url setting.
+        for (const v of Object.values(s)) {
+          if (typeof v === "string" && v.includes(url)) return true
+        }
+        return false
+      })
+      for (const n of nodes) {
+        hits.push(
+          `${ref.groupSlug} → ${n.widgetType || n.elType || "element"} (element ${n.id}) in ${ref.elementorRel}`,
+        )
+      }
+    }
+    const content = ref.resource?.content
+    if (typeof content === "string" && content.includes(url)) {
+      hits.push(`${ref.groupSlug} → resource.json content`)
+    }
+  }
+  return hits
+}
+
+export function applyDeadLinksGitops(workDir: string, finding: Finding): GitopsFixResult {
+  // The scan lists each broken link as "- **<url>**". Pull those out.
+  const desc = finding.description || ""
+  const urls = Array.from(
+    new Set(
+      Array.from(desc.matchAll(/\*\*\s*(https?:\/\/[^*\s]+|\/[^*\s]+)\s*\*\*/g)).map((m) =>
+        m[1].trim(),
+      ),
+    ),
+  )
+  if (!urls.length) {
+    return miss("no broken-link URLs parseable from the finding")
+  }
+
+  const located: string[] = []
+  const notInRepo: string[] = []
+  for (const url of urls) {
+    const hits = locateUrlInRepo(workDir, url)
+    if (hits.length) {
+      located.push(`${url}\n${hits.map((h) => `  • ${h}`).join("\n")}`)
+    } else {
+      notInRepo.push(url)
+    }
+  }
+
+  if (!located.length) {
+    return miss(
+      `broken link(s) not found in any page resource (likely in the nav menu / theme): ${notInRepo.join(", ")}`,
+    )
+  }
+
+  const tail = notInRepo.length
+    ? `\n\nNot found in page resources (nav menu / theme): ${notInRepo.join(", ")}`
+    : ""
+  return {
+    applied: false,
+    files: [],
+    description:
+      `Located ${located.length} broken link(s) in the repo. Retarget or remove each (the correct target is a content decision, so it is not auto-written):\n\n` +
+      located.join("\n\n") +
+      tail,
+    note: `dead_links located ${located.length} URL(s) in the repo; retarget needs review (not auto-applied)`,
+  }
+}

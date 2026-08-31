@@ -57,6 +57,7 @@ import {
   applyContactFormGitops,
   applySingleScriptGitops,
   applyReviewsWidgetGitops,
+  applyDeadLinksGitops,
   type GitopsFixResult,
 } from "../lib/gitopsFix"
 import { renderPrivacyPolicy } from "../lib/privacyTemplate"
@@ -264,6 +265,8 @@ async function runGitopsFix(
       )
     case "accessibility_check":
       return guardAsync(() => applyAccessibilityGitops(workDir, f, { projectName: ctx.company }))
+    case "dead_links":
+      return guard(() => applyDeadLinksGitops(workDir, f))
     case "false_breakpoint":
       return guard(() => applyFalseBreakpointGitops(workDir, f))
     case "top_bar_sticky":
