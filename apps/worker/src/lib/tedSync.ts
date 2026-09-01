@@ -332,12 +332,13 @@ export async function postTedComment(
   }
 }
 
-// TED status QACC writes when a run finishes. QACC auto-fixes every failing
-// check (code push or AI dry-run), so a check is never left needing a person —
-// every task and subtask is closed as "Completed" so the TED release flow can
-// advance. Nothing is ever left "In Progress".
-// (Confirm exact string against TED before relying on it in production.)
+// TED statuses QACC writes. A check's subtask is closed "Completed" when it
+// passed, or failed but QACC APPLIED a fix. A check that FAILED and was NOT
+// fixed is left "In Progress" for a person to act on. Both strings must match
+// TED exactly ("In Progress" is the same status the API writes at scan start;
+// confirm "Completed" against TED before relying on it in production).
 const TED_STATUS_COMPLETED = "Completed"
+const TED_STATUS_IN_PROGRESS = "In Progress"
 
 // Minimum age (from run start) before the FIRST subtask result is posted. This
 // is a floor, not a fixed delay: if the run already took this long we post
@@ -897,6 +898,46 @@ const FRIENDLY: Record<string, string> = {
   accessibility: "Accessibility",
   accessibility_check: "Full Accessibility",
   visual_regression: "Visual Regression",
+}
+
+// Per-check action shown on a subtask that FAILED and was NOT auto-fixed, next
+// to its "In Progress" status. Keyed by check factor. Source of truth is
+// docs/31-08-2026-ted-stages.html ("On Fail and not fixed" column). A check
+// absent here just gets no extra line (status still flips to In Progress).
+const NOT_FIXED_MESSAGE: Record<string, string> = {
+  project_plan: "Mention to add project plan in project notes",
+  hero_media: "Mention to add hero video",
+  dead_links: "Mention to check dead links one by one and fix according to context",
+  learn_more_buttons: "Mention to check learn more buttons one by one and fix according to context",
+  paid_media: "Mention to add Paid Media details in project details/notes",
+  privacy_policy: "Mention to add a Privacy Policy page and link it in the footer",
+  footer_logo: "Mention to add the approved Growth99 footer logo with no tagline across all views",
+  single_script: "Mention to install the Growth99 single-script embed (G99+ code from Basecamp) site-wide",
+  url_tab_compare: "Mention to reconcile the dev vs live page URLs and tab names",
+  top_bar_sticky: "Mention to make the top bar header sticky on scroll",
+  favicon: "Mention to add a working favicon (site icon)",
+  contact_form: "Mention to embed the Growth99 contact form widget (per-client code from Basecamp)",
+  chatbot_consultation: "Mention to add the Cliff Hanger chatbot & virtual consultation codes from Basecamp",
+  logo_chatbot: "Mention to replace the chatbot launcher icon with the client's brand logo",
+  callnow_links: "Mention to verify the Call Now button plugin setup and homepage links",
+  verify_plugin_updates: "Mention to update all plugins except All-in-Migration, LiteSpeed, WP-Rocket, Elementor & WooCommerce",
+  social_share_heading: "Mention to verify the Facebook, X & LinkedIn social share preview headings",
+  false_breakpoint: "Mention to fix the overflowing element causing horizontal scroll at the flagged width",
+  backend_check: "Mention to clean up the WordPress backend — remove default content (Hello world post, Sample Page, default tagline), close comments, add a custom 404, and fix the contact number",
+  review_reputation_check: "Mention to fix the /reviews page — ensure the review popup opens and the phone, email, social, and Google Business links are present and match the GMB listing",
+  functionality_check: "Mention to fix the broken interactive controls — resolve the JavaScript errors and layout breaks triggered when interacting with the page",
+  gbp_check: "Mention to complete the Google Business Profile — add the missing phone, matching website, hours, photos, or reviews",
+  image_quality: "Mention to replace the flagged blurry and watermarked images with clean, sharp versions",
+  blog_verification: "Mention to migrate the missing blog posts from the client's live site to the beta site",
+  cross_browser: "Mention to review the SmartUI cross-browser diffs and fix the rendering differences",
+  gsr_check: "Mention to review the site's Google search result titles and descriptions for accuracy and rerun if scraping was blocked",
+  accessibility_check: "Mention to install the correct-tier UserWay accessibility widget matching the HubSpot plan",
+  spelling: "Mention to correct the flagged misspelled words using the suggested spellings",
+  grammar: "Mention to fix the flagged grammar and punctuation issues in the page copy per the suggestions",
+  live_site_link: "Mention to confirm the site is live on the correct client domain over HTTPS and not on a gogroth staging host",
+  plugin_number: "Mention to verify the plugin count matches the expected set and remove any leftover or dev plugins",
+  page_speed: "Mention to optimize page speed (compress images, defer JS, enable caching/CDN, reduce render-blocking)",
+  hamburger_menu: "Mention to add or fix the mobile hamburger menu so it opens under 1024px and its links and buttons work",
 }
 
 const titleCase = (s: string) =>
@@ -1980,13 +2021,21 @@ export async function postSectionedReport(opts: {
           `<p>🤖 <strong>AI Fix</strong> — ${total} fix${total > 1 ? "es" : ""} for this check. ` +
           `${opts.perTargetFix.pushClause}</p>`
       }
+      // A check that FAILED with no fix APPLIED is "failed and not fixed": leave
+      // its subtask In Progress (not Completed) and append the per-check action a
+      // person must take. Pass, or fail-with-applied-fix, stay Completed.
+      const notFixed = sec.status === "failed" && applied === 0
+      const notFixedNote =
+        notFixed && NOT_FIXED_MESSAGE[sec.factor]
+          ? `<p>🔸 <strong>Not auto-fixed — action needed:</strong> ${esc(NOT_FIXED_MESSAGE[sec.factor])}.</p>`
+          : ""
       // Post the section (results + fix banner) to EACH owning subtask. The
       // idempotency key includes the subtask id so the same section landing on
       // two subtasks isn't deduped into one.
       for (const target of targets) {
         await postTedComment(
           target,
-          header + sec.html,
+          header + sec.html + notFixedNote,
           `ext:${opts.eventKeyPrefix}-subtask-${runId}-${sec.factor}-${target}`,
           {
             runId,
@@ -1996,10 +2045,15 @@ export async function postSectionedReport(opts: {
             ...reportCtx,
           },
         ).catch(() => {})
-        // Close THIS subtask now that its pass/fail comment has landed. Never the
-        // video subtask (the barrier owns its status).
+        // Set THIS subtask's status now that its comment has landed: In Progress
+        // when it failed and was not fixed, else Completed. Never the video
+        // subtask (the barrier owns its status).
         if (sec.factor !== "video_recording")
-          await postTedStatus(target, TED_STATUS_COMPLETED, runId).catch(() => {})
+          await postTedStatus(
+            target,
+            notFixed ? TED_STATUS_IN_PROGRESS : TED_STATUS_COMPLETED,
+            runId,
+          ).catch(() => {})
       }
     }
     // No subtask left reason-less: a mapped check that produced NO pass/fail

@@ -6,7 +6,6 @@ import {
   postTedComment,
   postTedStatus,
   postQaccInternalNote,
-  isRealDefect,
 } from "../lib/tedSync"
 import {
   triggerFullProjectRecording,
@@ -20,6 +19,7 @@ const logger = pino({
 
 const VIDEO_FACTOR = "video_recording"
 const TED_STATUS_COMPLETED = "Completed"
+const TED_STATUS_IN_PROGRESS = "In Progress"
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 // How long to wait for the cloud recorder to signal an ACTUAL start (the
@@ -47,10 +47,20 @@ function flattenIds(raw: any): string[] {
   return [...new Set(arr.map((v: any) => String(v)))]
 }
 
-// Which non-video sibling subtasks are NOT yet marked Completed for this run?
-// A close writes a distinct status row (source="status", event_key
-// `status:<id>:Completed:<runId>`) in both preview and real mode, so that row is
-// the authoritative proof of a close. Read-only.
+// Which non-video sibling subtasks have NOT yet reached a FINAL state for this
+// run? A sibling is "finalized" once the report set its terminal status — either
+// Completed (passed / fixed / no-result) or In Progress (failed and not fixed).
+// The report writes a distinct status row (source="status", event_key
+// `status:<id>:<status>:<runId>`) in both preview and real mode, so that row is
+// the authoritative proof. This barrier is enqueued AFTER the report finalizes
+// every sibling, so this is a belt-and-suspenders ordering guard. Read-only.
+function isFinalizedStatusKey(eventKey: string): boolean {
+  const k = String(eventKey || "")
+  return (
+    k.includes(`:${TED_STATUS_COMPLETED}:`) ||
+    k.includes(`:${TED_STATUS_IN_PROGRESS}:`)
+  )
+}
 async function openSiblingSubtasks(
   runId: string,
   map: Record<string, any>,
@@ -69,59 +79,33 @@ async function openSiblingSubtasks(
     .eq("qa_run_id", runId)
     .eq("source", "status")
     .in("ted_task_id", ids)
-  const closed = new Set(
+  const finalized = new Set(
     (rows || [])
-      .filter((r: any) =>
-        String(r.event_key || "").includes(`:${TED_STATUS_COMPLETED}:`),
-      )
+      .filter((r: any) => isFinalizedStatusKey(r.event_key))
       .map((r: any) => String(r.ted_task_id)),
   )
-  return ids.filter((id) => !closed.has(id))
-}
-
-// Fetch a parent's subtasks from TED (read-only) and return an id → title map,
-// so blocker check keys can be shown as their human subtask names. Empty on any
-// failure (caller falls back to the raw check keys).
-async function fetchSubtaskTitles(
-  parentTaskId?: string,
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>()
-  const bearer = process.env.TED_API_TOKEN
-  if (!bearer || !parentTaskId) return out
-  try {
-    const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${parentTaskId}/subtasks`,
-      { headers: { Authorization: `Bearer ${bearer}`, Accept: "application/json" } },
-    )
-    if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) {
-      return out
-    }
-    const body = (await r.json().catch(() => null)) as any
-    const arr = Array.isArray(body) ? body : []
-    for (const it of arr) {
-      const id = String(it?.id ?? it?.taskId ?? "")
-      const title = String(it?.title ?? it?.name ?? "")
-      if (id && title) out.set(id, title)
-    }
-  } catch {
-    /* best-effort: caller falls back to check keys */
-  }
-  return out
+  return ids.filter((id) => !finalized.has(id))
 }
 
 // =====================================================================
 // BARRIER: video_recording_check
 // ---------------------------------------------------------------------
-// Runs once every OTHER subtask has reached its final state (enqueued from the
-// closeout funnel — markAllTedTasksCompleted). Decides the video subtask's fate:
+// Runs once every OTHER subtask has reached a FINAL state (In Progress or
+// Completed) — enqueued from the closeout funnel (markAllTedTasksCompleted).
+// Video is the LAST check. Unlike every other check, its subtask is NOT closed
+// on start: it stays In Progress until the recording URLs are actually posted
+// back. It has NO auto-fix, so:
 //   • ≥1 other check still has an unresolved defect → "not possible … incomplete
-//     fixes" → fail + Completed.
-//   • all clean → "starting … check back in ~30 min" → trigger cloud recording →
-//     confirm a real start via the DB flip:
-//        - started  → pass + Completed → schedule video_url_verify.
+//     fixes" → video left In Progress, parent left open.
+//   • all clean → "in progress …" → trigger cloud recording → confirm a real
+//     start via the DB flip:
+//        - started  → schedule video_url_verify; subtask stays In Progress.
 //        - not started → "Video recording encountered an error" (client) +
-//          detailed backend log + QACC-internal note → fail + Completed.
-// Every path ends Completed so nothing hangs; the verdict lives in the comment.
+//          QACC-internal note → FAIL: subtask left In Progress, parent left open.
+// PASS = the recording URLs post back (video_url_verify): only then does the
+// video subtask close Completed and the parent close Completed (last of all).
+// Any failure leaves the subtask In Progress and the parent open for a person —
+// the parent closes ONLY when the video succeeds.
 // =====================================================================
 export async function processVideoRecordingJob(job: Job): Promise<void> {
   const { runId } = job.data
@@ -154,76 +138,39 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
   const projectId = run.project_id as string | undefined
   const ctxBase = { runId, projectId, targetKind: "subtask" as const, checkFactor: VIDEO_FACTOR }
 
-  // ---- Gate: are there any UNRESOLVED real defects? (final state after AI Fix)
-  const { data: findings } = await supabase
-    .from("findings")
-    .select("id, check_factor, title, description")
-    .eq("run_id", runId)
-  const real = (findings || []).filter(isRealDefect)
-
-  // A defect is RESOLVED only if AI Fix actually APPLIED a fix for it. Proposed /
-  // dry-run / manual / not-possible all count as INCOMPLETE and block recording.
-  const { data: aiFixRows } = await supabase
-    .from("ai_fix_runs")
-    .select("data, created_at")
-    .eq("run_id", runId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-  const analysis: any[] = (aiFixRows?.[0]?.data as any)?.findings || []
-  const appliedIds = new Set(
-    analysis.filter((a) => a?.applied && a?.findingId).map((a) => String(a.findingId)),
-  )
-  const unresolved = real.filter((f) => !appliedIds.has(String(f.id)))
-
+  // ---- Gate: ONLY a broken run blocks recording. Unfixed check defects do NOT
+  // block: the video captures the site's FINAL state regardless of individual
+  // check verdicts. All that's required is that every sibling has been ATTEMPTED
+  // and finalized (In Progress or Completed) — enforced by the sibling gate
+  // below. A run marked failed/cancelled/timed_out at the RUN level is an infra
+  // failure, NOT a merely-failed check (failed checks still leave the run
+  // "completed"), so there is nothing worth recording.
   const runBroken = ["failed", "cancelled", "timed_out"].includes(String(run.status))
-  const gatePassed = !runBroken && unresolved.length === 0
-
-  // ---- PATH 1: something else failed → recording not possible.
-  if (!gatePassed) {
-    const blockerFactors = [...new Set(unresolved.map((f) => f.check_factor).filter(Boolean))]
-    // Show the SUBTASK names (TED checklist titles), not raw check keys. Resolve
-    // each blocking check → its subtask id(s) via the run's map → title via TED.
-    const titleById = await fetchSubtaskTitles(tedTaskId)
-    const blockerNames = [
-      ...new Set(
-        blockerFactors.flatMap(
-          (factor) =>
-            flattenIds(map[factor])
-              .map((id) => titleById.get(id))
-              .filter(Boolean) as string[],
-        ),
-      ),
-    ]
-    // Fall back to the check keys only if no subtask title could be resolved.
-    const blockers = blockerNames.length ? blockerNames : blockerFactors
-    const reason = runBroken
-      ? " (the QA run did not complete successfully)"
-      : blockers.length
-        ? ` (${blockers.length} subtask${blockers.length > 1 ? "s" : ""} with incomplete fixes: ${blockers
-            .slice(0, 8)
-            .join(", ")})`
-        : ""
-    const body = `<p>❌ <strong>Video recording not possible as there are incomplete fixes</strong>${reason}.</p>`
+  if (runBroken) {
+    const body = `<p>❌ <strong>Video recording not possible</strong> (the QA run did not complete successfully).</p>`
     for (const subId of videoSubtaskIds) {
       await postTedComment(subId, body, `ext:video-blocked-${runId}-${subId}`, { ...ctxBase }).catch(() => {})
+      // Video has no fix → leave its subtask In Progress and DO NOT close the
+      // parent; the parent closes only when the video subtask succeeds.
+      await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
     }
-    logger.info({ runId, blockers }, "Video recording blocked by incomplete fixes; closing after other subtasks confirmed done.")
-    await finalizeRunCloseout({ runId, tedTaskId, map, videoSubtaskIds })
+    logger.info({ runId }, "Video recording blocked: QA run did not complete successfully; video left In Progress, parent left open.")
     return
   }
 
-  // ---- Start gate (part 2): every sibling subtask must ALSO be marked Completed.
-  // Passed AND all siblings closed → start. Passed but a sibling not yet closed is
-  // a timing case (the report normally closes them before this barrier is
-  // enqueued): don't start and don't blame — throw so BullMQ retries (attempts: 5).
+  // ---- Start gate (part 2): every sibling subtask must ALSO be finalized
+  // (In Progress or Completed). Passed AND all siblings finalized → start. A
+  // sibling not yet finalized is a timing case (the report normally finalizes
+  // them before this barrier is enqueued): don't start and don't blame — throw
+  // so BullMQ retries (attempts: 5).
   const openSiblings = await openSiblingSubtasks(runId, map, new Set(videoSubtaskIds))
   if (openSiblings.length > 0) {
     logger.warn(
       { runId, openSiblings },
-      "video_recording_check: siblings passed but not all Completed yet; will retry.",
+      "video_recording_check: siblings passed but not all finalized yet; will retry.",
     )
     throw new Error(
-      `video_recording_check: ${openSiblings.length} sibling subtask(s) not yet Completed for ${runId}`,
+      `video_recording_check: ${openSiblings.length} sibling subtask(s) not yet finalized for ${runId}`,
     )
   }
 
@@ -242,6 +189,9 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
     "<p>🎬 <strong>Video Recording — in progress</strong>. Recording result appears in ~30 min.</p>"
   for (const subId of videoSubtaskIds) {
     await postTedComment(subId, startingBody, `ext:video-starting-${runId}-${subId}`, { ...ctxBase }).catch(() => {})
+    // Keep the video subtask In Progress while recording runs — it closes only
+    // once the recording URLs post back (video_url_verify), never on start.
+    await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
   }
 
   let started = false
@@ -290,18 +240,23 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
       await postQaccInternalNote(subId, internalBody, `video-error-internal-${runId}-${subId}`, {
         ...ctxBase,
       }).catch(() => {})
+      // FAIL: the DB never signalled a start. Video has no fix → leave the
+      // subtask In Progress and DO NOT close the parent (parent closes only on
+      // video success — URLs posted back).
+      await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
     }
     await supabase
       .from("qa_runs")
       .update({ recording_status: "error", recording_updated_at: new Date().toISOString() })
       .eq("id", runId)
-    logger.error({ runId, failDetail }, "Video recording failed to start; closing as failed after other subtasks confirmed done.")
-    // Confirm every other subtask is closed, then close video (failed+Completed) + parent LAST.
-    await finalizeRunCloseout({ runId, tedTaskId, map, videoSubtaskIds })
+    logger.error({ runId, failDetail }, "Video recording failed to start; video left In Progress, parent left open.")
     return
   }
 
-  // ---- PATH 2c: recording started → pass. URLs verified/posted to parent later.
+  // ---- PATH 2c: recording started. Do NOT close anything yet — the video
+  // subtask stays In Progress and the parent stays open until the recording URLs
+  // post back. video_url_verify closes both on success (or leaves them for a
+  // person if no URL ever arrives).
   await qaQueue
     .add(
       "video_url_verify",
@@ -309,11 +264,7 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
       { delay: URL_VERIFY_FIRST_DELAY_MS, removeOnComplete: true, attempts: 2 },
     )
     .catch((e) => logger.error({ runId, error: e?.message }, "Failed to enqueue video_url_verify."))
-  // Confirm every other subtask is closed, then close the video subtask
-  // (Completed) and the parent LAST. The recording URLs post to the parent later
-  // (video_url_verify) — that comment can land after the task is Completed.
-  await finalizeRunCloseout({ runId, tedTaskId, map, videoSubtaskIds })
-  logger.info({ runId }, "Video recording started; video subtask + parent closed. URL verify scheduled.")
+  logger.info({ runId }, "Video recording started; subtask kept In Progress, URL verify scheduled. Parent stays open until URLs post.")
 }
 
 // Re-check the DB for a real "recording has started" signal, up to `attempts`
@@ -337,19 +288,20 @@ async function confirmStart(runId: string, attempts: number): Promise<boolean> {
   return false
 }
 
-// Video is the LAST subtask to close. It CONFIRMS every other subtask is already
-// closed, then closes ITSELF, then the parent (main thread) — in that order. It
-// NEVER closes the other subtasks: postSectionedReport already did that per-check,
-// on its own, before this barrier was even enqueued.
+// Called ONLY on video SUCCESS (the recording URLs posted back). Video is the
+// LAST subtask to close: it CONFIRMS every other subtask is already finalized,
+// then closes ITSELF Completed, then the parent (main thread) — in that order. It
+// NEVER closes the other subtasks: postSectionedReport already set each one's
+// terminal status per-check, before this barrier was even enqueued.
 //
-// "Closed" = the subtask reached a Completed STATUS (pass/fail doesn't matter).
-// We must confirm the actual completion, NOT merely that the subtask has comments
-// — a subtask can accrue several comments while still open. Confirmation source is
-// QACC's own `ted_comments`: every close writes a distinct status row
-// (source="status", event_key `status:<id>:Completed:<runId>`) in BOTH preview and
-// real mode (postTedStatus ledgers it). Report/other comments use different
-// sources, so they can't be mistaken for a close. A subtask is confirmed closed
-// ONLY when its Completed status row exists; otherwise the parent is left open.
+// "Finalized" = the subtask reached a terminal STATUS from the report — Completed
+// (passed / fixed / no-result) or In Progress (failed and not fixed). We confirm
+// the actual status, NOT merely that the subtask has comments — a subtask can
+// accrue several comments while still open. Confirmation source is QACC's own
+// `ted_comments`: the report writes a distinct status row (source="status",
+// event_key `status:<id>:<status>:<runId>`) in BOTH preview and real mode
+// (postTedStatus ledgers it). A subtask is confirmed finalized ONLY when a
+// Completed or In Progress status row exists; otherwise the parent is left open.
 async function finalizeRunCloseout(opts: {
   runId: string
   tedTaskId?: string
@@ -366,8 +318,8 @@ async function finalizeRunCloseout(opts: {
     for (const id of flattenIds(raw)) if (!videoSet.has(id)) otherIds.add(id)
   }
 
-  // Confirm (read-only) that each other subtask has a Completed STATUS row for
-  // this run — the actual close, not just any comment.
+  // Confirm (read-only) that each other subtask has a finalized STATUS row for
+  // this run — the report's terminal status, not just any comment.
   const open: string[] = []
   if (otherIds.size > 0) {
     const ids = [...otherIds]
@@ -377,29 +329,27 @@ async function finalizeRunCloseout(opts: {
       .eq("qa_run_id", runId)
       .eq("source", "status")
       .in("ted_task_id", ids)
-    const closed = new Set(
+    const finalized = new Set(
       (rows || [])
-        .filter((r: any) =>
-          String(r.event_key || "").includes(`:${TED_STATUS_COMPLETED}:`),
-        )
+        .filter((r: any) => isFinalizedStatusKey(r.event_key))
         .map((r: any) => String(r.ted_task_id)),
     )
-    for (const id of ids) if (!closed.has(id)) open.push(id)
+    for (const id of ids) if (!finalized.has(id)) open.push(id)
   }
 
   if (open.length > 0) {
-    // Not every other subtask is confirmed closed yet — do NOT close the video
+    // Not every other subtask is confirmed finalized yet — do NOT close the video
     // subtask or the parent. Leaving the parent open is correct; marking it
     // Completed while a subtask is still To-Do is the exact bug we're preventing.
-    // (Expected empty: the report closes them before this barrier is enqueued.)
+    // (Expected empty: the report finalizes them before this barrier is enqueued.)
     logger.warn(
       { runId, tedTaskId, open },
-      "Video barrier: some other subtasks not confirmed closed — parent left open.",
+      "Video barrier: some other subtasks not confirmed finalized — parent left open.",
     )
     return
   }
 
-  // All other subtasks confirmed closed → video subtask closes ITSELF...
+  // All other subtasks confirmed finalized → video subtask closes ITSELF...
   for (const subId of videoSubtaskIds) {
     await postTedStatus(subId, TED_STATUS_COMPLETED, runId).catch(() => {})
   }
@@ -409,7 +359,7 @@ async function finalizeRunCloseout(opts: {
   }
   logger.info(
     { runId, tedTaskId, others: otherIds.size },
-    "All other subtasks confirmed closed — video subtask + parent Completed.",
+    "All other subtasks confirmed finalized — video subtask + parent Completed.",
   )
 }
 
@@ -417,9 +367,12 @@ async function finalizeRunCloseout(opts: {
 // DEFERRED: video_url_verify
 // ---------------------------------------------------------------------
 // Recording runs ~30 min on the cloud provider. This pass posts each viewport's
-// video URL to the PARENT task (main thread) "as and when available", and — only
-// if no URL ever posts / is retrievable by the final deadline — flips the video
-// subtask's verdict to failed. Bounded retries guarantee it never loops forever.
+// recording URL to the VIDEO SUBTASK as it becomes available. It is the ONLY
+// success path: once a URL has posted back (all viewports, or ≥1 by the final
+// deadline), it closes the video subtask (Completed) and then the parent — last
+// of all. If NO URL is retrievable by the final deadline, it FAILS: the subtask
+// is left In Progress and the parent is left open for a person (video has no
+// auto-fix). Bounded retries guarantee it never loops forever.
 // =====================================================================
 export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
   const { runId } = job.data
@@ -430,11 +383,15 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
 
   const { data: run } = await supabase
     .from("qa_runs")
-    .select("id, project_id, recording_video_urls, recording_status")
+    .select("id, project_id, recording_video_urls, recording_status, ted_subtask_map, ted_task_id")
     .eq("id", runId)
     .single()
   const projectId = run?.project_id as string | undefined
   const urls = (run?.recording_video_urls as Record<string, string>) || {}
+  // Needed to close the video subtask + parent on success (this job is the only
+  // path that closes them now — the barrier no longer closes on start).
+  const map: Record<string, any> = (run?.ted_subtask_map as any) || {}
+  const parentId = tedTaskId || (run?.ted_task_id as string | undefined)
 
   // Which viewports have a retrievable URL right now?
   const available: { viewport: string; url: string }[] = []
@@ -462,7 +419,10 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
 
   const allDone = available.length >= RECORDING_VIEWPORTS.length
   if (allDone) {
-    logger.info({ runId }, "video_url_verify: all viewport URLs posted to main thread.")
+    // PASS: every viewport URL posted back → NOW close the video subtask
+    // (Completed) and the parent (last of all). This is the ONLY success path.
+    await finalizeRunCloseout({ runId, tedTaskId: parentId, map, videoSubtaskIds })
+    logger.info({ runId }, "video_url_verify: all viewport URLs posted; video subtask + parent Completed.")
     return
   }
 
@@ -483,26 +443,32 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
   }
 
   // Final deadline reached.
-  if (available.length === 0) {
-    // No URL ever posted / retrievable → flip the video subtask verdict to failed.
-    const body =
-      "<p>⚠️ <strong>Video recording verification failed</strong> — no video URL was posted or it was not retrievable within the expected window.</p>"
-    for (const subId of videoSubtaskIds) {
-      await postTedComment(subId, body, `ext:video-url-failed-${runId}-${subId}`, {
-        runId,
-        projectId,
-        targetKind: "subtask",
-        checkFactor: VIDEO_FACTOR,
-      }).catch(() => {})
-      await postTedStatus(subId, TED_STATUS_COMPLETED, runId).catch(() => {})
-    }
-    logger.error({ runId }, "video_url_verify: no retrievable URL by deadline; subtask flipped to failed.")
-  } else {
+  if (available.length > 0) {
+    // PASS (partial): at least one viewport URL posted back = the recording is
+    // available → close the video subtask (Completed) and the parent.
+    await finalizeRunCloseout({ runId, tedTaskId: parentId, map, videoSubtaskIds })
     logger.warn(
       { runId, available: available.length },
-      "video_url_verify: deadline reached with partial URLs; posted what was available.",
+      "video_url_verify: deadline with partial URLs; posted available, video subtask + parent Completed.",
     )
+    return
   }
+
+  // FAIL: nothing posted back within the window. Video has no fix → leave the
+  // subtask In Progress and DO NOT close the parent (parent closes only on
+  // video success — URLs posted).
+  const body =
+    "<p>⚠️ <strong>Video recording verification failed</strong> — no video URL was posted or it was not retrievable within the expected window.</p>"
+  for (const subId of videoSubtaskIds) {
+    await postTedComment(subId, body, `ext:video-url-failed-${runId}-${subId}`, {
+      runId,
+      projectId,
+      targetKind: "subtask",
+      checkFactor: VIDEO_FACTOR,
+    }).catch(() => {})
+    await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
+  }
+  logger.error({ runId }, "video_url_verify: no retrievable URL by deadline; video left In Progress, parent left open.")
 }
 
 async function isRetrievable(url: string): Promise<boolean> {
