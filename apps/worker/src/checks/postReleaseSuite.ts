@@ -130,7 +130,7 @@ async function readInstalledVersion(
 }
 
 /** Latest version from the public WordPress.org plugin registry. */
-async function readLatestVersion(slug: string): Promise<string | null> {
+async function readLatestVersionUncached(slug: string): Promise<string | null> {
   const json = await fetchText(
     `https://api.wordpress.org/plugins/info/1.0/${slug}.json`,
   )
@@ -142,6 +142,47 @@ async function readLatestVersion(slug: string): Promise<string | null> {
     /* not in registry (premium / custom) */
   }
   return null
+}
+
+// The wp.org "latest version" for a slug is a GLOBAL fact — identical across
+// every client site — yet it was re-fetched per slug on every run. A
+// process-wide TTL memo (mirroring slugCache) collapses repeat lookups of the
+// same slug to one fetch. The TTL keeps the answer honest across runs rather
+// than pinning a version for the worker's lifetime.
+const LATEST_CACHE_TTL_MS = Math.max(
+  0,
+  Number(process.env.PLUGIN_LATEST_CACHE_TTL_MS || 5 * 60 * 1000),
+)
+const latestVersionCache = new Map<
+  string,
+  { at: number; promise: Promise<string | null> }
+>()
+
+/**
+ * Cached wrapper around readLatestVersionUncached. A fresh slug fetches once;
+ * subsequent calls within the TTL return the in-flight/settled promise. Safe:
+ * the registry answer does not depend on the caller and never mutates shared
+ * state.
+ */
+async function readLatestVersion(slug: string): Promise<string | null> {
+  const now = Date.now()
+  const hit = latestVersionCache.get(slug)
+  if (hit && now - hit.at < LATEST_CACHE_TTL_MS) return hit.promise
+
+  const entry = { at: now, promise: readLatestVersionUncached(slug) }
+  latestVersionCache.set(slug, entry)
+  const result = await entry.promise.catch((e) => {
+    if (latestVersionCache.get(slug) === entry) latestVersionCache.delete(slug)
+    throw e
+  })
+  // CRITICAL: a null result (premium/custom, no public record, or a transient
+  // fetch failure) must NOT be cached — it has to be re-fetched next time, so
+  // "no record" never gets pinned for the whole TTL. Mirrors the empty-result
+  // handling in discoverPluginSlugs.
+  if (result === null && latestVersionCache.get(slug) === entry) {
+    latestVersionCache.delete(slug)
+  }
+  return result
 }
 
 /**

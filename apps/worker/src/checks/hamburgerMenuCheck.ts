@@ -215,11 +215,37 @@ export async function checkHamburgerMenu(
         }, selectors)
         .catch(() => 0)
 
-    let candCount = 0
-    for (let attempt = 0; attempt < 4 && candCount === 0; attempt++) {
-      candCount = await tagToggles()
-      if (!candCount) await page.waitForTimeout(700)
-    }
+    // OPT: The old poll blind-slept 700ms between up to 4 detection rounds
+    // (~2.8s worst case) even though a real toggle usually hydrates far sooner.
+    // Drive detection with a waitForFunction running the SAME filter tagToggles
+    // uses (identical selector list, header band top ≤ 240, visibility/opacity)
+    // — NOT a bare waitForSelector, which would drop that filter — so it resolves
+    // the instant a qualifying toggle appears and short-circuits, with an
+    // equivalent TOTAL timeout (4 × 700ms). `.catch(() => {})` lets a timeout
+    // fall through and never throws/hangs. tagToggles stays the source of truth:
+    // we call it once afterward to actually tag the winners (first 6) and get
+    // candCount, so the verdict and the tagging the open-loop relies on are
+    // unchanged (worst case = the old poll).
+    await page
+      .waitForFunction(
+        (selList: string) =>
+          Array.from(document.querySelectorAll(selList)).some((el) => {
+            const r = (el as HTMLElement).getBoundingClientRect()
+            const s = getComputedStyle(el as HTMLElement)
+            return (
+              r.width > 0 &&
+              r.height > 0 &&
+              r.top <= 240 &&
+              s.visibility !== "hidden" &&
+              s.display !== "none" &&
+              Number(s.opacity) > 0.05
+            )
+          }),
+        selectors,
+        { timeout: 4 * 700 },
+      )
+      .catch(() => {})
+    const candCount = await tagToggles()
 
     if (!candCount) {
       const s = await shot("no_toggle")
@@ -254,7 +280,50 @@ export async function checkHamburgerMenu(
       await cand.tap({ timeout: CLICK_TIMEOUT }).catch(async () => {
         await cand.click({ timeout: CLICK_TIMEOUT }).catch(() => {})
       })
-      await page.waitForTimeout(SETTLE_MS + 500)
+      // OPT: Replace the blind 1000ms (SETTLE_MS + 500) post-tap settle with a
+      // real signal that short-circuits the moment the menu opens, using the SAME
+      // open-signals verified immediately below: the tapped toggle's
+      // aria-expanded === "true", the block responsive container gaining
+      // `.is-menu-open`, or the in-view anchor count rising by ≥ 3 (the `before`
+      // count is passed in). The timeout cap is the SAME 1000ms as the old fixed
+      // wait, so the "did not open" timing/verdict is preserved, and
+      // `.catch(() => {})` lets a timeout fall through (never throws/hangs) — the
+      // verdict is then decided by the same explicit checks below (worst case =
+      // the old sleep).
+      await page
+        .waitForFunction(
+          ({ before, sel }: { before: number; sel: string }) => {
+            const tog = document.querySelector(sel)
+            if (tog && tog.getAttribute("aria-expanded") === "true") return true
+            if (
+              document.querySelector(
+                ".wp-block-navigation__responsive-container.is-menu-open",
+              )
+            )
+              return true
+            const vh = window.innerHeight,
+              vw = window.innerWidth
+            const after = Array.from(document.querySelectorAll("a")).filter(
+              (el) => {
+                const r = (el as HTMLElement).getBoundingClientRect()
+                const s = getComputedStyle(el as HTMLElement)
+                const shown =
+                  r.width > 4 &&
+                  r.height > 4 &&
+                  s.visibility !== "hidden" &&
+                  s.display !== "none" &&
+                  Number(s.opacity) > 0.05
+                const inView =
+                  r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw
+                return shown && inView
+              },
+            ).length
+            return after - before >= 3
+          },
+          { before, sel: `[data-qacc-tog="${i}"]` },
+          { timeout: SETTLE_MS + 500 },
+        )
+        .catch(() => {})
       const expanded = await cand.getAttribute("aria-expanded").catch(() => null)
       const after = await countInViewAnchors(page)
       if (expanded === "true" || (await blockMenuOpen()) || after - before >= 3) {

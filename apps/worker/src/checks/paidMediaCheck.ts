@@ -48,9 +48,20 @@ export async function checkPaidMedia(clientName: string): Promise<Finding[]> {
   let tasks: TedTask[]
   let hs: Awaited<ReturnType<typeof resolveHubspotClientData>> = null
   try {
-    client = await getClient(clientName)
-    tasks = await getClientTimeline(clientName)
-    const domain = await getClientDomain(clientName).catch(() => null)
+    // getClient, getClientTimeline and getClientDomain are independent TED reads
+    // with no ordering dependency, so run them concurrently instead of serially.
+    // Only resolveHubspotClientData genuinely depends on the resolved domain, so
+    // it stays chained after. Error behavior is preserved: getClient /
+    // getClientTimeline rejections still reject the Promise.all and fall into the
+    // same outer catch → "could not reach TED" (getClientDomain keeps its own
+    // .catch, exactly as before).
+    const [clientResult, timeline, domain] = await Promise.all([
+      getClient(clientName),
+      getClientTimeline(clientName),
+      getClientDomain(clientName).catch(() => null),
+    ])
+    client = clientResult
+    tasks = timeline
     hs = await resolveHubspotClientData(domain, clientName).catch(() => null)
   } catch (error: any) {
     logger.error({ error: error.message }, "TED read failed for paid media")

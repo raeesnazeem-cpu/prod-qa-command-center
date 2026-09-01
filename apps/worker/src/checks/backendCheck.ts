@@ -129,13 +129,20 @@ export async function checkBackend(
 
       // 1a/1b/1c fetched together so a total REST outage can be told apart from
       // a genuine "not present" (clean) result.
-      const helloPosts = await fetchJson(
-        `${origin}/wp-json/wp/v2/posts?slug=hello-world&_fields=id,link,title`,
-      )
-      const samplePages = await fetchJson(
-        `${origin}/wp-json/wp/v2/pages?slug=sample-page&_fields=id,link,title`,
-      )
-      const restIndex = await fetchJson(`${origin}/wp-json/`)
+      // PERF: these three REST reads are independent, so issue them concurrently
+      // instead of serially (three round-trips collapse to one wall-clock wait).
+      // fetchJson swallows its own errors and returns null, so Promise.all cannot
+      // reject; the restDown all-null check and per-item pass/fail logic below
+      // read the exact same three values, unchanged.
+      const [helloPosts, samplePages, restIndex] = await Promise.all([
+        fetchJson(
+          `${origin}/wp-json/wp/v2/posts?slug=hello-world&_fields=id,link,title`,
+        ),
+        fetchJson(
+          `${origin}/wp-json/wp/v2/pages?slug=sample-page&_fields=id,link,title`,
+        ),
+        fetchJson(`${origin}/wp-json/`),
+      ])
 
       const restDown =
         helloPosts === null && samplePages === null && restIndex === null
@@ -246,10 +253,22 @@ export async function checkBackend(
       let looksCustom = false
       let overflowViewport = ""
 
+      // PERF: single navigation. The 404 template DOM is identical across
+      // viewports (same URL); only CSS layout differs. Previously each of the 3
+      // viewports re-navigated to the same URL with a full networkidle wait (up
+      // to 30s each). Now we goto ONCE, capture httpStatus from that first
+      // navigation, then only resize + re-measure + screenshot per viewport.
+      // Behavior preserved: httpStatus is identical (only one navigation ever
+      // produced it before too), and the per-viewport screenshots + overflow
+      // findings are unchanged. The goto runs at the 1920x1080 viewport left set
+      // above — same as the old first (Desktop) iteration.
+      const resp = await page
+        .goto(probeUrl, { waitUntil: "networkidle", timeout: 30000 })
+        .catch(() => null)
+      if (resp) httpStatus = resp.status()
+
       for (const vp of VIEWPORTS) {
         await page.setViewportSize({ width: vp.width, height: vp.height })
-        const resp = await page.goto(probeUrl, { waitUntil: "networkidle", timeout: 30000 }).catch(() => null)
-        if (resp && httpStatus === null) httpStatus = resp.status()
 
         const info = await page.evaluate(() => {
           const doc = document.documentElement

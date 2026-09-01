@@ -11,6 +11,23 @@ import { Finding } from '@qacc/shared';
 // racing to start their own.
 let spellPromise: Promise<any> | null = null;
 
+// Optimization: these are immutable lookup tables. They were previously
+// re-allocated on every call — techAllowlist once per getSpeller() build and
+// allowlistSet once per checkSpelling() page — even though their contents never
+// change. Hoisting them to module scope builds each exactly once per process.
+// Neither is mutated after construction (techAllowlist is only iterated to seed
+// the speller; allowlistSet is only read via .has), so this is purely an
+// alloc/GC win with no functional change.
+const techAllowlist = ['WordPress', 'Elementor', 'plugin', 'monorepo', 'QACC', 'Vite'];
+
+const allowlistSet = new Set([
+  'wordpress', 'elementor', 'plugin', 'plugins', 'woocommerce', 'shopify',
+  'backend', 'frontend', 'api', 'seo', 'js', 'css', 'html', 'react', 'vue',
+  'angular', 'node', 'app', 'online', 'website', 'startup', 'web', 'login',
+  'signup', 'dashboard', 'ecommerce', 'blog', 'vlog', 'cdn', 'ssl', 'http',
+  'https', 'localhost', 'dev', 'prod', 'admin', 'ui', 'ux', 'qa', 'saas'
+]);
+
 function getSpeller(): Promise<any> {
   if (!spellPromise) {
     spellPromise = (async () => {
@@ -23,8 +40,7 @@ function getSpeller(): Promise<any> {
 
       const spell = nspell(dictionaryEn);
 
-      // Tech-specific allowlist
-      const techAllowlist = ['WordPress', 'Elementor', 'plugin', 'monorepo', 'QACC', 'Vite'];
+      // Tech-specific allowlist (hoisted to module scope; seeded once here)
       techAllowlist.forEach((word: string) => spell.add(word));
 
       return spell;
@@ -39,14 +55,6 @@ function getSpeller(): Promise<any> {
 
 export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Promise<Finding[]> {
   const spell = await getSpeller();
-
-  const allowlistSet = new Set([
-    'wordpress', 'elementor', 'plugin', 'plugins', 'woocommerce', 'shopify',
-    'backend', 'frontend', 'api', 'seo', 'js', 'css', 'html', 'react', 'vue',
-    'angular', 'node', 'app', 'online', 'website', 'startup', 'web', 'login',
-    'signup', 'dashboard', 'ecommerce', 'blog', 'vlog', 'cdn', 'ssl', 'http',
-    'https', 'localhost', 'dev', 'prod', 'admin', 'ui', 'ux', 'qa', 'saas'
-  ]);
 
   const rawTexts = await page.evaluate(() => {
     const texts: { text: string; extract: string }[] = [];

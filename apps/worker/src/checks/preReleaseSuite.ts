@@ -68,75 +68,89 @@ export async function checkPrivacyPolicy(
   const sharp = require("sharp")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
 
-  let screenshotUrl = ""
-  let checkoutScreenshotUrl = ""
-
   let browser
   try {
     browser = sharedBrowser || (await chromium.launch({ headless: true }))
-    const context = await browser.newContext()
-    const page = await context.newPage()
-    await page.setViewportSize({ width: 1920, height: 1080 })
     if (onProgress)
-      await onProgress(10, "Navigating to homepage to check footer...")
+      await onProgress(10, "Checking privacy policy (footer, checkout, policy)...")
 
-    // 1. Check Homepage Footer
-    await page
-      .goto(url, { waitUntil: "networkidle", timeout: 25000 })
-      .catch(() => {})
+    // The homepage footer, the /checkout privacy notice, and the full
+    // /privacy-policy page are three INDEPENDENT navigations that previously ran
+    // serially on one shared page. Each now runs in its own context/page so all
+    // three load concurrently; the disjoint results are merged below. Every task
+    // owns its context and closes it in a finally. checkout/policy swallow their
+    // own errors (as the original inner try/catch did) and fall back to
+    // defaults; the footer task lets errors propagate to the outer catch,
+    // matching the original control flow.
 
-    let footerHasLink = false
-    let footerElement = page.locator("footer").first()
-    if ((await footerElement.count()) === 0) {
-      footerElement = page
-        .locator(
-          '[role="contentinfo"], .wp-block-template-part[class*="footer"], .site-footer, .footer, #footer, .wp-block-group[class*="footer"]',
-        )
-        .first()
-    }
+    // ---- Task 1: Homepage footer -------------------------------------------
+    const footerTask = (async (): Promise<{
+      footerHasLink: boolean
+      screenshotUrl: string
+    }> => {
+      const context = await browser.newContext()
+      try {
+        const page = await context.newPage()
+        await page.setViewportSize({ width: 1920, height: 1080 })
+        await page
+          .goto(url, { waitUntil: "networkidle", timeout: 25000 })
+          .catch(() => {})
 
-    if ((await footerElement.count()) > 0) {
-      const privacyLinks = footerElement.locator(
-        'a:has-text("Privacy Policy"), a:has-text("Privacy")',
-      )
-      if ((await privacyLinks.count()) > 0) {
-        footerHasLink = true
-        await footerElement.scrollIntoViewIfNeeded().catch(() => null)
-        const screenshotBuffer = await footerElement
-          .screenshot()
-          .catch(() => null)
-        if (screenshotBuffer) {
-          const compressed = await sharp(screenshotBuffer)
-            .jpeg({ quality: 85 })
-            .toBuffer()
-          const storagePath = `evidence/privacy_policy/${runId}-footer-${Date.now()}.jpg`
-          screenshotUrl = await uploadScreenshot(compressed, storagePath, {
-            bucket: "evidence",
-            isPublic: true,
-          }).catch(() => "")
+        let footerHasLink = false
+        let screenshotUrl = ""
+        let footerElement = page.locator("footer").first()
+        if ((await footerElement.count()) === 0) {
+          footerElement = page
+            .locator(
+              '[role="contentinfo"], .wp-block-template-part[class*="footer"], .site-footer, .footer, #footer, .wp-block-group[class*="footer"]',
+            )
+            .first()
         }
+
+        if ((await footerElement.count()) > 0) {
+          const privacyLinks = footerElement.locator(
+            'a:has-text("Privacy Policy"), a:has-text("Privacy")',
+          )
+          if ((await privacyLinks.count()) > 0) {
+            footerHasLink = true
+            await footerElement.scrollIntoViewIfNeeded().catch(() => null)
+            const screenshotBuffer = await footerElement
+              .screenshot()
+              .catch(() => null)
+            if (screenshotBuffer) {
+              const compressed = await sharp(screenshotBuffer)
+                .jpeg({ quality: 85 })
+                .toBuffer()
+              const storagePath = `evidence/privacy_policy/${runId}-footer-${Date.now()}.jpg`
+              screenshotUrl = await uploadScreenshot(compressed, storagePath, {
+                bucket: "evidence",
+                isPublic: true,
+              }).catch(() => "")
+            }
+          }
+        }
+
+        if (!footerHasLink) {
+          const screenshotBuffer = await page.screenshot().catch(() => null)
+          if (screenshotBuffer) {
+            const compressed = await sharp(screenshotBuffer)
+              .jpeg({ quality: 85 })
+              .toBuffer()
+            const storagePath = `evidence/privacy_policy/${runId}-fallback-${Date.now()}.jpg`
+            screenshotUrl = await uploadScreenshot(compressed, storagePath, {
+              bucket: "evidence",
+              isPublic: true,
+            }).catch(() => "")
+          }
+        }
+
+        return { footerHasLink, screenshotUrl }
+      } finally {
+        await context.close().catch(() => {})
       }
-    }
+    })()
 
-    if (!footerHasLink) {
-      const screenshotBuffer = await page.screenshot().catch(() => null)
-      if (screenshotBuffer) {
-        const compressed = await sharp(screenshotBuffer)
-          .jpeg({ quality: 85 })
-          .toBuffer()
-        const storagePath = `evidence/privacy_policy/${runId}-fallback-${Date.now()}.jpg`
-        screenshotUrl = await uploadScreenshot(compressed, storagePath, {
-          bucket: "evidence",
-          isPublic: true,
-        }).catch(() => "")
-      }
-    }
-
-    // 2. Check Checkout Page
-    if (onProgress)
-      await onProgress(40, "Checking checkout page for privacy notice...")
-
-    const checkoutUrl = url.endsWith("/") ? `${url}checkout` : `${url}/checkout`
+    // ---- Task 2: Checkout page ---------------------------------------------
     // The checkout privacy notice only applies to WooCommerce (ecommerce) sites.
     // Non-ecommerce sites have no /checkout — requiring a notice there would
     // fabricate a "Privacy Policy Missing" defect on every brochure site. Gate
@@ -144,52 +158,69 @@ export async function checkPrivacyPolicy(
     // a 200 + theme 404 template) and scope the notice to WooCommerce's
     // dedicated .woocommerce-privacy-policy-text element, not a bare "privacy"
     // substring anywhere on the page (which a footer link would satisfy).
-    let checkoutExists = false
-    let hasPrivacyPolicyOnCheckout = false
-
-    try {
-      const resp = await page.goto(checkoutUrl, {
-        waitUntil: "networkidle",
-        timeout: 15000,
-      })
-      const status = resp ? resp.status() : 0
-      if (status >= 200 && status < 400) {
-        const checkoutInfo = await page.evaluate(() => {
-          const hasCheckoutForm =
-            !!document.querySelector(
-              'form.woocommerce-checkout, form.checkout, .wc-block-checkout, .woocommerce-checkout',
-            ) || document.body.className.includes("woocommerce-checkout")
-          const privacyEl = document.querySelector(
-            ".woocommerce-privacy-policy-text",
-          )
-          const privacyText = privacyEl ? privacyEl.textContent || "" : ""
-          const hasPrivacyLink = !!(
-            privacyEl && privacyEl.querySelector('a[href*="privacy"]')
-          )
-          return {
-            hasCheckoutForm,
-            hasPrivacyNotice: /privacy/i.test(privacyText) || hasPrivacyLink,
-          }
+    const checkoutTask = (async (): Promise<{
+      checkoutExists: boolean
+      hasPrivacyPolicyOnCheckout: boolean
+    }> => {
+      const context = await browser.newContext()
+      let checkoutExists = false
+      let hasPrivacyPolicyOnCheckout = false
+      try {
+        const page = await context.newPage()
+        await page.setViewportSize({ width: 1920, height: 1080 })
+        const checkoutUrl = url.endsWith("/")
+          ? `${url}checkout`
+          : `${url}/checkout`
+        const resp = await page.goto(checkoutUrl, {
+          waitUntil: "networkidle",
+          timeout: 15000,
         })
-        checkoutExists = checkoutInfo.hasCheckoutForm
-        hasPrivacyPolicyOnCheckout = checkoutInfo.hasPrivacyNotice
+        const status = resp ? resp.status() : 0
+        if (status >= 200 && status < 400) {
+          const checkoutInfo = await page.evaluate(() => {
+            const hasCheckoutForm =
+              !!document.querySelector(
+                'form.woocommerce-checkout, form.checkout, .wc-block-checkout, .woocommerce-checkout',
+              ) || document.body.className.includes("woocommerce-checkout")
+            const privacyEl = document.querySelector(
+              ".woocommerce-privacy-policy-text",
+            )
+            const privacyText = privacyEl ? privacyEl.textContent || "" : ""
+            const hasPrivacyLink = !!(
+              privacyEl && privacyEl.querySelector('a[href*="privacy"]')
+            )
+            return {
+              hasCheckoutForm,
+              hasPrivacyNotice: /privacy/i.test(privacyText) || hasPrivacyLink,
+            }
+          })
+          checkoutExists = checkoutInfo.hasCheckoutForm
+          hasPrivacyPolicyOnCheckout = checkoutInfo.hasPrivacyNotice
+        }
+      } catch (e) {
+        // Ignored if checkout page is inaccessible
+      } finally {
+        await context.close().catch(() => {})
       }
-    } catch (e) {
-      // Ignored if checkout page is inaccessible
-    }
+      return { checkoutExists, hasPrivacyPolicyOnCheckout }
+    })()
 
-    // 3. Check Full Privacy Policy Page
-    if (onProgress)
-      await onProgress(70, "Scanning full Privacy Policy content...")
-
-    const policyUrl = url.endsWith("/")
-      ? `${url}privacy-policy`
-      : `${url}/privacy-policy`
-    let fullPolicyScreenshotUrl = ""
-    let isContentMatch = false
-    let actualPolicyText = ""
-
-    try {
+    // ---- Task 3: Full Privacy Policy page ----------------------------------
+    const policyTask = (async (): Promise<{
+      fullPolicyScreenshotUrl: string
+      isContentMatch: boolean
+      actualPolicyText: string
+    }> => {
+      const context = await browser.newContext()
+      let fullPolicyScreenshotUrl = ""
+      let isContentMatch = false
+      let actualPolicyText = ""
+      try {
+        const page = await context.newPage()
+        await page.setViewportSize({ width: 1920, height: 1080 })
+        const policyUrl = url.endsWith("/")
+          ? `${url}privacy-policy`
+          : `${url}/privacy-policy`
       await page.goto(policyUrl, { waitUntil: "networkidle", timeout: 15000 })
       let policyText = await page.evaluate(() => document.body.innerText)
 
@@ -340,9 +371,26 @@ At [Your Business Name], we are dedicated to respecting and protecting your priv
           },
         ).catch(() => "")
       }
-    } catch (e) {
-      // Ignored if privacy policy page is inaccessible
-    }
+      } catch (e) {
+        // Ignored if privacy policy page is inaccessible
+      } finally {
+        await context.close().catch(() => {})
+      }
+      return { fullPolicyScreenshotUrl, isContentMatch, actualPolicyText }
+    })()
+
+    // Run the three independent navigations concurrently and merge the disjoint
+    // result sets. A footer-task rejection propagates to the outer catch
+    // (original behaviour); checkout/policy swallow internally.
+    const [footerRes, checkoutRes, policyRes] = await Promise.all([
+      footerTask,
+      checkoutTask,
+      policyTask,
+    ])
+    const { footerHasLink, screenshotUrl } = footerRes
+    const { checkoutExists, hasPrivacyPolicyOnCheckout } = checkoutRes
+    const { fullPolicyScreenshotUrl, isContentMatch, actualPolicyText } =
+      policyRes
 
     if (!sharedBrowser) await browser.close()
     if (onProgress) await onProgress(90, "Finalizing findings...")
@@ -439,74 +487,97 @@ export async function checkFooterLogo(
     if (onProgress)
       await onProgress(10, "Initializing viewports for footer logo check...")
 
-    for (const vp of viewports) {
-      if (onProgress)
-        await onProgress(30, `Checking footer logo on ${vp.name}...`)
+    // The 3 viewports are captured in PARALLEL — each uses its own isolated
+    // context (fresh load, so per-viewport lazy-load/layout is still verified
+    // independently; we intentionally do NOT collapse to one page+setViewportSize
+    // here). Each task returns its result and shared state is merged in viewport
+    // order afterward, so outputs (footerBuffers order, per-view URLs) are
+    // identical to the old sequential loop. Bounded to 3 concurrent contexts.
+    if (onProgress)
+      await onProgress(30, "Checking footer logo across viewports...")
 
-      const context = await browser.newContext({
-        viewport: { width: vp.width, height: vp.height },
-      })
-      const newPage = await context.newPage()
-      const resp = await newPage
-        .goto(url, { waitUntil: "load", timeout: 30000 })
-        .catch(() => null)
-      if (resp) loadedAny = true
+    const vpResults = await Promise.all(
+      viewports.map(async (vp) => {
+        const context = await browser.newContext({
+          viewport: { width: vp.width, height: vp.height },
+        })
+        try {
+          const newPage = await context.newPage()
+          const resp = await newPage
+            .goto(url, { waitUntil: "load", timeout: 30000 })
+            .catch(() => null)
+          const loaded = !!resp
 
-//      const footer = newPage
-//        .locator('footer, div[class*="footer"], section[class*="footer"]')
-//        .first()
-
-      let footer = newPage.locator("footer").first()
-      if ((await footer.count()) === 0) {
-        footer = newPage
-          .locator(
-            '[role="contentinfo"], .wp-block-template-part[class*="footer"], .site-footer, .footer, #footer, .wp-block-group[class*="footer"]',
-          )
-          .first()
-      }
-
-      if ((await footer.count()) > 0) {
-        footerFoundAny = true
-        // Scroll the footer into view to trigger lazy loading of images
-        if (onProgress)
-          await onProgress(60, `Taking screenshot of footer on ${vp.name}...`)
-
-        await footer.scrollIntoViewIfNeeded().catch(() => {})
-
-        // Wait for the footer's own images to finish decoding rather than a
-        // blind 5 s — the logo is the thing we're screenshotting, so wait on it.
-        // Capped at 3 s so a perpetually-loading tracker pixel can't stall us.
-        await newPage
-          .waitForFunction(
-            () => {
-              const f =
-                document.querySelector("footer") ||
-                document.querySelector(
-                  '[role="contentinfo"], .site-footer, .footer, #footer',
-                )
-              if (!f) return true
-              return Array.from(f.querySelectorAll("img")).every(
-                (img) => (img as HTMLImageElement).complete,
+          let footer = newPage.locator("footer").first()
+          if ((await footer.count()) === 0) {
+            footer = newPage
+              .locator(
+                '[role="contentinfo"], .wp-block-template-part[class*="footer"], .site-footer, .footer, #footer, .wp-block-group[class*="footer"]',
               )
-            },
-            { timeout: 3000 },
-          )
-          .catch(() => {})
+              .first()
+          }
 
-        // Capture only the footer element
-        const buffer = await footer.screenshot()
-        footerBuffers.push({ name: vp.name, buffer })
+          if ((await footer.count()) > 0) {
+            // Scroll the footer into view to trigger lazy loading of images
+            await footer.scrollIntoViewIfNeeded().catch(() => {})
 
-        const storagePath = `${runId}/${pageId}/footer_${vp.name}.png`
+            // Wait for the footer's own images to finish decoding rather than a
+            // blind 5 s — the logo is the thing we're screenshotting, so wait on
+            // it. Capped at 3 s so a perpetually-loading tracker pixel can't
+            // stall us.
+            await newPage
+              .waitForFunction(
+                () => {
+                  const f =
+                    document.querySelector("footer") ||
+                    document.querySelector(
+                      '[role="contentinfo"], .site-footer, .footer, #footer',
+                    )
+                  if (!f) return true
+                  return Array.from(f.querySelectorAll("img")).every(
+                    (img) => (img as HTMLImageElement).complete,
+                  )
+                },
+                { timeout: 3000 },
+              )
+              .catch(() => {})
 
-        // Upload to supabase
-        const publicUrl = await uploadScreenshot(buffer, storagePath)
+            // Capture only the footer element
+            const buffer = await footer.screenshot()
+            const storagePath = `${runId}/${pageId}/footer_${vp.name}.png`
+            const publicUrl = await uploadScreenshot(buffer, storagePath)
+            return {
+              name: vp.name,
+              loaded,
+              footerFound: true,
+              buffer,
+              url: publicUrl,
+            }
+          }
+          return {
+            name: vp.name,
+            loaded,
+            footerFound: false,
+            buffer: null as Buffer | null,
+            url: null as string | null,
+          }
+        } finally {
+          await context.close()
+        }
+      }),
+    )
 
-        if (vp.name === "desktop") desktopUrl = publicUrl
-        if (vp.name === "tablet") tabletUrl = publicUrl
-        if (vp.name === "mobile") mobileUrl = publicUrl
+    // Merge in viewport order — identical to the old sequential assignment.
+    for (const r of vpResults) {
+      if (r.loaded) loadedAny = true
+      if (r.footerFound) footerFoundAny = true
+      if (r.footerFound && r.buffer)
+        footerBuffers.push({ name: r.name, buffer: r.buffer })
+      if (r.url) {
+        if (r.name === "desktop") desktopUrl = r.url
+        if (r.name === "tablet") tabletUrl = r.url
+        if (r.name === "mobile") mobileUrl = r.url
       }
-      await context.close()
     }
     if (!sharedBrowser) await browser.close()
   } catch (e: any) {
@@ -560,11 +631,21 @@ export async function checkFooterLogo(
 
   const perView: { name: string; pass: boolean; reasons: string[]; variant?: string; notes?: string }[] = []
   const visionErrors: string[] = []
-  for (const { name, buffer } of footerBuffers) {
-    const { verdict, error } = await verifyFooterLogo(buffer).catch((e: any) => ({
-      verdict: null,
-      error: e?.message || String(e),
-    }))
+  // Vision verdicts for the captured views run in PARALLEL (independent AI
+  // calls); results are then consumed in footerBuffers order, so perView /
+  // visionErrors are built identically to the old sequential loop.
+  const visionResults = await Promise.all(
+    footerBuffers.map(({ name, buffer }) =>
+      verifyFooterLogo(buffer)
+        .then((r: any) => ({ name, verdict: r?.verdict, error: r?.error }))
+        .catch((e: any) => ({
+          name,
+          verdict: null,
+          error: e?.message || String(e),
+        })),
+    ),
+  )
+  for (const { name, verdict, error } of visionResults) {
     if (!verdict) {
       if (error) visionErrors.push(`${name}: ${error}`)
       continue // vision unavailable for this view
@@ -1079,146 +1160,161 @@ export async function checkFavicon(
     if (onProgress)
       await onProgress(10, "Initializing viewports for favicon check...")
 
-    for (const vp of viewports) {
-      if (onProgress) await onProgress(30, `Checking favicon on ${vp.name}...`)
+    if (onProgress)
+      await onProgress(30, "Capturing favicon across viewports...")
 
-      const context = await browser.newContext({
-        viewport: { width: vp.width, height: vp.height },
+    // The 3 viewport captures and the code/verify context are all independent
+    // navigations → run them CONCURRENTLY. Each viewport uses its own isolated
+    // context; the code task does the page-source read + favicon HTTP verify +
+    // code screenshot. Results are merged after, so all outputs (per-view URLs,
+    // faviconChecked/Declared/HttpStatus/ResourceOk, codeUrl) are identical to
+    // the old sequential version. Bounded to 4 concurrent contexts (2 vCPU box).
+    const viewportTask = Promise.all(
+      viewports.map(async (vp) => {
+        const context = await browser.newContext({
+          viewport: { width: vp.width, height: vp.height },
+          userAgent:
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        })
+        try {
+          const newPage = await context.newPage()
+          await newPage
+            .goto(url, { waitUntil: "networkidle", timeout: 30000 })
+            .catch(() => {})
+
+          // Inject mock browser tab UI to visually verify the favicon inside the viewport screenshot
+          await newPage
+            .evaluate(async () => {
+              const faviconUrl = document.querySelector(
+                'link[rel*="icon" i], link[rel*="shortcut" i], link[rel="apple-touch-icon" i]',
+              ) as HTMLLinkElement | null
+              const urlStr = faviconUrl
+                ? faviconUrl.href
+                : window.location.origin + "/favicon.ico"
+              const pageTitle = document.title || "Untitled"
+
+              const bar = document.createElement("div")
+              bar.style.cssText =
+                "position: fixed; top: 0; left: 0; width: 100vw; height: 40px; background: #dee1e6; display: flex; align-items: flex-end; padding: 0 8px; z-index: 2147483647; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; box-sizing: border-box;"
+
+              bar.innerHTML =
+                '<div style="display: flex; gap: 6px; padding-bottom: 12px; padding-left: 8px;">' +
+                '<div style="width: 12px; height: 12px; border-radius: 50%; background: #ff5f56;"></div>' +
+                '<div style="width: 12px; height: 12px; border-radius: 50%; background: #ffbd2e;"></div>' +
+                '<div style="width: 12px; height: 12px; border-radius: 50%; background: #27c93f;"></div>' +
+                "</div>" +
+                '<div style="display: flex; align-items: center; background: #ffffff; height: 32px; min-width: 200px; max-width: 240px; margin-left: 16px; border-radius: 8px 8px 0 0; padding: 0 12px; gap: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">' +
+                (urlStr
+                  ? '<img src="' +
+                    urlStr +
+                    '" style="width: 16px; height: 16px; object-fit: contain;">'
+                  : '<div style="width: 16px; height: 16px; border: 1px dashed #ccc;"></div>') +
+                '<span style="font-size: 12px; color: #3c4043; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;">' +
+                pageTitle +
+                "</span>" +
+                "</div>"
+
+              document.documentElement.appendChild(bar)
+
+              if (document.body) {
+                document.body.style.marginTop = "40px"
+              }
+
+              // Wait for the favicon image to fully load before taking the screenshot
+              const img = bar.querySelector("img")
+              if (img) {
+                await new Promise((resolve) => {
+                  if (img.complete) {
+                    resolve(true)
+                  } else {
+                    img.onload = resolve
+                    img.onerror = resolve
+                    setTimeout(resolve, 2000) // 2 second timeout fallback
+                  }
+                })
+              }
+            })
+            .catch(() => {})
+
+          const buffer = await newPage.screenshot({ fullPage: false })
+          const storagePath = `${runId}/${pageId}/favicon_${vp.name}.png`
+          const publicUrl = await uploadScreenshot(buffer, storagePath)
+          return { name: vp.name, url: publicUrl }
+        } finally {
+          await context.close()
+        }
+      }),
+    )
+
+    const codeTask = (async () => {
+      const codeContext = await browser.newContext({
         userAgent:
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       })
+      try {
+        const codePage = await codeContext.newPage()
+        const codeResp = await codePage
+          .goto(url, { waitUntil: "networkidle", timeout: 30000 })
+          .catch(() => null)
+        codeLoadOk = !!codeResp
 
-      const newPage = await context.newPage()
-      await newPage
-        .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-        .catch(() => {})
-
-      // Inject mock browser tab UI to visually verify the favicon inside the viewport screenshot
-      await newPage
-        .evaluate(async () => {
-          const faviconUrl = document.querySelector(
+        const faviconInfo = await codePage.evaluate(() => {
+          const el = document.querySelector(
             'link[rel*="icon" i], link[rel*="shortcut" i], link[rel="apple-touch-icon" i]',
           ) as HTMLLinkElement | null
-          const urlStr = faviconUrl
-            ? faviconUrl.href
-            : window.location.origin + "/favicon.ico"
-          const pageTitle = document.title || "Untitled"
-
-          const bar = document.createElement("div")
-          bar.style.cssText =
-            "position: fixed; top: 0; left: 0; width: 100vw; height: 40px; background: #dee1e6; display: flex; align-items: flex-end; padding: 0 8px; z-index: 2147483647; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; box-sizing: border-box;"
-
-          bar.innerHTML =
-            '<div style="display: flex; gap: 6px; padding-bottom: 12px; padding-left: 8px;">' +
-            '<div style="width: 12px; height: 12px; border-radius: 50%; background: #ff5f56;"></div>' +
-            '<div style="width: 12px; height: 12px; border-radius: 50%; background: #ffbd2e;"></div>' +
-            '<div style="width: 12px; height: 12px; border-radius: 50%; background: #27c93f;"></div>' +
-            "</div>" +
-            '<div style="display: flex; align-items: center; background: #ffffff; height: 32px; min-width: 200px; max-width: 240px; margin-left: 16px; border-radius: 8px 8px 0 0; padding: 0 12px; gap: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">' +
-            (urlStr
-              ? '<img src="' +
-                urlStr +
-                '" style="width: 16px; height: 16px; object-fit: contain;">'
-              : '<div style="width: 16px; height: 16px; border: 1px dashed #ccc;"></div>') +
-            '<span style="font-size: 12px; color: #3c4043; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;">' +
-            pageTitle +
-            "</span>" +
-            "</div>"
-
-          document.documentElement.appendChild(bar)
-
-          if (document.body) {
-            document.body.style.marginTop = "40px"
+          return {
+            declared: !!el,
+            // Resolve to an absolute URL; fall back to the conventional /favicon.ico.
+            href: el ? el.href : window.location.origin + "/favicon.ico",
+            outerHTML: el
+              ? el.outerHTML
+              : "Favicon element not found in page source",
           }
+        })
+        const codeSnippet = faviconInfo.outerHTML
 
-          // Wait for the favicon image to fully load before taking the screenshot
-          const img = bar.querySelector("img")
-          if (img) {
-            await new Promise((resolve) => {
-              if (img.complete) {
-                resolve(true)
-              } else {
-                img.onload = resolve
-                img.onerror = resolve
-                setTimeout(resolve, 2000) // 2 second timeout fallback
-              }
+        // Actually verify the favicon RESOURCE resolves (docstring promise). A link
+        // tag that points at a 404 is a broken favicon and must be reported, not
+        // silently passed. Only attempt when the page itself loaded.
+        if (codeLoadOk) {
+          try {
+            const res = await codePage.request.get(faviconInfo.href, {
+              timeout: 15000,
             })
+            faviconHttpStatus = res.status()
+            const ct = (res.headers()["content-type"] || "").toLowerCase()
+            // OK = 2xx AND not obviously the HTML 404/soft-404 page.
+            faviconResourceOk = res.ok() && !ct.includes("text/html")
+            faviconChecked = true
+          } catch (e) {
+            // Network-level failure — cannot determine; leave faviconChecked false
+            // so we fall back to the manual-verify card rather than a false defect.
+            faviconChecked = false
           }
-        })
-        .catch(() => {})
+        }
+        faviconDeclared = faviconInfo.declared
 
-      const buffer = await newPage.screenshot({ fullPage: false })
-      const storagePath = `${runId}/${pageId}/favicon_${vp.name}.png`
-      const publicUrl = await uploadScreenshot(buffer, storagePath)
+        const renderPage = await codeContext.newPage()
+        await renderPage.setContent(
+          `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
+        )
+        const codeBuffer = await renderPage.screenshot({ fullPage: false })
+        codeUrl = await uploadScreenshot(
+          codeBuffer,
+          `${runId}/${pageId}/favicon_code.png`,
+        )
+      } finally {
+        await codeContext.close()
+      }
+    })()
 
-      if (vp.name === "desktop") desktopUrl = publicUrl
-      if (vp.name === "tablet") tabletUrl = publicUrl
-      if (vp.name === "mobile") mobileUrl = publicUrl
-
-      await context.close()
+    const [vpUrls] = await Promise.all([viewportTask, codeTask])
+    for (const r of vpUrls) {
+      if (r.name === "desktop") desktopUrl = r.url
+      if (r.name === "tablet") tabletUrl = r.url
+      if (r.name === "mobile") mobileUrl = r.url
     }
 
-    if (onProgress)
-      await onProgress(70, "Fetching page source for favicon verification...")
-
-    const codeContext = await browser.newContext({
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    })
-
-    const codePage = await codeContext.newPage()
-    const codeResp = await codePage
-      .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-      .catch(() => null)
-    codeLoadOk = !!codeResp
-
-    const faviconInfo = await codePage.evaluate(() => {
-      const el = document.querySelector(
-        'link[rel*="icon" i], link[rel*="shortcut" i], link[rel="apple-touch-icon" i]',
-      ) as HTMLLinkElement | null
-      return {
-        declared: !!el,
-        // Resolve to an absolute URL; fall back to the conventional /favicon.ico.
-        href: el ? el.href : window.location.origin + "/favicon.ico",
-        outerHTML: el
-          ? el.outerHTML
-          : "Favicon element not found in page source",
-      }
-    })
-    const codeSnippet = faviconInfo.outerHTML
-
-    // Actually verify the favicon RESOURCE resolves (docstring promise). A link
-    // tag that points at a 404 is a broken favicon and must be reported, not
-    // silently passed. Only attempt when the page itself loaded.
-    if (codeLoadOk) {
-      try {
-        const res = await codePage.request.get(faviconInfo.href, {
-          timeout: 15000,
-        })
-        faviconHttpStatus = res.status()
-        const ct = (res.headers()["content-type"] || "").toLowerCase()
-        // OK = 2xx AND not obviously the HTML 404/soft-404 page.
-        faviconResourceOk = res.ok() && !ct.includes("text/html")
-        faviconChecked = true
-      } catch (e) {
-        // Network-level failure — cannot determine; leave faviconChecked false
-        // so we fall back to the manual-verify card rather than a false defect.
-        faviconChecked = false
-      }
-    }
-    faviconDeclared = faviconInfo.declared
-
-    const renderPage = await codeContext.newPage()
-    await renderPage.setContent(
-      `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
-    )
-    const codeBuffer = await renderPage.screenshot({ fullPage: false })
-    codeUrl = await uploadScreenshot(
-      codeBuffer,
-      `${runId}/${pageId}/favicon_code.png`,
-    )
-
-    await codeContext.close()
     if (!sharedBrowser) await browser.close()
     if (onProgress) await onProgress(90, "Finalizing findings...")
   } catch (e: any) {
@@ -1441,33 +1537,55 @@ export async function checkGrowth99ContactForm(
           { name: "mobile", width: 375, height: 812 },
         ]
 
-        for (const vp of viewports) {
-          const vpContext = await browser.newContext({
-            viewport: { width: vp.width, height: vp.height },
-          })
-          const vpPage = await vpContext.newPage()
-          await vpPage
-            .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-            .catch(() => {})
+        // Evidence screenshots across the 3 viewports run in PARALLEL: each uses
+        // its own isolated browser context (no shared page state), so there is no
+        // cross-talk. Results are collected in viewport order and pushed in the
+        // same order as before, so the finding's screenshot list is unchanged.
+        // Bounded to exactly 3 concurrent contexts (2 vCPU box).
+        const vpShots = await Promise.all(
+          viewports.map(async (vp) => {
+            const vpContext = await browser.newContext({
+              viewport: { width: vp.width, height: vp.height },
+            })
+            try {
+              const vpPage = await vpContext.newPage()
+              await vpPage
+                .goto(url, { waitUntil: "networkidle", timeout: 30000 })
+                .catch(() => {})
 
-          const iframeLoc = vpPage
-            .locator(
-              'iframe[src*="widget-ui.growth99.com/assets/widgets/new-form.html"]',
-            )
-            .first()
-          if ((await iframeLoc.count()) > 0) {
-            await iframeLoc.scrollIntoViewIfNeeded().catch(() => {})
-            await vpPage.waitForTimeout(2000)
-          }
+              const iframeLoc = vpPage
+                .locator(
+                  'iframe[src*="widget-ui.growth99.com/assets/widgets/new-form.html"]',
+                )
+                .first()
+              if ((await iframeLoc.count()) > 0) {
+                await iframeLoc.scrollIntoViewIfNeeded().catch(() => {})
+                // Replace the blind 2s settle with the iframe's own load signal
+                // (Playwright observes a cross-origin frame's lifecycle). Capped
+                // at the same 2s and falls through on timeout, so the worst-case
+                // timing (and the resulting screenshot) is identical to before.
+                const fh = await iframeLoc.elementHandle().catch(() => null)
+                const fr = fh ? await fh.contentFrame().catch(() => null) : null
+                if (fr) {
+                  await fr
+                    .waitForLoadState("load", { timeout: 2000 })
+                    .catch(() => {})
+                } else {
+                  await vpPage.waitForTimeout(2000)
+                }
+              }
 
-          const buffer = await vpPage.screenshot({ fullPage: false })
-          const publicUrl = await uploadScreenshot(
-            buffer,
-            `${runId}/${pageId}/contact_form_${vp.name}.png`,
-          )
-          screenshots.push(publicUrl)
-          await vpContext.close()
-        }
+              const buffer = await vpPage.screenshot({ fullPage: false })
+              return await uploadScreenshot(
+                buffer,
+                `${runId}/${pageId}/contact_form_${vp.name}.png`,
+              )
+            } finally {
+              await vpContext.close()
+            }
+          }),
+        )
+        for (const publicUrl of vpShots) screenshots.push(publicUrl)
 
         if (onProgress)
           await onProgress(70, "Submitting dummy data to the contact form...")
@@ -1505,7 +1623,17 @@ export async function checkGrowth99ContactForm(
               .click('button[type="submit"]', { timeout: 3000 })
               .catch(() => {})
 
-            await page.waitForTimeout(4000) // Wait for thank you page
+            // Replace the blind 4s wait with the form-frame's own thank-you
+            // signal: submit renders a "thank you" state inside the widget frame.
+            // Resolve as soon as that text appears; otherwise fall through at the
+            // same 4s cap, so a form that never shows a thank-you is timed (and
+            // screenshotted) exactly as before.
+            await frame
+              .waitForFunction(
+                () => /thank/i.test(document.body?.innerText || ""),
+                { timeout: 4000 },
+              )
+              .catch(() => {}) // Wait for thank you page
 
             const thankYouBuffer = await page.screenshot({ fullPage: false })
             const thankYouUrl = await uploadScreenshot(
@@ -1628,15 +1756,19 @@ export async function checkChatbotAndConsultation(
       }).catch(() => "")) || null
   }
 
-  // 2. Vision: are the circular buttons + chatbot bubble actually visible?
-  const verdict = shot ? await analyzeChatWidgets(shot).catch(() => null) : null
-
-  // 3. Definitive backend proof: are the Basecamp install codes in the source?
-  const source = (await page.content().catch(() => "")) || ""
-  const codes = await getChatbotConsultationCodes(
-    opts?.projectId,
-    opts?.projectName,
-  ).catch(() => null)
+  // 2 + 3. Three independent reads — the widget vision verdict, the page
+  // source, and the Basecamp install codes — so run them concurrently.
+  //   • verdict: are the circular buttons + chatbot bubble actually visible?
+  //   • source:  page HTML, for the definitive backend install-code proof.
+  //   • codes:   Basecamp install codes.
+  const [verdict, source, codes] = await Promise.all([
+    shot ? analyzeChatWidgets(shot).catch(() => null) : Promise.resolve(null),
+    page
+      .content()
+      .catch(() => "")
+      .then((s: string) => s || ""),
+    getChatbotConsultationCodes(opts?.projectId, opts?.projectName).catch(() => null),
+  ])
 
   // Cliff Hanger integration script (enables the chatbot + launcher buttons).
   const INTEGRATION = "chatbot.growth99.com/assets/js/integration.js"
@@ -2217,15 +2349,19 @@ export async function checkUrlTabComparison(
 
   let browser: any = null
   try {
-    // Step 1: dev pages. URLs supplied by the run carry no titles, so those
-    // still need a title pass; a self-crawl already returns them.
-    const devPages: PageInfo[] =
+    // Steps 1 & 2: dev pages and live pages hit DIFFERENT hosts, so collect
+    // them concurrently instead of one-after-the-other.
+    //   • dev:  URLs supplied by the run carry no titles, so those still need a
+    //           title pass; a self-crawl already returns them.
+    //   • live: crawled with titles in the same pass.
+    // Progress bands (0-30 dev, 30-45 live) now interleave — cosmetic only.
+    // Concurrent HTTP fan-out doubles to 2x URL_COMPARE_CONCURRENCY.
+    const [devPages, livePages]: [PageInfo[], PageInfo[]] = await Promise.all([
       allDevUrls.length > 0
-        ? await fetchTabTitles(allDevUrls, "dev site", 0)
-        : await crawlSite(devSiteUrl, "dev site", 0)
-
-    // Step 2: live pages — crawled with titles in the same pass.
-    const livePages = await crawlSite(liveSiteUrl, "live site", 30)
+        ? fetchTabTitles(allDevUrls, "dev site", 0)
+        : crawlSite(devSiteUrl, "dev site", 0),
+      crawlSite(liveSiteUrl, "live site", 30),
+    ])
 
     // Step 3: Build context_text as JSON string
     if (onProgress) await onProgress(90, "Analyzing discrepancies...")
@@ -2468,8 +2604,68 @@ export async function checkSocialShareHeading(
     await inputLocator.press("Enter")
     if (onProgress) await onProgress(30, "Generating social share previews...")
 
-    // Wait for the result to load visually
-    await page.waitForTimeout(6000)
+    // Wait for the preview result to render instead of a blind 6 s. The
+    // socialsharepreview.com tabs (Facebook / X / LinkedIn) only appear once the
+    // preview has generated, so their presence is the real "ready" signal. Cap
+    // at the original 6 s and swallow — a timeout just falls through to today's
+    // behaviour (screenshot whatever is there).
+    await page
+      .waitForSelector(".tabs-component-tab-a", { timeout: 6000 })
+      .catch(() => {})
+
+    // The meta-tags capture is fully independent of the socialsharepreview tab
+    // screenshots — it opens its OWN context, navigates to the target URL, and
+    // renders a snippet, never touching `page`. Kick it off now so it runs
+    // concurrently with the serial per-tab captures below. Its `.catch` records
+    // the error and resolves to "" so there is never an unhandled rejection; we
+    // re-throw after awaiting it, preserving the original "a meta-tags failure
+    // fails the whole check" semantics.
+    if (onProgress) await onProgress(95, "Capturing meta tags source code...")
+    let metaTagsError: any = null
+    const metaTagsTask: Promise<string> = (async () => {
+      const codeContext = await browser.newContext({
+        userAgent:
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      })
+      try {
+        const codePage = await codeContext.newPage()
+        await codePage
+          .goto(url, { waitUntil: "networkidle", timeout: 30000 })
+          .catch(() => {})
+
+        const codeSnippet = await codePage.evaluate(() => {
+          const tags = document.querySelectorAll(
+            'title, meta[name="description"], meta[property^="og:"], meta[name^="twitter:"], meta[property^="twitter:"]',
+          )
+          return tags.length > 0
+            ? Array.from(tags)
+                .map((tag) => tag.outerHTML)
+                .join("\n")
+            : "Meta tags not found in page source"
+        })
+
+        const renderPage = await codeContext.newPage()
+        await renderPage.setContent(
+          `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
+        )
+        const codeBuffer = await renderPage.screenshot({ fullPage: false })
+        return await uploadScreenshot(
+          codeBuffer,
+          `${runId}/${pageId}/social_meta_tags.png`,
+        )
+      } finally {
+        await codeContext.close().catch(() => {})
+      }
+    })().catch((e) => {
+      metaTagsError = e
+      return ""
+    })
+
+    // Per-tab wait after a click: the tabs are client-rendered and may lazy-load
+    // the preview image, so wait for the network to settle instead of a blind
+    // 2 s. Capped at the original 2 s and swallowed — worst case matches today.
+    const settleTab = () =>
+      page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {})
 
     // Capture Facebook tab
     if (onProgress) await onProgress(50, "Capturing Facebook preview...")
@@ -2477,7 +2673,7 @@ export async function checkSocialShareHeading(
       .locator('.tabs-component-tab-a:has-text("Facebook")')
       .first()
     if ((await fbTab.count()) > 0) await fbTab.click()
-    await page.waitForTimeout(2000)
+    await settleTab()
     const fbBuffer = await page.screenshot()
     facebookUrl = await uploadScreenshot(
       fbBuffer,
@@ -2489,7 +2685,7 @@ export async function checkSocialShareHeading(
 
     const xTab = page.locator('.tabs-component-tab-a:has-text("X")').first()
     if ((await xTab.count()) > 0) await xTab.click()
-    await page.waitForTimeout(2000)
+    await settleTab()
     const xBuffer = await page.screenshot()
     xUrl = await uploadScreenshot(xBuffer, `${runId}/${pageId}/social_x.png`)
 
@@ -2501,47 +2697,16 @@ export async function checkSocialShareHeading(
       .first()
 
     if ((await lnTab.count()) > 0) await lnTab.click()
-    await page.waitForTimeout(2000)
+    await settleTab()
     const lnBuffer = await page.screenshot()
     linkedinUrl = await uploadScreenshot(
       lnBuffer,
       `${runId}/${pageId}/social_ln.png`,
     )
 
-    if (onProgress) await onProgress(95, "Capturing meta tags source code...")
-
-    const codeContext = await browser.newContext({
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    })
-
-    const codePage = await codeContext.newPage()
-    await codePage
-      .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-      .catch(() => {})
-
-    const codeSnippet = await codePage.evaluate(() => {
-      const tags = document.querySelectorAll(
-        'title, meta[name="description"], meta[property^="og:"], meta[name^="twitter:"], meta[property^="twitter:"]',
-      )
-      return tags.length > 0
-        ? Array.from(tags)
-            .map((tag) => tag.outerHTML)
-            .join("\n")
-        : "Meta tags not found in page source"
-    })
-
-    const renderPage = await codeContext.newPage()
-    await renderPage.setContent(
-      `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
-    )
-    const codeBuffer = await renderPage.screenshot({ fullPage: false })
-    metaTagsUrl = await uploadScreenshot(
-      codeBuffer,
-      `${runId}/${pageId}/social_meta_tags.png`,
-    )
-
-    await codeContext.close()
+    // Join the concurrent meta-tags capture and preserve its failure semantics.
+    metaTagsUrl = await metaTagsTask
+    if (metaTagsError) throw metaTagsError
 
     if (!sharedBrowser) await browser.close()
   } catch (err: any) {

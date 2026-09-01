@@ -142,8 +142,18 @@ export async function checkGbp(
     if (onProgress) await onProgress(60, `Auditing ${capped.length} location(s)...`)
 
     let audited = 0
+    // PERF: the ≤5 Place Details fetches are independent I/O, so fetch them
+    // concurrently instead of one-await-per-iteration. Promise.all preserves
+    // input order, so `details[i]` still lines up with `capped[i]` and the
+    // findings are built in the exact same order as before. The per-item
+    // `.catch(() => null)` keeps one failure from rejecting the whole batch,
+    // matching the old per-item `.catch(() => null)`. 5 concurrent is well
+    // within Google Places QPS.
+    const details = await Promise.all(
+      capped.map((id) => placeDetails(id, key).catch(() => null)),
+    )
     for (let i = 0; i < capped.length; i++) {
-      const p = await placeDetails(capped[i], key).catch(() => null)
+      const p = details[i]
       if (!p) continue
       audited++
 
