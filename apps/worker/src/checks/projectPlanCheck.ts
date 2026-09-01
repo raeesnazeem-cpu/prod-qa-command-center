@@ -64,6 +64,10 @@ export async function checkProjectPlan(
     themeType?: string
   },
   onProgress?: (progress: number, message: string) => Promise<void>,
+  // OPTIONAL trailing param: when the caller already owns a warm chromium it can
+  // pass it in to skip the ~1-2s cold launch per Accelerator run. Callers that
+  // omit it (the existing 3-arg call site) get the old self-launch behavior.
+  sharedBrowser?: any,
 ): Promise<Finding[]> {
   if (onProgress) await onProgress(20, "Reading project plan...")
 
@@ -173,10 +177,16 @@ export async function checkProjectPlan(
   if (pageRecord?.siteUrl) {
     const base = pageRecord.siteUrl.replace(/\/$/, "")
     reviewsUrl = `${base}/reviews`
-    const browser = await chromium.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-    })
+    // Reuse a caller-supplied browser when present; otherwise cold-launch our
+    // own. Skipping the launch saves the ~1-2s chromium cold start per
+    // Accelerator run. Behavior-identical: same page/probe logic either way,
+    // and we only close what we launched (below).
+    const browser =
+      sharedBrowser ||
+      (await chromium.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+      }))
     try {
       const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } })
       page.setDefaultNavigationTimeout(25000)
@@ -185,7 +195,9 @@ export async function checkProjectPlan(
       } catch {
         await page.goto(reviewsUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {})
       }
-      await page.waitForTimeout(4000)
+      // networkidle already settled the network above; this shorter wait only
+      // covers the reviews widget-iframe's own async settle, so 1.5s suffices.
+      await page.waitForTimeout(1500)
 
       // (a) Widget code present in the rendered markup.
       const html = await page.content().catch(() => "")
@@ -213,7 +225,8 @@ export async function checkProjectPlan(
     } catch (e: any) {
       logger.warn({ error: e.message }, "reviews page probe failed (non-fatal)")
     } finally {
-      await browser.close().catch(() => {})
+      // Only tear down the browser we launched; a shared one is owned by the caller.
+      if (!sharedBrowser) await browser.close().catch(() => {})
     }
   }
 

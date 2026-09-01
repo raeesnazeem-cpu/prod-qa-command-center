@@ -1,6 +1,7 @@
 import { Browser } from "playwright"
 import { Finding } from "@qacc/shared"
 import { describeImage } from "../lib/aiFallback"
+import pLimit from "p-limit"
 
 /**
  * QA Image Quality — watermark & blur (per-image)
@@ -149,16 +150,34 @@ export async function checkImageQuality(
       note: string
     }[] = []
 
+    // PERF: pre-download the image bytes with bounded concurrency (pLimit(3)).
+    // Only the pure network download is parallelized; the blur (sharp) and
+    // vision (Gemini) steps below stay strictly serial and in the same order,
+    // so visionUsed / MAX_VISION / MAX_ISSUES caps and finding ordering are
+    // unchanged. Each task mirrors the old per-item download exactly (same
+    // context.request.get + timeout, returns null on failure/non-ok), and
+    // Promise.all preserves order so buffers[i] lines up with candidates[i].
+    // Concurrency is capped at 3 (not all 15) to avoid holding many full image
+    // buffers in memory at once on the 4 GB box.
+    const dlLimit = pLimit(3)
+    const buffers: (Buffer | null)[] = await Promise.all(
+      candidates.map((im) =>
+        dlLimit(async () => {
+          try {
+            const resp = await context.request.get(im.src, { timeout: 20000 })
+            if (resp.ok()) return await resp.body()
+          } catch {
+            return null
+          }
+          return null
+        }),
+      ),
+    )
+
     for (let i = 0; i < candidates.length; i++) {
       if (issues.length >= MAX_ISSUES) break
       const im = candidates[i]
-      let buf: Buffer | null = null
-      try {
-        const resp = await context.request.get(im.src, { timeout: 20000 })
-        if (resp.ok()) buf = await resp.body()
-      } catch {
-        buf = null
-      }
+      const buf: Buffer | null = buffers[i]
       if (!buf || buf.length === 0) continue
       checked++
 

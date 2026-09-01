@@ -27,8 +27,9 @@ const TOLERANCE = 2
 // Fixed viewport height during the sweep (px). Width is what we vary.
 const VIEWPORT_HEIGHT = 1080
 
-// Reflow settle time after each viewport resize (ms).
-const REFLOW_MS = 120
+// PERF: the old fixed REFLOW_MS = 120 settle wait after each resize was
+// removed — measure() now waits on a double-requestAnimationFrame barrier plus
+// a 16ms floor instead of a flat 120ms. See measure() for the rationale.
 
 // Coarse sample widths (px): common device + container widths from small
 // phones up to large desktops. Bands of overflow between adjacent samples
@@ -96,17 +97,41 @@ export async function checkFalseBreakpoints(
     }
 
     // Measures horizontal overflow + culprit elements at a given width.
-    const measure = async (width: number): Promise<Measurement> => {
+    //
+    // PERF: `collectCulprits` gates the O(N) getComputedStyle-per-element
+    // offender sweep. That sweep runs against every DOM element and is the
+    // dominant cost of a measure, yet its result is only ever read from the
+    // FINAL `worst` re-measure (below). Coarse-sweep and binary-search calls
+    // only use `overflow`, so they pass `false` and skip the sweep entirely.
+    // Safe: the returned shape is unchanged (culprits = [] when not collected),
+    // and overflow/vw/sw are computed identically regardless of the flag.
+    const measure = async (
+      width: number,
+      collectCulprits = false,
+    ): Promise<Measurement> => {
       await page.setViewportSize({ width, height: VIEWPORT_HEIGHT })
-      await page.waitForTimeout(REFLOW_MS)
-      return (await page.evaluate((tol: number) => {
+      // PERF: replaced the fixed 120ms reflow wait with a double-requestAnimationFrame
+      // barrier — layout is settled once two frames have been painted after the
+      // resize, which is typically far faster than a flat 120ms. The synchronous
+      // scrollWidth/clientWidth read below also forces layout, so a double-rAF is
+      // a sufficient reflow signal. A single 16ms floor is kept as a safety margin
+      // for slow responsive-image (srcset) swaps.
+      await page.evaluate(
+        () =>
+          new Promise<void>((r) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => r())),
+          ),
+      )
+      await page.waitForTimeout(16)
+      return (await page.evaluate(
+        ({ tol, collect }: { tol: number; collect: boolean }) => {
         const doc = document.documentElement
         const vw = doc.clientWidth
         const sw = doc.scrollWidth
         const overflow = sw - vw
         const culprits: { sel: string; right: number; width: number }[] = []
 
-        if (overflow > tol) {
+        if (collect && overflow > tol) {
           // Elements whose right edge spills past the viewport's right edge.
           const offenders: Element[] = []
           const all = document.body ? document.body.querySelectorAll("*") : []
@@ -157,7 +182,9 @@ export async function checkFalseBreakpoints(
         }
 
         return { vw, sw, overflow, culprits }
-      }, TOLERANCE)) as Measurement
+        },
+        { tol: TOLERANCE, collect: collectCulprits },
+      )) as Measurement
     }
 
     // --- 1. COARSE SWEEP ---
@@ -211,7 +238,9 @@ export async function checkFalseBreakpoints(
       }
 
       // Re-measure at the worst (narrowest broken) width for culprit reporting.
-      const worst = await measure(band.fromWidth)
+      // PERF: this is the ONLY call that reads `worst.culprits`, so it is the
+      // ONLY measure that runs the offender sweep (collectCulprits = true).
+      const worst = await measure(band.fromWidth, true)
       const culprits = worst.culprits.slice(0, MAX_CULPRITS_PER_FINDING)
 
       // Capture the overflowing viewport as evidence (page is at the broken width).

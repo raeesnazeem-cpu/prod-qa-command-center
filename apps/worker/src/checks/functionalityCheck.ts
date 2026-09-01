@@ -127,19 +127,68 @@ export async function checkFunctionality(
       if (findings.length >= MAX_FINDINGS) break
       const el = targets[i]
       try {
-        const visible = await el.isVisible().catch(() => false)
-        const enabled = await el.isEnabled().catch(() => false)
-        if (!visible || !enabled) continue
+        // PERF: fold the previous three CDP round-trips (isVisible + isEnabled +
+        // label evaluate) into ONE evaluate returning {visible, enabled, label}.
+        // The visible/enabled logic reimplements Playwright's documented
+        // semantics in-page so the exact same controls are skipped/clicked as
+        // before:
+        //   visible = non-empty bounding box (display:none and [hidden] collapse
+        //             the box to 0) and computed visibility !== "hidden"
+        //   enabled = NOT natively disabled (disabled attr, or a disabled
+        //             <fieldset> ancestor — native form controls only, and the
+        //             fieldset's own <legend> is exempt) and NOT aria-disabled
+        //             (inherited up the ancestor chain, matching Playwright).
+        // Loop stays serial (shared page state); this changes only how state is
+        // read, not what gets clicked or flagged. A single evaluate failure
+        // (detached node) yields visible:false → the control is skipped, exactly
+        // as the old per-call `.catch(() => false)` did.
+        const state: { visible: boolean; enabled: boolean; label: string } =
+          await el
+            .evaluate((node: Element) => {
+              const style = getComputedStyle(node)
+              const rect = node.getBoundingClientRect()
+              const visible =
+                !!style &&
+                style.visibility !== "hidden" &&
+                rect.width > 0 &&
+                rect.height > 0
 
-        // A short label for the finding.
-        const label: string = await el
-          .evaluate((node: Element) => {
-            const t = node.tagName.toLowerCase()
-            const txt = (node.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40)
-            const aria = node.getAttribute("aria-label") || ""
-            return `${t}${txt ? ` "${txt}"` : aria ? ` "${aria}"` : ""}`
-          })
-          .catch(() => "control")
+              const NATIVE = ["BUTTON", "INPUT", "SELECT", "TEXTAREA", "OPTION", "OPTGROUP"]
+              let nativelyDisabled = false
+              if (NATIVE.includes(node.nodeName)) {
+                if (node.hasAttribute("disabled")) {
+                  nativelyDisabled = true
+                } else {
+                  const fs = node.closest("fieldset[disabled]")
+                  if (fs) {
+                    const legend = fs.querySelector(":scope > legend")
+                    nativelyDisabled = !(legend && legend.contains(node))
+                  }
+                }
+              }
+              let ariaDisabled = false
+              let a: Element | null = node
+              while (a) {
+                if (a.getAttribute("aria-disabled") === "true") {
+                  ariaDisabled = true
+                  break
+                }
+                a = a.parentElement
+              }
+              const enabled = !(nativelyDisabled || ariaDisabled)
+
+              const t = node.tagName.toLowerCase()
+              const txt = (node.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40)
+              const aria = node.getAttribute("aria-label") || ""
+              const label = `${t}${txt ? ` "${txt}"` : aria ? ` "${aria}"` : ""}`
+              return { visible, enabled, label }
+            })
+            .catch(() => ({ visible: false, enabled: false, label: "control" }))
+
+        const visible = state.visible
+        const enabled = state.enabled
+        const label = state.label
+        if (!visible || !enabled) continue
 
         const errBefore = consoleErrors.length + pageErrors.length
 

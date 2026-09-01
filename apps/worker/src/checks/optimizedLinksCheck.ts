@@ -477,64 +477,74 @@ export async function checkOptimizedLinks(
     const linkPromises = runLinkPromises.get(runId)!
 
     const checkPromises = extractedLinks.map(
-      ({ url: urlToCheck, text: linkText }) =>
-        checkLimit(async () => {
-          let checkPromise = linkPromises.get(urlToCheck)
-          
-          if (!checkPromise) {
-            checkPromise = (async (): Promise<LinkCheckResult> => {
-              try {
-                const response = await got.head(urlToCheck, {
-                  headers: BROWSER_HEADERS,
-                  timeout: { request: 10000 },
-                  retry: { limit: 1 },
-                  followRedirect: true,
-                })
+      ({ url: urlToCheck, text: linkText }) => {
+        // OPT: Resolve the shared per-URL promise SYNCHRONOUSLY in the map body.
+        // The get / create / set below is await-free, so it stays atomic exactly
+        // as before — each unique URL is probed exactly once run-wide. The change:
+        // a cache HIT now reuses the existing promise WITHOUT taking a checkLimit
+        // slot (previously a duplicate link queued behind the limiter just to
+        // await an already-resolved promise). Only a brand-NEW URL wraps its
+        // network work in checkLimit, so bounded parallelism is preserved for the
+        // 2 vCPU / 4 GB box. Every page still awaits and reports its own broken
+        // links below — output is identical.
+        let checkPromise = linkPromises.get(urlToCheck)
 
-                if (response.statusCode >= 400) {
-                  return { status: response.statusCode, reason: `Status ${response.statusCode}` }
-                }
-                return null // Healthy
-              } catch (error: any) {
-                const statusCode = error.response?.statusCode || 0
-                
-                // Fallback to GET for servers that reject HEAD requests
-                if (statusCode === 405 || statusCode === 403 || statusCode === 0) {
-                  try {
-                    const getResponse = await got.get(urlToCheck, {
-                      headers: BROWSER_HEADERS,
-                      timeout: { request: 15000 },
-                      retry: { limit: 1 },
-                      followRedirect: true,
-                    })
-                    if (getResponse.statusCode >= 400) {
-                      return { status: getResponse.statusCode, reason: `Status ${getResponse.statusCode}` }
-                    }
-                    return null // Healthy on fallback
-                  } catch (getFallbackError: any) {
-                    const fallbackStatus = getFallbackError.response?.statusCode || 0
-                    return { 
-                      status: fallbackStatus, 
-                      reason: fallbackStatus === 0 ? "Connection Failed" : `Status ${fallbackStatus}` 
-                    }
-                  }
-                }
+        if (!checkPromise) {
+          checkPromise = checkLimit(async (): Promise<LinkCheckResult> => {
+            try {
+              const response = await got.head(urlToCheck, {
+                headers: BROWSER_HEADERS,
+                timeout: { request: 10000 },
+                retry: { limit: 1 },
+                followRedirect: true,
+              })
 
-                if (statusCode >= 400 || statusCode === 0) {
-                  return { 
-                    status: statusCode, 
-                    reason: statusCode === 0 ? "Connection Failed" : `Status ${statusCode}` 
-                  }
-                }
-                return null
+              if (response.statusCode >= 400) {
+                return { status: response.statusCode, reason: `Status ${response.statusCode}` }
               }
-            })()
-            
-            linkPromises.set(urlToCheck, checkPromise)
-          }
+              return null // Healthy
+            } catch (error: any) {
+              const statusCode = error.response?.statusCode || 0
 
+              // Fallback to GET for servers that reject HEAD requests
+              if (statusCode === 405 || statusCode === 403 || statusCode === 0) {
+                try {
+                  const getResponse = await got.get(urlToCheck, {
+                    headers: BROWSER_HEADERS,
+                    timeout: { request: 15000 },
+                    retry: { limit: 1 },
+                    followRedirect: true,
+                  })
+                  if (getResponse.statusCode >= 400) {
+                    return { status: getResponse.statusCode, reason: `Status ${getResponse.statusCode}` }
+                  }
+                  return null // Healthy on fallback
+                } catch (getFallbackError: any) {
+                  const fallbackStatus = getFallbackError.response?.statusCode || 0
+                  return {
+                    status: fallbackStatus,
+                    reason: fallbackStatus === 0 ? "Connection Failed" : `Status ${fallbackStatus}`
+                  }
+                }
+              }
+
+              if (statusCode >= 400 || statusCode === 0) {
+                return {
+                  status: statusCode,
+                  reason: statusCode === 0 ? "Connection Failed" : `Status ${statusCode}`
+                }
+              }
+              return null
+            }
+          })
+
+          linkPromises.set(urlToCheck, checkPromise)
+        }
+
+        // Awaiting the shared promise is free of a limiter slot; only the newly
+        // created probe above holds one while its network work runs.
+        return (async () => {
           const result = await checkPromise
-          
           if (result) {
             brokenLinks.push({
               url: urlToCheck,
@@ -543,7 +553,8 @@ export async function checkOptimizedLinks(
               text: linkText,
             })
           }
-        }),
+        })()
+      },
     )
     await Promise.all(checkPromises)
 

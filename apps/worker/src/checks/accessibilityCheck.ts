@@ -35,11 +35,20 @@ export async function checkAccessibility(
   const pageUrl = page.url()
   const factor = "accessibility_check"
   try {
-    const html = (await page.content().catch(() => "")) || ""
+    // Optimization: the HTML fetch and the HubSpot tier lookup are independent
+    // (resolveRequiredUserwayTier does not use `html`), so run them concurrently
+    // to overlap the HubSpot round-trip with the page-content fetch. Each keeps
+    // its own .catch so a failure in either still degrades gracefully exactly as
+    // before (Promise.all would otherwise reject the whole thing into the outer
+    // catch). Both operations are read-only.
+    const [html, { tier: requiredTier, planRaw }] = await Promise.all([
+      page.content().then((c) => c || "").catch(() => ""),
+      resolveRequiredUserwayTier(projectName).catch(() => ({
+        tier: null as UserwayTier | null,
+        planRaw: null as string | null,
+      })),
+    ])
     const installed = detectUserwayInSource(html)
-    const { tier: requiredTier, planRaw } = await resolveRequiredUserwayTier(projectName).catch(
-      () => ({ tier: null as UserwayTier | null, planRaw: null as string | null }),
-    )
 
     const ctxBase =
       `URL: ${pageUrl}\n` +

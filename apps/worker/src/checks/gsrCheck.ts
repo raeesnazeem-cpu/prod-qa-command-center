@@ -42,18 +42,21 @@ export async function checkGsr(
     while (hasNextPage && pagesChecked < MAX_SERP_PAGES) {
       pagesChecked++
 
-      await newPage.waitForTimeout(3000)
+      // OPT: This SERP page is a static ScraperAPI-rendered HTML snapshot, so all
+      // results already exist at domcontentloaded and scrolling loads nothing new.
+      // Replace the blind 3s wait + the 4×1s scroll-wait loop (~7s/page) with a
+      // single real load signal: wait for the first result <h3> to appear, capped
+      // at 4s (well under the ~7s it replaces). `.catch(() => {})` makes a timeout
+      // fall through and proceed, so it never throws and never hangs — worst case
+      // is the same as the old sleep. The "0 results ⇒ blocked/CAPTCHA" branch
+      // below still evaluates on whatever the page parsed.
+      await newPage.waitForSelector("h3", { timeout: 4000 }).catch(() => {})
 
       if (onProgress)
         await onProgress(
           70 + pagesChecked * 5,
           `Scrolling page ${pagesChecked}...`,
         )
-      // Scroll down in case of lazy loaded images or continuous scroll
-      for (let i = 0; i < 4; i++) {
-        await newPage.evaluate(() => window.scrollBy(0, window.innerHeight * 2))
-        await newPage.waitForTimeout(1000)
-      }
 
       if (onProgress)
         await onProgress(
