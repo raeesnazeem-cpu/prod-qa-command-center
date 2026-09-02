@@ -35,15 +35,27 @@ const connection = new IORedis(redisUrl, {
 })
 
 /**
+ * Optional BullMQ key prefix. Unset → BullMQ default ("bull"), unchanged prod
+ * behaviour. Set (e.g. for a local test run) → jobs live under a separate key
+ * namespace on the SAME redis, so a deployed prod worker on the default prefix
+ * never consumes them. Must match the worker's prefix to line up.
+ */
+const bullPrefix = process.env.BULLMQ_PREFIX || undefined
+
+/**
  * QA Jobs Queue
  */
-export const qaQueue = new Queue("qa-jobs", { connection })
+export const qaQueue = new Queue("qa-jobs", {
+  connection,
+  ...(bullPrefix ? { prefix: bullPrefix } : {}),
+})
 
 /**
  * Singleton QueueEvents for monitoring job completion without leaking connections
  */
 export const qaQueueEvents = new QueueEvents("qa-jobs", {
   connection,
+  ...(bullPrefix ? { prefix: bullPrefix } : {}),
 })
 
 /**

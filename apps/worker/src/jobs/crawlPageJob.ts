@@ -54,6 +54,11 @@ import {
   checkLiveSiteLink,
 } from "../checks/postReleaseSuite"
 import { checkGsr } from "../checks/gsrCheck"
+import {
+  timeCheck,
+  recordTiming,
+  saveTimingReport,
+} from "../lib/timingCollector"
 import type { ThemeType } from "../lib/themeType"
 import pLimit from "p-limit"
 import pino from "pino"
@@ -430,11 +435,21 @@ export async function processCrawlPageJob(job: Job) {
       const concurrentLane = pLimit(CHECK_CONCURRENCY)
       const sharedPageLane = pLimit(1)
 
-      const schedule = (factory: () => Promise<any[]>) => {
-        checkPromises.push(concurrentLane(factory))
+      // Each scheduled check is wrapped in timeCheck() so its wall-clock is
+      // recorded per run (see lib/checkTimings). The leading `name` labels the
+      // timing row — it mirrors the check's lapse() key.
+      const schedule = (name: string, factory: () => Promise<any[]>) => {
+        checkPromises.push(
+          concurrentLane(() => timeCheck(runId, name, pageUrl, factory)),
+        )
       }
-      const scheduleOnSharedPage = (factory: () => Promise<any[]>) => {
-        checkPromises.push(sharedPageLane(factory))
+      const scheduleOnSharedPage = (
+        name: string,
+        factory: () => Promise<any[]>,
+      ) => {
+        checkPromises.push(
+          sharedPageLane(() => timeCheck(runId, name, pageUrl, factory)),
+        )
       }
 
       // Fetch project details and settings for pre-release checks
@@ -472,7 +487,7 @@ export async function processCrawlPageJob(job: Job) {
         const isHomepage = normalize(pageUrl) === normalize(run.site_url)
 
         if (isHomepage) {
-          scheduleOnSharedPage(() =>
+          scheduleOnSharedPage("hero_media", () =>
             checkHeroMedia(page, screenshots, runId, async (p, m) => {
               await updateCheckProgress("hero_media", p, m)
               await new Promise((resolve) => setTimeout(resolve, 1500))
@@ -487,13 +502,13 @@ export async function processCrawlPageJob(job: Job) {
       if (enabledChecks.includes("visual_regression")) {
         // broken_links retired — dead_links (optimizedLinksCheck) supersets it
         // (all assets + cross-page dedup) and is the one TED actually enqueues.
-        scheduleOnSharedPage(() =>
+        scheduleOnSharedPage("external_links", () =>
           checkExternalLinks(page, screenshots).catch((e) => {
             logger.error("External links check failed:", e)
             return lapse("external_links")(e)
           }),
         )
-        scheduleOnSharedPage(() =>
+        scheduleOnSharedPage("image_compliance", () =>
           checkImageCompliance(page, screenshots).catch((e) => {
             logger.error("Image compliance check failed:", e)
             return lapse("image_compliance")(e)
@@ -502,26 +517,26 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("accessibility")) {
-        scheduleOnSharedPage(() =>
+        scheduleOnSharedPage("meta_tags", () =>
           checkMeta(page, screenshots).catch((e) => {
             logger.error("Meta check failed:", e)
             return lapse("meta_tags")(e)
           }),
         )
-        scheduleOnSharedPage(() =>
+        scheduleOnSharedPage("dummy_content", () =>
           checkDummyContent(page, screenshots).catch((e) => {
             logger.error("Dummy content check failed:", e)
             return lapse("dummy_content")(e)
           }),
         )
-        scheduleOnSharedPage(() =>
+        scheduleOnSharedPage("spelling", () =>
           checkSpelling(page, screenshots).catch((e) => {
             logger.error("Spelling check failed:", e)
             return lapse("spelling")(e)
           }),
         )
         if (hasForms) {
-          scheduleOnSharedPage(() =>
+          scheduleOnSharedPage("forms", () =>
             checkForms(page, screenshots, runId).catch((e) => {
               logger.error("Forms check failed:", e)
               return lapse("forms")(e)
@@ -531,7 +546,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("console_errors")) {
-        scheduleOnSharedPage(() =>
+        scheduleOnSharedPage("console_errors", () =>
           checkConsoleErrors(page, screenshots, consoleErrors, criticalErrors).catch((e) => {
             logger.error("Console errors check failed:", e)
             return lapse("console_errors")(e)
@@ -540,7 +555,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("dead_links")) {
-        schedule(() =>
+        schedule("dead_links", () =>
           (async () => {
             try {
               return await checkOptimizedLinks(
@@ -570,7 +585,7 @@ export async function processCrawlPageJob(job: Job) {
       // most invasive shared-page mutation in the suite, so it runs on the
       // serial lane where nothing else can observe the page mid-submission.
       if (enabledChecks.includes("contact_form")) {
-        scheduleOnSharedPage(() =>
+        scheduleOnSharedPage("contact_form", () =>
           (async () => {
             try {
               return await checkGrowth99ContactForm(
@@ -591,7 +606,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("learn_more_buttons")) {
-        schedule(() =>
+        schedule("learn_more_buttons", () =>
           (async () => {
             try {
               return await checkLearnMoreButtons(
@@ -611,7 +626,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("false_breakpoint")) {
-        schedule(() =>
+        schedule("false_breakpoint", () =>
           checkFalseBreakpoints(pageUrl, runId, browser, async (p, m) => {
             await updateCheckProgress("false_breakpoint", p, m)
           }).catch((e) => {
@@ -622,7 +637,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("functionality_check")) {
-        schedule(() =>
+        schedule("functionality_check", () =>
           checkFunctionality(pageUrl, runId, browser, async (p, m) => {
             await updateCheckProgress("functionality_check", p, m)
           }).catch((e) => {
@@ -634,7 +649,7 @@ export async function processCrawlPageJob(job: Job) {
 
       // Spelling / Grammar / Accessibility — all-pages, shared-page checks.
       if (enabledChecks.includes("spelling")) {
-        scheduleOnSharedPage(() =>
+        scheduleOnSharedPage("spelling", () =>
           checkSpelling(page, screenshots).catch((e) => {
             logger.error("Spelling check failed:", e)
             return lapse("spelling")(e)
@@ -642,7 +657,7 @@ export async function processCrawlPageJob(job: Job) {
         )
       }
       if (enabledChecks.includes("grammar")) {
-        scheduleOnSharedPage(() =>
+        scheduleOnSharedPage("grammar", () =>
           checkGrammar(page, screenshots).catch((e) => {
             logger.error("Grammar check failed:", e)
             return lapse("grammar")(e)
@@ -656,7 +671,7 @@ export async function processCrawlPageJob(job: Job) {
         const strip = (u: string) =>
           (u || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "").toLowerCase()
         if (strip(pageUrl) === strip(run.site_url)) {
-          scheduleOnSharedPage(() =>
+          scheduleOnSharedPage("accessibility_check", () =>
             checkAccessibility(page, projectName).catch((e) => {
               logger.error("Accessibility check failed:", e)
               return lapse("accessibility_check")(e)
@@ -666,7 +681,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (enabledChecks.includes("image_quality")) {
-        schedule(() =>
+        schedule("image_quality", () =>
           checkImageQuality(pageUrl, runId, browser, async (p, m) => {
             await updateCheckProgress("image_quality", p, m)
           }).catch((e) => {
@@ -677,7 +692,7 @@ export async function processCrawlPageJob(job: Job) {
       }
 
       if (run?.is_woocommerce && enabledChecks.includes("woocommerce")) {
-        schedule(() =>
+        schedule("woocommerce", () =>
           (async () => {
             // newPage() and close() are inside the try/catch: both can throw
             // (a dead context, a page that never settles), and an escaping
@@ -708,7 +723,7 @@ export async function processCrawlPageJob(job: Job) {
       // --- HOMEPAGE-ONLY CHECKS ---
       if (isHomepage) {
         if (enabledChecks.includes("privacy_policy")) {
-          schedule(() =>
+          schedule("privacy_policy", () =>
             checkPrivacyPolicy(
               pageUrl,
               runId,
@@ -724,7 +739,7 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
         if (enabledChecks.includes("footer_logo")) {
-          schedule(() =>
+          schedule("footer_logo", () =>
             checkFooterLogo(pageUrl, runId, pageId, browser, async (p, m) => {
               await updateCheckProgress("footer_logo", p, m)
             }).catch((e) => {
@@ -735,7 +750,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("hamburger_menu")) {
-          schedule(() =>
+          schedule("hamburger_menu", () =>
             checkHamburgerMenu(
               pageUrl,
               runId,
@@ -752,7 +767,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("blog_verification")) {
-          schedule(() =>
+          schedule("blog_verification", () =>
             checkBlogVerification(
               pageUrl,
               runId,
@@ -776,7 +791,7 @@ export async function processCrawlPageJob(job: Job) {
         // `&& false` copy that used to sit at this spot was unreachable.
 
         if (enabledChecks.includes("top_bar_sticky")) {
-          schedule(() =>
+          schedule("top_bar_sticky", () =>
             checkTopBarAndStickyHeader(
               pageUrl,
               runId,
@@ -793,7 +808,7 @@ export async function processCrawlPageJob(job: Job) {
           )
         }
         if (enabledChecks.includes("favicon")) {
-          schedule(() =>
+          schedule("favicon", () =>
             checkFavicon(pageUrl, runId, pageId, browser, async (p, m) => {
               await updateCheckProgress("favicon", p, m)
             }).catch((e) => {
@@ -804,7 +819,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("chatbot_consultation")) {
-          scheduleOnSharedPage(() =>
+          scheduleOnSharedPage("chatbot_consultation", () =>
             checkChatbotAndConsultation(page, runId, {
               projectId: run.project_id,
               projectName,
@@ -817,7 +832,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("logo_chatbot")) {
-          schedule(() =>
+          schedule("logo_chatbot", () =>
             checkLogoOnChatbot(
               pageUrl,
               runId,
@@ -835,7 +850,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("text_share")) {
-          scheduleOnSharedPage(() =>
+          scheduleOnSharedPage("text_share", () =>
             checkTextShareMetadata(page, projectName).catch((e) => {
               logger.error("Text share metadata check failed:", e)
               return lapse("text_share")(e)
@@ -844,7 +859,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("callnow_links")) {
-          schedule(() =>
+          schedule("callnow_links", () =>
             checkCallnowLinks(
               pageUrl,
               runId,
@@ -862,7 +877,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("url_tab_compare") && run.live_site_url) {
-          schedule(() =>
+          schedule("url_tab_compare", () =>
             checkUrlTabComparison(
               pageUrl,
               run.live_site_url,
@@ -880,7 +895,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("verify_plugin_updates")) {
-          schedule(() =>
+          schedule("verify_plugin_updates", () =>
             checkPluginUpdatesCredentialFree(
               pageUrl,
               runId,
@@ -897,7 +912,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("plugin_number")) {
-          schedule(() =>
+          schedule("plugin_number", () =>
             checkPluginCount(
               pageUrl,
               runId,
@@ -914,7 +929,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("live_site_link")) {
-          schedule(() =>
+          schedule("live_site_link", () =>
             checkLiveSiteLink(
               {
                 notesUrl: run.live_site_url,
@@ -935,7 +950,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("page_speed")) {
-          schedule(() =>
+          schedule("page_speed", () =>
             checkPageSpeed(pageUrl, runId, pageId, async (p, m) => {
               await updateCheckProgress("page_speed", p, m)
             }).catch((e) => {
@@ -946,7 +961,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("backend_check")) {
-          schedule(() =>
+          schedule("backend_check", () =>
             checkBackend(
               pageUrl,
               runId,
@@ -964,7 +979,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("review_reputation_check")) {
-          schedule(() =>
+          schedule("review_reputation_check", () =>
             checkReviewReputation(
               pageUrl,
               runId,
@@ -981,7 +996,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("gbp_check")) {
-          schedule(() =>
+          schedule("gbp_check", () =>
             checkGbp(
               run.project_id,
               run.live_site_url || run.site_url,
@@ -996,7 +1011,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("social_share_heading")) {
-          schedule(() =>
+          schedule("social_share_heading", () =>
             checkSocialShareHeading(
               pageUrl,
               runId,
@@ -1013,7 +1028,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("single_script")) {
-          schedule(() =>
+          schedule("single_script", () =>
             checkSingleScript(pageUrl, runId, pageId, browser, async (p, m) => {
               await updateCheckProgress("single_script", p, m)
             }).catch((e) => {
@@ -1024,7 +1039,7 @@ export async function processCrawlPageJob(job: Job) {
         }
 
         if (enabledChecks.includes("gsr_check")) {
-          schedule(() =>
+          schedule("gsr_check", () =>
             checkGsr(
               page,
               { url: run.live_site_url || pageUrl },
@@ -1254,9 +1269,14 @@ export async function processCrawlPageJob(job: Job) {
 
           // Run-level cross-browser visual check (no-op unless enabled). Runs
           // before the TED report so its findings are included in the summary.
+          const cbStart = Date.now()
           await runCrossBrowserCheck(runId).catch((e) =>
             logger.error("Cross-browser check failed:", e),
           )
+          recordTiming(runId, "cross_browser", run.site_url, Date.now() - cbStart)
+
+          // Analytics only: log + persist per-check timings. Never posted to TED.
+          await saveTimingReport(runId)
 
           // Prepare inlined screenshots now (scan time), so the report — whether
           // posted immediately here or later by the AI-fix pass — is just string
@@ -1284,9 +1304,14 @@ export async function processCrawlPageJob(job: Job) {
 
         // Run-level cross-browser visual check (no-op unless enabled). Runs
         // before the TED report so its findings are included in the summary.
+        const cbStart = Date.now()
         await runCrossBrowserCheck(runId).catch((e) =>
           logger.error("Cross-browser check failed:", e),
         )
+        recordTiming(runId, "cross_browser", run.site_url, Date.now() - cbStart)
+
+        // Analytics only: log + persist per-check timings. Never posted to TED.
+        await saveTimingReport(runId)
 
         // Prepare inlined screenshots now (scan time), so the report — whether
         // posted immediately here or later by the AI-fix pass — is just string

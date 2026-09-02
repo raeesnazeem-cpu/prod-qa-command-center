@@ -343,7 +343,7 @@ export async function processAiFixRunJob(job: Job) {
   const { data: run } = await supabase
     .from("qa_runs")
     .select(
-      "project_id, run_type, ted_subtask_map, site_url, enabled_checks, released_site_url",
+      "project_id, run_type, ted_subtask_map, site_url, enabled_checks, released_site_url, ted_client_id",
     )
     .eq("id", runId)
     .single()
@@ -366,8 +366,19 @@ export async function processAiFixRunJob(job: Job) {
   //   • repo missing / not clonable → the fix pass still computes each correction
   //     from the findings and reports it per subtask, explicitly noting the
   //     change was NOT applied because there's no repo access. Nothing is pushed.
-  const repoUrl: string | null = await resolveBetaSiteRepo(project?.name).catch(
+  // Resolve the repo by the REAL TED client id (stored on the run at scan start)
+  // — the exact key. Fall back to the QACC project name only when the id is
+  // absent (older runs created before ted_client_id existed). Keying off the
+  // name alone is what broke client 1534: the synthetic project name
+  // "QACC TED Test 1534" matched no TED client, so the beta_site.env repo — which
+  // IS present on the task — was never read.
+  const repoLookupKey = (run as any)?.ted_client_id || project?.name
+  const repoUrl: string | null = await resolveBetaSiteRepo(repoLookupKey).catch(
     () => null,
+  )
+  logger.info(
+    { runId, repoLookupKey, keyedBy: (run as any)?.ted_client_id ? "ted_client_id" : "project_name" },
+    "AI Fix: repo lookup key resolved",
   )
 
   const ownerRepo = repoUrl ? ownerRepoFromUrl(repoUrl) : null

@@ -29,7 +29,15 @@ export const connection = new IORedis(redisUrl, {
   keepAlive: 10000,
 });
 
-export const qaQueue = new Queue('qa-jobs', { connection });
+// Optional BullMQ key prefix — must match the API's. Unset → BullMQ default
+// ("bull"), unchanged prod behaviour. Set → isolated key namespace so a deployed
+// prod worker on the default prefix never steals a local test run's jobs.
+const bullPrefix = process.env.BULLMQ_PREFIX || undefined;
+
+export const qaQueue = new Queue('qa-jobs', {
+  connection,
+  ...(bullPrefix ? { prefix: bullPrefix } : {}),
+});
 
 /**
  * Helper to add a job to the QA queue
