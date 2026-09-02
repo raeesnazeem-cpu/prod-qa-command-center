@@ -64,6 +64,43 @@ async function openAiCompatible(
 // this list does not rot the next time Google retires a version.
 const GEMINI_MODELS = ["gemini-2.5-flash-lite", "gemini-flash-latest"]
 
+// Vision must never stall the scan. When Gemini is overloaded (503 "high
+// demand") the SDK backs off internally, so a single attempt can hang 60–90s;
+// walking every provider/model then costs minutes PER image, and the run only
+// finishes when its slowest check does. So we cap vision to a small number of
+// attempts, each hard-bounded by a timeout, and then report the check as failed
+// (ok:false) rather than grinding on. Both are env-tunable.
+const VISION_MAX_ATTEMPTS = Math.max(
+  1,
+  Number(process.env.VISION_MAX_ATTEMPTS || 2),
+)
+const VISION_ATTEMPT_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.VISION_ATTEMPT_TIMEOUT_MS || 20000),
+)
+
+// Race a promise against a timeout. On timeout we reject and move on — the
+// underlying (uncancellable) SDK call may keep running in the background, but it
+// no longer blocks the scan.
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    )
+    p.then(
+      (v) => {
+        clearTimeout(t)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(t)
+        reject(e)
+      },
+    )
+  })
+}
+
 // The paid Gemini client (GEMINI_API_KEY) is built lazily and reused. It is the
 // LAST-resort provider, so it is only ever constructed if every free provider
 // above it has failed at least once in a run.
@@ -212,20 +249,36 @@ export async function describeImageResult(
   }
 
   const errors: string[] = []
+  // Cap to VISION_MAX_ATTEMPTS provider attempts, each hard-bounded by a
+  // timeout, so an overloaded Gemini (503) fails FAST instead of stalling the
+  // whole scan. After the cap we report the check failed (ok:false).
+  let attempts = 0
   for (const p of providers) {
+    if (attempts >= VISION_MAX_ATTEMPTS) break
+    attempts++
     try {
-      const text = await analyzeImageWith(p.client, GEMINI_MODELS, buffer, prompt)
+      const text = await withTimeout(
+        analyzeImageWith(p.client, GEMINI_MODELS, buffer, prompt),
+        VISION_ATTEMPT_TIMEOUT_MS,
+        `vision attempt ${attempts} (${p.name})`,
+      )
       if (text) return { text, ok: true, provider: p.name }
       errors.push(`${p.name}: returned an empty reply`)
-      logger.warn({ provider: p.name }, "Vision provider returned an empty reply; trying next")
+      logger.warn({ provider: p.name, attempt: attempts }, "Vision provider returned an empty reply; trying next")
     } catch (e: any) {
       const msg = e?.message || String(e)
       errors.push(`${p.name}: ${msg}`)
-      logger.warn({ provider: p.name, error: msg }, "Vision provider failed; trying next")
+      logger.warn({ provider: p.name, attempt: attempts }, "Vision provider failed; trying next")
     }
   }
-  const error = errors.join(" | ")
-  logger.error({ error }, "Vision unavailable: every provider failed")
+  const skipped = providers.length - attempts
+  const error =
+    errors.join(" | ") +
+    (skipped > 0 ? ` | (${skipped} more provider(s) skipped after ${VISION_MAX_ATTEMPTS}-attempt cap)` : "")
+  logger.error(
+    { error, attempts, cap: VISION_MAX_ATTEMPTS },
+    `Vision unavailable: failed after ${attempts} attempt(s)`,
+  )
   return { text: "", ok: false, error }
 }
 
