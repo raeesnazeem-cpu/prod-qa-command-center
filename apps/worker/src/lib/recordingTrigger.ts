@@ -58,6 +58,34 @@ export async function triggerFullProjectRecording(
     return { triggered: true, simulated: true, provider, viewports, errors: [] }
   }
 
+  // PREFERRED PATH: delegate the launch to the API's POST /api/recordings/start.
+  // The API authenticates to Cloud Run via @google-cloud/run's JobsClient, which
+  // reads GOOGLE_APPLICATION_CREDENTIALS (the /tmp/gcp-key.json it writes from
+  // GCP_SERVICE_ACCOUNT_JSON). That works on Hetzner/Dokploy, where THIS worker's
+  // metadata-server / GOOGLE_OAUTH_TOKEN auth below has nothing to authenticate
+  // with. One POST triggers all three viewports and flips recording_status →
+  // 'recording', which the barrier's confirmStart then observes.
+  const apiBase = process.env.RECORDING_API_URL || process.env.QACC_API_URL
+  if (apiBase) {
+    try {
+      await triggerViaApi(apiBase, runId)
+      logger.info({ runId, apiBase }, "Recording launch delegated to API /api/recordings/start.")
+      return { triggered: true, simulated: false, provider: "api", viewports, errors: [] }
+    } catch (e: any) {
+      logger.error(
+        { runId, apiBase, error: e?.message },
+        "API recording trigger failed.",
+      )
+      return {
+        triggered: false,
+        simulated: false,
+        provider: "api",
+        viewports,
+        errors: [`api trigger failed: ${e?.message || String(e)}`],
+      }
+    }
+  }
+
   const errors: string[] = []
   for (const viewport of viewports) {
     try {
@@ -208,6 +236,22 @@ async function triggerViaEcs(runId: string, viewport: string): Promise<void> {
       },
     }),
   )
+}
+
+// --- Preferred: delegate to the API's POST /api/recordings/start { runId }. ---
+// One call launches all three viewport jobs (the API fans out) and marks the run
+// 'recording'. Reuses the API's SA-key auth, so it works off-GCP (Hetzner).
+async function triggerViaApi(apiBase: string, runId: string): Promise<void> {
+  const url = `${apiBase.replace(/\/+$/, "")}/api/recordings/start`
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ runId }),
+  })
+  if (!r.ok) {
+    const preview = (await r.text().catch(() => "")).slice(0, 300)
+    throw new Error(`${url} returned ${r.status}: ${preview}`)
+  }
 }
 
 // --- Generic HTTP escape hatch: POST { runId, viewport } to a trigger URL. ---

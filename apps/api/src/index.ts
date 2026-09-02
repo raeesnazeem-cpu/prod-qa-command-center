@@ -28,6 +28,7 @@ import { aiFixRunsRouter } from "./routes/ai-fix-runs"
 import { findingsRouter } from "./routes/findings"
 import { projectsRouter } from "./routes/projects"
 import { tedCommentsRouter } from "./routes/tedComments"
+import { recordingsRouter } from "./routes/recordings"
 import { authRouter } from "./routes/auth"
 import { createBullBoard } from "@bull-board/api"
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter"
@@ -78,6 +79,8 @@ app.use("/api/ai-fix-runs", aiFixRunsRouter)
 app.use("/api/findings", findingsRouter)
 app.use("/api/projects", projectsRouter)
 app.use("/api/ted-comments", tedCommentsRouter)
+// Manual video-recording trigger (the "Record Full Project Video" button).
+app.use("/api/recordings", recordingsRouter)
 
 // 404 handler
 app.use((_req: Request, res: Response) => {
