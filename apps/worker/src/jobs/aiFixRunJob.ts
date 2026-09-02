@@ -29,6 +29,7 @@ import {
   MAX_CONTEXT_FILES,
   type ApplyResult,
 } from "../lib/repoContext"
+import { recordAiFixTiming, saveAiFixTimingReport } from "../lib/timingCollector"
 import {
   seedPrivacyPolicyPage,
   seedPrivacyPolicyPageClassic,
@@ -334,6 +335,9 @@ export async function processAiFixRunJob(job: Job) {
   const baseToken = process.env.GIT_FIX_TOKEN
   logger.info({ runId, tedTaskId }, "AI Fix module starting")
 
+  // AI-fix step timing (analytics only). Logged as its own table at job end.
+  const aiFixJobStart = Date.now()
+
   const { data: findings } = await supabase
     .from("findings")
     .select("*")
@@ -504,7 +508,22 @@ export async function processAiFixRunJob(job: Job) {
   // (Phase B). The deterministic handlers keep committing inline, unchanged.
   const llmFindings: any[] = []
 
+  // Per-finding wall-clock for the deterministic loop, aggregated by check_factor
+  // in the AI-fix timing table. Recorded at the TOP of the next iteration (and
+  // once after the loop) so every path — including the many `continue`s — is
+  // timed without wrapping the whole body.
+  let _iterStart = 0
+  let _iterFactor: string | null = null
+  const flushIterTiming = () => {
+    if (_iterFactor !== null) {
+      recordAiFixTiming(runId, `finding:${_iterFactor}`, Date.now() - _iterStart)
+    }
+  }
+
   for (const f of (findings || []).slice(0, MAX_FINDINGS)) {
+    flushIterTiming()
+    _iterStart = Date.now()
+    _iterFactor = f.check_factor || "unknown"
     const pageUrl = pageUrlById.get(f.page_id) || ""
     // Lapses (errored/skipped checks) are RECORDED for the internal Dry-run Data
     // tab, but never triaged, fixed, or shown in the TED report.
@@ -1498,7 +1517,9 @@ export async function processAiFixRunJob(job: Job) {
     // CONCURRENTLY below (Phase A), then apply + commit SERIALLY (Phase B).
     llmFindings.push(f)
   }
+  flushIterTiming() // record the last finding's deterministic-loop time
 
+  const _phaseAStart = Date.now()
   // ===================== Phase A: triage (concurrent) =====================
   // Two sub-stages, both git-free (read-only + network) so both parallelize:
   //   A1 — per finding, gather its screenshot description + candidate-file
@@ -1650,6 +1671,9 @@ export async function processAiFixRunJob(job: Job) {
   )
   const triaged: TriageResult[] = triagedNested.flat()
 
+  recordAiFixTiming(runId, "llm_triage(phaseA)", Date.now() - _phaseAStart)
+
+  const _phaseBStart = Date.now()
   // ===================== Phase B: serial apply + commit =====================
   // Applying edits mutates the ONE git working tree + index, so this MUST run
   // one finding at a time — never concurrently, or git corrupts. Each triage
@@ -1811,6 +1835,8 @@ export async function processAiFixRunJob(job: Job) {
           : undefined,
     })
   }
+
+  recordAiFixTiming(runId, "apply_commit(phaseB)", Date.now() - _phaseBStart)
 
   // --- Task 6: ONE commit for every fix that landed this run ---
   // The fix helpers above each wrote their edit to the working tree and bumped
@@ -2101,6 +2127,9 @@ export async function processAiFixRunJob(job: Job) {
   )
 
   if (workDir) await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {})
+
+  // AI-fix step timings → extra table in the worker log (analytics only).
+  saveAiFixTimingReport(runId, Date.now() - aiFixJobStart)
 
   // The fix pass is done — close out every TED
   // task and subtask for this run as Completed so nothing is left pending and the
