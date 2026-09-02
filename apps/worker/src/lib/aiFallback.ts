@@ -79,6 +79,22 @@ const VISION_ATTEMPT_TIMEOUT_MS = Math.max(
   Number(process.env.VISION_ATTEMPT_TIMEOUT_MS || 20000),
 )
 
+// Text (grammar, fix triage) must never stall the scan either, for the SAME
+// reason vision can't: when Gemini is overloaded (503) the SDK backs off
+// internally, so one attempt can hang 60–90s, and walking every provider/model
+// then costs MINUTES per page (grammar runs once per crawled page on a
+// serialized lane). So text mirrors vision — a small attempt cap, each attempt
+// hard-bounded by a timeout, then the call fails and the check reports the
+// lapse (checkGrammar surfaces it as "Grammar Check Failed"). Both env-tunable.
+const TEXT_MAX_ATTEMPTS = Math.max(
+  1,
+  Number(process.env.TEXT_MAX_ATTEMPTS || 3),
+)
+const TEXT_ATTEMPT_TIMEOUT_MS = Math.max(
+  1000,
+  Number(process.env.TEXT_ATTEMPT_TIMEOUT_MS || 20000),
+)
+
 // Race a promise against a timeout. On timeout we reject and move on — the
 // underlying (uncancellable) SDK call may keep running in the background, but it
 // no longer blocks the scan.
@@ -111,21 +127,32 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 //
 // Only ONE run executes at a time (global run slot), so a module-level breaker
 // is correctly scoped to the current run. It is reset at run start and run end
-// (see resetVisionBreaker callers). A plain timeout or a one-off per-image error
+// (see resetAiBreakers callers). A plain timeout or a one-off per-image error
 // does NOT trip it — only a real rate-limit/overload status code.
 const visionBreaker: { tripped: boolean; code: string | null } = {
   tripped: false,
   code: null,
 }
 
-/** Reset the vision breaker. Called at run start and run end. */
-export function resetVisionBreaker(): void {
+// Per-run TEXT circuit breaker — same rationale and scoping as the vision one
+// above: a 429/500/503 from Gemini won't clear mid-run, so the first one trips
+// this and every later text call (grammar on subsequent pages) fails fast
+// instead of walking the whole provider chain again.
+const textBreaker: { tripped: boolean; code: string | null } = {
+  tripped: false,
+  code: null,
+}
+
+/** Reset both per-run AI circuit breakers. Called at run start and run end. */
+export function resetAiBreakers(): void {
   visionBreaker.tripped = false
   visionBreaker.code = null
+  textBreaker.tripped = false
+  textBreaker.code = null
 }
 
 /** Extract a trip-worthy status (429/500/503) from an error, else null. */
-function visionTripCode(err: any): string | null {
+function tripStatusCode(err: any): string | null {
   const status = err?.status ?? err?.code ?? err?.response?.status
   if (status === 429 || status === 500 || status === 503) return String(status)
   const msg = err?.message || String(err || "")
@@ -223,13 +250,49 @@ export async function completeText(system: string, user: string): Promise<AiResu
   if (env.GEMINI_API_KEY)
     providers.push({ name: "gemini-paid", run: () => geminiText(paidGemini(), system, user) })
 
+  if (providers.length === 0)
+    throw new Error("No AI providers available (no keys set)")
+
+  // Circuit open: a 429/500/503 already hit this run → fail fast, don't re-walk
+  // the chain. checkGrammar catches this and reports the check as failed.
+  if (textBreaker.tripped)
+    throw new Error(
+      `text AI unavailable: provider returned ${textBreaker.code} earlier this run (circuit open); failing fast without retry`,
+    )
+
   let lastErr: any
+  // Cap to TEXT_MAX_ATTEMPTS provider attempts, each hard-bounded by a timeout,
+  // so an overloaded Gemini (503) fails FAST instead of stalling the scan for
+  // minutes. After the cap (or a tripped breaker) we throw the last error.
+  let attempts = 0
   for (const p of providers) {
+    if (attempts >= TEXT_MAX_ATTEMPTS) break
+    attempts++
     try {
-      const text = await p.run()
+      const text = await withTimeout(
+        p.run(),
+        TEXT_ATTEMPT_TIMEOUT_MS,
+        `text attempt ${attempts} (${p.name})`,
+      )
       return { text, provider: p.name }
     } catch (e) {
       lastErr = e
+      logger.warn(
+        { provider: p.name, attempt: attempts, error: (e as any)?.message },
+        "Text provider failed; trying next",
+      )
+      // Trip the per-run breaker on a rate-limit/overload status — it won't
+      // clear mid-run, so every later text call fails fast instead of retrying.
+      const code = tripStatusCode(e)
+      if (code) {
+        textBreaker.tripped = true
+        textBreaker.code = code
+        logger.warn(
+          { code },
+          `Text circuit TRIPPED (${code}) — subsequent text calls this run will fail fast`,
+        )
+        break
+      }
     }
   }
   throw lastErr || new Error("No AI providers available (no keys set)")
@@ -311,7 +374,7 @@ export async function describeImageResult(
       logger.warn({ provider: p.name, attempt: attempts }, "Vision provider failed; trying next")
       // Trip the per-run breaker on a rate-limit/overload status — it won't clear
       // mid-run, so every later vision check fails fast instead of retrying.
-      const code = visionTripCode(e)
+      const code = tripStatusCode(e)
       if (code) {
         visionBreaker.tripped = true
         visionBreaker.code = code

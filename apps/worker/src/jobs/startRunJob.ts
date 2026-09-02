@@ -7,7 +7,7 @@ import { wpPasswordCache } from "../lib/credentialsCache"
 import { resolveThemeType } from "../lib/themeType"
 import { postTedComment } from "../lib/tedSync"
 import { acquireRunSlot, releaseRunSlot } from "../lib/runSlot"
-import { resetVisionBreaker } from "../lib/aiFallback"
+import { resetAiBreakers } from "../lib/aiFallback"
 
 import pino from "pino"
 
@@ -33,10 +33,10 @@ export async function processStartRunJob(job: Job) {
 
   logger.info({ runId }, "Starting run processing")
 
-  // Fresh vision circuit for this run (a prior run may have tripped it and, if it
-  // crashed, never reset it). The breaker is module-global — safe because only
-  // one run executes at a time (global run slot).
-  resetVisionBreaker()
+  // Fresh AI circuits (vision + text) for this run (a prior run may have tripped
+  // one and, if it crashed, never reset it). The breakers are module-global —
+  // safe because only one run executes at a time (global run slot).
+  resetAiBreakers()
 
   // Step 1: Fetch run from Supabase
   const { data: run, error: fetchError } = await supabase

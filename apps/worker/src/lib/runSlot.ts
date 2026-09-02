@@ -2,7 +2,7 @@ import { supabase } from "./supabase"
 import pino from "pino"
 import { releaseLinkCaches } from "../checks/optimizedLinksCheck"
 import { clearTedCaches } from "./tedClient"
-import { resetVisionBreaker } from "./aiFallback"
+import { resetAiBreakers } from "./aiFallback"
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -76,7 +76,7 @@ export async function releaseRunSlot(runId: string): Promise<void> {
     try {
       releaseLinkCaches(runId)
       clearTedCaches()
-      resetVisionBreaker()
+      resetAiBreakers()
     } catch (e: any) {
       logger.warn({ runId, error: e?.message }, "run cache cleanup failed")
     }

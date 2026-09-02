@@ -373,46 +373,183 @@ export function applyPrivacyPolicyGitops(
 ): GitopsFixResult {
   const slug = "privacy-policy"
   const dirRel = `resources/pages/${slug}`
-  if (fs.existsSync(path.join(workDir, dirRel, "resource.json"))) {
-    return miss("privacy-policy page already exists in repo")
+  const pageExists = fs.existsSync(path.join(workDir, dirRel, "resource.json"))
+
+  const files: string[] = []
+  const descriptions: string[] = []
+  const notes: string[] = []
+
+  // 1. Create the page resource if it isn't already in the repo.
+  if (!pageExists) {
+    const resource = {
+      schema_version: 1,
+      git_id: "page-privacy-policy",
+      type: "page",
+      slug,
+      title: "Privacy Policy",
+      status: opts.publish ? "publish" : "draft",
+      publication_approved: !!opts.publish,
+      excerpt: "",
+      menu_order: 0,
+      content: opts.contentHtml,
+    }
+    const seo = {
+      schema_version: 1,
+      provider: "rank_math",
+      fields: {
+        rank_math_title: `Privacy Policy — ${opts.company}`,
+        rank_math_description: `The privacy policy for ${opts.company}.`,
+      },
+    }
+    const ref: ResourceRef = {
+      groupSlug: `pages/${slug}`,
+      resourceRel: `${dirRel}/resource.json`,
+      elementorRel: `${dirRel}/elementor.json`,
+      seoRel: `${dirRel}/seo.json`,
+      resource,
+    }
+    const created = commitResource(
+      workDir,
+      ref,
+      [
+        { rel: ref.resourceRel, value: resource },
+        { rel: ref.seoRel, value: seo },
+      ],
+      `Created a ${opts.publish ? "published" : "draft"} Privacy Policy page.`,
+      "privacy_policy page-create applied",
+    )
+    // A page that fails validation is a hard stop — don't wire a footer link to
+    // a page that won't exist.
+    if (!created.applied) return created
+    files.push(...created.files)
+    descriptions.push(created.description)
+    notes.push(created.note)
+  } else {
+    notes.push("privacy-policy page already exists in repo")
   }
-  const resource = {
-    schema_version: 1,
-    git_id: "page-privacy-policy",
-    type: "page",
-    slug,
-    title: "Privacy Policy",
-    status: opts.publish ? "publish" : "draft",
-    publication_approved: !!opts.publish,
-    excerpt: "",
-    menu_order: 0,
-    content: opts.contentHtml,
+
+  // 2. Ensure the footer links to it. Additive and idempotent; a clean no-op
+  //    when the footer isn't a repo template (menu/theme-driven footer).
+  const link = addPrivacyFooterLink(workDir)
+  if (link.applied) {
+    files.push(...link.files)
+    descriptions.push(link.description)
   }
-  const seo = {
-    schema_version: 1,
-    provider: "rank_math",
-    fields: {
-      rank_math_title: `Privacy Policy — ${opts.company}`,
-      rank_math_description: `The privacy policy for ${opts.company}.`,
-    },
+  notes.push(link.note)
+
+  // Nothing changed → page already present AND link already there / not possible.
+  if (files.length === 0) return miss(notes.join("; "))
+
+  return {
+    applied: true,
+    files,
+    description: descriptions.join(" "),
+    note: notes.join("; "),
   }
-  const ref: ResourceRef = {
-    groupSlug: `pages/${slug}`,
-    resourceRel: `${dirRel}/resource.json`,
-    elementorRel: `${dirRel}/elementor.json`,
-    seoRel: `${dirRel}/seo.json`,
-    resource,
-  }
-  return commitResource(
-    workDir,
-    ref,
-    [
-      { rel: ref.resourceRel, value: resource },
-      { rel: ref.seoRel, value: seo },
-    ],
-    `Created a ${opts.publish ? "published" : "draft"} Privacy Policy page.`,
-    "privacy_policy page-create applied",
+}
+
+// ---------------------------------------------------------------------------
+// privacy_policy footer link — add a link to the policy in the footer template.
+//
+// The privacy check fails on a missing page OR a missing footer link, so the
+// fix ensures both. Elementor footers in these repos are elementor_library
+// templates with an `elements` tree, so we append a button widget that targets
+// /privacy-policy — the same create-a-node-and-insert move the reviews and
+// contact-form handlers already make.
+//
+// Gated like the sticky-header fix: the footer must be a repo template WITH a
+// design (the validator refuses an empty elements array). A footer whose links
+// come from a WP nav menu / theme has no JSON target, so this cleanly no-ops
+// and the reviewer is told it's a manual step.
+// ---------------------------------------------------------------------------
+
+const PRIVACY_LINK_URL = "/privacy-policy"
+
+/** A footer elementor_library template ref, or null (never the header). */
+function findFooterTemplate(workDir: string): ResourceRef | null {
+  return (
+    listResources(workDir).find((r) => {
+      const slug = String(r.resource?.slug || "").toLowerCase()
+      const title = String(r.resource?.title || "").toLowerCase()
+      const type = String(r.resource?.type || "").toLowerCase()
+      const isTemplate = r.groupSlug.startsWith("templates/") || type === "elementor_library"
+      const isFooter = slug === "footer" || /\bfooter\b/.test(title) || /\bfooter\b/.test(slug)
+      const isHeader = /\bheader\b/.test(slug) || /\bheader\b/.test(title)
+      return isTemplate && isFooter && !isHeader
+    }) || null
   )
+}
+
+/** A centered container holding one button widget that links to `url`. */
+function footerLinkContainer(url: string, text: string, taken: Set<string>): any {
+  return {
+    id: newElementorId(taken),
+    elType: "container",
+    settings: { content_width: "full", flex_justify_content: "center" },
+    elements: [
+      {
+        id: newElementorId(taken),
+        elType: "widget",
+        settings: { text, link: { url, is_external: "", nofollow: "" } },
+        elements: [],
+        widgetType: "button",
+      },
+    ],
+    isInner: false,
+  }
+}
+
+/**
+ * Append a "Privacy Policy" link to the footer template's elements array.
+ * Idempotent (skips when the footer already links to the policy) and gated on
+ * the footer being a repo template with a design. Writes then validates the NEW
+ * tree, rolling back on any issue.
+ */
+function addPrivacyFooterLink(workDir: string): GitopsFixResult {
+  const footer = findFooterTemplate(workDir)
+  if (!footer) {
+    return miss("no footer elementor template in repo — footer link is a manual step")
+  }
+  const elementor = readJson<any>(workDir, footer.elementorRel)
+  if (!elementor || !Array.isArray(elementor.elements) || elementor.elements.length === 0) {
+    return miss("footer template has no design yet (empty elements) — footer link is a manual step")
+  }
+
+  // Idempotent: don't add a second link when one to the policy already exists.
+  const already = findElementorNodes(
+    elementor,
+    (n) =>
+      typeof n.settings?.link?.url === "string" &&
+      /\/privacy-policy\/?$/i.test(n.settings.link.url.trim()),
+  ).length
+  if (already) return miss("footer already links to the privacy policy")
+
+  const taken = new Set<string>()
+  findElementorNodes(elementor, (n) => {
+    if (n.id) taken.add(String(n.id))
+    return false
+  })
+  elementor.elements.push(footerLinkContainer(PRIVACY_LINK_URL, "Privacy Policy", taken))
+
+  // commitResource validates the on-disk (pre-write) tree; here we must validate
+  // the NEW tree, so write then validate, rolling back on any issue.
+  const abs = path.join(workDir, footer.elementorRel)
+  const prior = fs.existsSync(abs) ? fs.readFileSync(abs, "utf8") : null
+  writeJson(workDir, footer.elementorRel, elementor)
+  const issues = validateResource(workDir, footer)
+  if (issues.length) {
+    if (prior !== null) fs.writeFileSync(abs, prior, "utf8")
+    else fs.rmSync(abs, { force: true })
+    return miss(
+      `validation blocked footer link: ${issues.map((i) => `${i.file}: ${i.message}`).join("; ")}`,
+    )
+  }
+  return {
+    applied: true,
+    files: [footer.elementorRel],
+    description: "Added a Privacy Policy link to the footer template (links to /privacy-policy).",
+    note: `privacy footer link added to ${footer.elementorRel}`,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -422,21 +559,40 @@ export function applyPrivacyPolicyGitops(
 
 const GENERIC_CTA = /^(learn|read|know|see|find out)\s+more$/i
 
+// The visible label of a CTA-ish node, from the fields Elementor stores it in
+// for both button widgets and text/link widgets (HTML is stripped to plain text).
+function ctaLabel(n: ElementorNode): string {
+  const s = n.settings || {}
+  for (const key of ["text", "title", "editor"]) {
+    const v = s[key]
+    if (typeof v === "string") {
+      const plain = v.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
+      if (plain) return plain
+    }
+  }
+  return ""
+}
+
+// The destination a CTA-ish node points at, when Elementor stores one.
+function ctaLink(n: ElementorNode): string {
+  const s = n.settings || {}
+  return String(s.link?.url || s.url || s.link_to || "").trim()
+}
+
 export function applyLearnMoreGitops(workDir: string): GitopsFixResult {
   const resources = listResources(workDir)
   const located: string[] = []
   for (const ref of resources) {
     const elementor = readJson<any>(workDir, ref.elementorRel)
     if (!elementor) continue
-    const buttons = findElementorNodes(
-      elementor,
-      (n) =>
-        n.widgetType === "button" &&
-        typeof n.settings?.text === "string" &&
-        GENERIC_CTA.test(n.settings.text.trim()),
-    )
-    for (const b of buttons) {
-      located.push(`${ref.groupSlug} → button "${b.settings!.text}" (id ${b.id})`)
+    // Match generic CTAs whether they're a button widget OR a text link — both
+    // live in the page's elementor.json; the label is what we key on.
+    const nodes = findElementorNodes(elementor, (n) => GENERIC_CTA.test(ctaLabel(n)))
+    for (const n of nodes) {
+      const kind = n.widgetType || n.elType || "element"
+      const link = ctaLink(n)
+      const where = `${ref.groupSlug} → ${kind} "${ctaLabel(n)}" (id ${n.id})`
+      located.push(link ? `${where} → ${link}` : where)
     }
   }
   if (!located.length) return miss("no generic CTA button widgets found in elementor resources")
@@ -444,7 +600,7 @@ export function applyLearnMoreGitops(workDir: string): GitopsFixResult {
     applied: false,
     files: [],
     description:
-      `Located ${located.length} generic CTA button(s) needing more descriptive copy:\n` +
+      `Located ${located.length} generic CTA link(s) needing more descriptive copy:\n` +
       located.map((l) => `• ${l}`).join("\n"),
     note: "learn_more located; new copy needs review (not auto-applied)",
   }
