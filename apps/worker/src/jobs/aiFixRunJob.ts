@@ -29,7 +29,11 @@ import {
   MAX_CONTEXT_FILES,
   type ApplyResult,
 } from "../lib/repoContext"
-import { recordAiFixTiming, saveAiFixTimingReport } from "../lib/timingCollector"
+import {
+  recordAiFixTiming,
+  saveAiFixTimingReport,
+  logScanTimingRecap,
+} from "../lib/timingCollector"
 import {
   seedPrivacyPolicyPage,
   seedPrivacyPolicyPageClassic,
@@ -337,6 +341,10 @@ export async function processAiFixRunJob(job: Job) {
 
   // AI-fix step timing (analytics only). Logged as its own table at job end.
   const aiFixJobStart = Date.now()
+
+  // Re-log the scan's check-timing table now so both tables sit together in the
+  // worker log (the scan logged it minutes ago at scan completion).
+  logScanTimingRecap(runId)
 
   const { data: findings } = await supabase
     .from("findings")
