@@ -48,6 +48,7 @@ import { detectFromRepoDir, type ThemeType } from "../lib/themeType"
 import { detectRepoKind, type RepoKind } from "../lib/gitopsResource"
 import {
   applySpellingGitops,
+  applyGrammarGitops,
   applyBackendGitops,
   applyFaviconGitops,
   applyFooterLogoGitops,
@@ -253,8 +254,11 @@ async function runGitopsFix(
 
   switch (f.check_factor) {
     case "spelling":
-    case "grammar":
       return guard(() => applySpellingGitops(workDir, f))
+    case "grammar":
+      // Grammar is located, not auto-written: the AI suggestion is editorial, not
+      // a guaranteed verbatim replacement (see applyGrammarGitops).
+      return guard(() => applyGrammarGitops(workDir, f))
     case "backend_check":
       return guard(() => applyBackendGitops(workDir, f))
     case "favicon":

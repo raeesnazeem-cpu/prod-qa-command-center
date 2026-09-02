@@ -182,6 +182,85 @@ export function applySpellingGitops(workDir: string, finding: Finding): GitopsFi
 }
 
 // ---------------------------------------------------------------------------
+// grammar — LOCATE the flagged copy in the repo (locate-only).
+//
+// A grammar finding carries an AI-authored `excerpt` (the quoted copy) and a
+// `suggestion` (free-form "the fix" — sometimes a drop-in phrase, sometimes an
+// instruction like "add a comma"). Because the suggestion is NOT a guaranteed
+// verbatim replacement, auto-substituting it risks corrupting live client copy —
+// the opposite of a fix. So, like learn_more / dead_links / hero_media, we locate
+// the exact repo node that holds the excerpt and surface the issue + suggestion
+// for a human to apply. (Spelling stays auto-write: a real-word→real-word swap is
+// unambiguous; grammar is a judgement call.)
+//
+// If the scan is later upgraded to emit a structured verbatim {find, replace}
+// pair, this can become auto-write the way spelling is.
+// ---------------------------------------------------------------------------
+
+/** Pull the quoted excerpt + suggestion out of a grammar finding's description. */
+function parseGrammarFinding(
+  finding: Finding,
+): { excerpt: string; suggestion: string | null } | null {
+  const desc = String(finding.description || "")
+  // Emitted shape: `"<excerpt>" — <issue>. Suggestion: <suggestion>`
+  const excerpt = desc.match(/^\s*"([\s\S]*?)"\s*[—–-]/)?.[1]?.trim()
+  if (!excerpt || excerpt.length < 4) return null // too short to locate safely
+  const suggestion = desc.match(/Suggestion:\s*([\s\S]+?)\s*$/i)?.[1]?.trim() || null
+  return { excerpt, suggestion }
+}
+
+export function applyGrammarGitops(workDir: string, finding: Finding): GitopsFixResult {
+  const parsed = parseGrammarFinding(finding)
+  if (!parsed) return miss("no locatable excerpt in grammar finding")
+  const { excerpt, suggestion } = parsed
+
+  const located: string[] = []
+  for (const ref of listResources(workDir)) {
+    // Elementor docs: heading.title, text-editor.editor, button.text, html.
+    const elementor = readJson<any>(workDir, ref.elementorRel)
+    if (elementor) {
+      const nodes = findElementorNodes(elementor, (n) => {
+        const s = n.settings
+        if (!s || typeof s !== "object") return false
+        for (const key of ["title", "editor", "text", "html"]) {
+          const v = s[key]
+          if (typeof v === "string" && v.includes(excerpt)) return true
+        }
+        return false
+      })
+      for (const n of nodes) {
+        located.push(
+          `${ref.groupSlug} → ${n.widgetType || n.elType || "element"} (element ${n.id}) in ${ref.elementorRel}`,
+        )
+      }
+    }
+    // Classic content.
+    const content = ref.resource?.content
+    if (typeof content === "string" && content.includes(excerpt)) {
+      located.push(`${ref.groupSlug} → resource.json content`)
+    }
+  }
+
+  if (!located.length) {
+    return miss(
+      `grammar excerpt "${excerpt.slice(0, 60)}…" not found verbatim in any resource (copy may span markup, or live in the nav/theme)`,
+    )
+  }
+
+  const fixLine = suggestion ? `\nSuggested correction: "${suggestion}"` : ""
+  return {
+    applied: false,
+    files: [],
+    description:
+      `Located the flagged copy in ${located.length} repo node(s). Apply the grammar correction by hand ` +
+      `(the suggestion is editorial, so it is not auto-written):\n` +
+      located.map((l) => `• ${l}`).join("\n") +
+      fixLine,
+    note: `grammar located ${located.length} repo node(s); correction needs review (not auto-applied)`,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // backend_check — default tagline + open comments live in site.json.
 // ---------------------------------------------------------------------------
 
@@ -383,6 +462,12 @@ export function applyLearnMoreGitops(workDir: string): GitopsFixResult {
 
 const PLACEHOLDER_SITE_NAME = /^(my site|my blog|wordpress|site title|just another.*)$/i
 
+// A title that is WordPress/Elementor boilerplate rather than real business copy.
+// Mirrors what checkTextShareMetadata flags as a "Default WordPress Value" — used
+// to (a) recognise the defect and (b) refuse to backfill OG title from a source
+// that is itself boilerplate (which would "fix" nothing).
+const BOILERPLATE_TITLE = /\b(wordpress|elementor|my blog|just another)\b/i
+
 /** Map a live page URL to its resource dir by URL slug (or front page). */
 function resolveResourceByUrl(workDir: string, pageUrl: string): ResourceRef | null {
   const resources = listResources(workDir)
@@ -452,7 +537,10 @@ export function applySeoOgGitops(
   ctx: { company: string; pageUrl: string },
 ): GitopsFixResult {
   const title = (finding.title || "").toLowerCase()
-  const wantsOgTitle = /og:title|open graph title/.test(title)
+  // "default wordpress value found" is checkTextShareMetadata's og:title-is-
+  // boilerplate defect — same target (rank_math_facebook_title) as a missing
+  // og:title, so it routes through the og:title branch below.
+  const wantsOgTitle = /og:title|open graph title|default wordpress value/.test(title)
   const wantsOgDesc = /og:description|open graph description/.test(title)
   const wantsOgImage = /og:image|open graph image/.test(title)
   const wantsSiteName = /site name|og:site_name/.test(title)
@@ -494,11 +582,18 @@ export function applySeoOgGitops(
 
   const changes: string[] = []
 
-  if (wantsOgTitle && !seo.fields.rank_math_facebook_title) {
-    const src = seo.fields.rank_math_title || ref.resource?.title
-    if (src) {
-      seo.fields.rank_math_facebook_title = src
-      changes.push(`OG title → "${src}"`)
+  if (wantsOgTitle) {
+    // Backfill when the current OG title is absent OR itself boilerplate (the
+    // "default WordPress value" case) — but only from a source that is real
+    // business copy, never from another boilerplate value.
+    const existing = seo.fields.rank_math_facebook_title
+    const existingIsBad = !existing || BOILERPLATE_TITLE.test(String(existing))
+    if (existingIsBad) {
+      const src = seo.fields.rank_math_title || ref.resource?.title
+      if (src && !BOILERPLATE_TITLE.test(String(src))) {
+        seo.fields.rank_math_facebook_title = src
+        changes.push(`OG title → "${src}"`)
+      }
     }
   }
   if (wantsOgDesc && !seo.fields.rank_math_facebook_description) {
