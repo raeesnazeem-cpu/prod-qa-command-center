@@ -20,7 +20,7 @@ import {
   getSingleScriptCodeFromBasecamp,
   getReviewsWidgetFromBasecamp,
 } from "./basecampClient"
-import { getReviewsWidgetId } from "./tedClient"
+import { getReviewsWidgetId, getClientPhone } from "./tedClient"
 import { reviewsEmbedSnippet } from "./reviewsWidgetFix"
 import {
   resolveRequiredUserwayTier,
@@ -182,19 +182,25 @@ export function applySpellingGitops(workDir: string, finding: Finding): GitopsFi
 }
 
 // ---------------------------------------------------------------------------
-// grammar — LOCATE the flagged copy in the repo (locate-only).
+// grammar — AUTO-CORRECT the flagged copy in the source when it is safe to,
+// else hand off for manual review (never a fake "fixed").
 //
-// A grammar finding carries an AI-authored `excerpt` (the quoted copy) and a
-// `suggestion` (free-form "the fix" — sometimes a drop-in phrase, sometimes an
-// instruction like "add a comma"). Because the suggestion is NOT a guaranteed
-// verbatim replacement, auto-substituting it risks corrupting live client copy —
-// the opposite of a fix. So, like learn_more / dead_links / hero_media, we locate
-// the exact repo node that holds the excerpt and surface the issue + suggestion
-// for a human to apply. (Spelling stays auto-write: a real-word→real-word swap is
-// unambiguous; grammar is a judgement call.)
+// A grammar finding carries an AI-authored `excerpt` (the quoted copy, captured
+// from the RENDERED page — so it can arrive with display artifacts like split
+// letters) and a `suggestion` ("the fix" — sometimes a clean drop-in phrase,
+// sometimes an editorial instruction like "add a comma").
 //
-// If the scan is later upgraded to emit a structured verbatim {find, replace}
-// pair, this can become auto-write the way spelling is.
+// We auto-write ONLY when both are true:
+//   1. the flagged phrase appears VERBATIM in one content field (no interleaving
+//      markup — so the replacement can't corrupt the surrounding HTML), and
+//   2. the suggestion is a concrete drop-in phrase (not an instruction),
+// then we validate the resource and commit. That covers the real typos that live
+// in the copy (e.g. "Our Practice Pillar" → "Our Practice Pillars").
+//
+// When we can't write, we say WHY so a human can act — the source already reads
+// correctly (a page display artifact, not a content typo), the copy spans markup,
+// or it isn't in the content files at all (nav/theme/database). None of these
+// print a "✅ Fixed" line; they are manual-review hand-offs.
 // ---------------------------------------------------------------------------
 
 /** Pull the quoted excerpt + suggestion out of a grammar finding's description. */
@@ -209,54 +215,162 @@ function parseGrammarFinding(
   return { excerpt, suggestion }
 }
 
+/**
+ * Normalize copy for tolerant comparison: strip HTML tags, decode the common
+ * entities, drop zero-width/soft-hyphen chars, collapse whitespace, lowercase.
+ * Lets us tell "the source already reads correctly" from "the copy spans markup".
+ */
+function normText(s: string): string {
+  return String(s || "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&#0*39;|&apos;|&rsquo;|&lsquo;/gi, "'")
+    .replace(/&quot;|&ldquo;|&rdquo;/gi, '"')
+    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+}
+
+/**
+ * Return a concrete drop-in replacement PHRASE for `excerpt` (safe to write), or
+ * null when the suggestion is an editorial INSTRUCTION ("add a comma") or too far
+ * from the flagged copy to be a verbatim swap. Strips wrapping quotes.
+ */
+function dropInReplacement(excerpt: string, suggestion: string | null): string | null {
+  if (!suggestion) return null
+  const s = suggestion.trim().replace(/^["“](.*)["”]$/, "$1").trim()
+  if (s.length < 2 || s.length > 200) return null
+  // Instruction-shaped suggestions are never written as-is.
+  if (
+    /^(add|insert|remove|delete|omit|capitali|lowercase|uppercase|use |change |replace |consider|rephrase|reword|hyphenate|pluralize|correct |fix |should|it should|needs|missing|put )/i.test(
+      s,
+    )
+  )
+    return null
+  // Talks ABOUT punctuation/grammar rather than being the corrected text.
+  if (
+    /\b(comma|apostrophe|hyphen|semicolon|colon|capitali|plural|singular|tense|article|spac(e|ing)|punctuation)\b/i.test(
+      s,
+    )
+  )
+    return null
+  // A real replacement is about the same size as the flagged copy, not a rewrite.
+  const el = excerpt.trim().length
+  if (el && (s.length < el * 0.4 || s.length > el * 2.5)) return null
+  return s
+}
+
 export function applyGrammarGitops(workDir: string, finding: Finding): GitopsFixResult {
   const parsed = parseGrammarFinding(finding)
   if (!parsed) return miss("no locatable excerpt in grammar finding")
   const { excerpt, suggestion } = parsed
+  const repl = dropInReplacement(excerpt, suggestion)
 
+  const filesChanged: string[] = []
   const located: string[] = []
+  let alreadyClean = false
+
+  const normExcerpt = normText(excerpt)
+  const normSuggestion = suggestion ? normText(suggestion) : ""
+  // Normalized (markup-tolerant) matching is only trustworthy for a distinctive
+  // phrase — a short/common one would false-positive across unrelated copy.
+  const distinctive = normExcerpt.length >= 12
+
+  const noteFieldMiss = (v: string, where: string) => {
+    if (!distinctive) return
+    const nv = normText(v)
+    if (normSuggestion && nv.includes(normSuggestion)) alreadyClean = true
+    else if (nv.includes(normExcerpt)) located.push(`${where} [spans markup]`)
+  }
+
   for (const ref of listResources(workDir)) {
-    // Elementor docs: heading.title, text-editor.editor, button.text, html.
+    // Elementor content fields: heading.title, text-editor.editor, button.text, html.
     const elementor = readJson<any>(workDir, ref.elementorRel)
     if (elementor) {
-      const nodes = findElementorNodes(elementor, (n) => {
-        const s = n.settings
-        if (!s || typeof s !== "object") return false
+      let changedHere = false
+      const nodes = findElementorNodes(elementor, (n) => !!n.settings)
+      for (const node of nodes) {
+        const s = node.settings
+        if (!s) continue
+        const where = `${ref.groupSlug} → ${node.widgetType || node.elType || "element"} (element ${node.id})`
         for (const key of ["title", "editor", "text", "html"]) {
           const v = s[key]
-          if (typeof v === "string" && v.includes(excerpt)) return true
+          if (typeof v !== "string" || !v) continue
+          if (repl && repl !== excerpt && v.includes(excerpt)) {
+            s[key] = v.split(excerpt).join(repl)
+            changedHere = true
+          } else if (v.includes(excerpt)) {
+            located.push(where) // found verbatim but suggestion is editorial
+          } else {
+            noteFieldMiss(v, where)
+          }
         }
-        return false
-      })
-      for (const n of nodes) {
-        located.push(
-          `${ref.groupSlug} → ${n.widgetType || n.elType || "element"} (element ${n.id}) in ${ref.elementorRel}`,
-        )
+      }
+      if (changedHere) {
+        const res = commitResource(workDir, ref, [{ rel: ref.elementorRel, value: elementor }], "", "")
+        if (!res.applied) return res // validation blocked → report, don't write
+        filesChanged.push(ref.elementorRel)
       }
     }
-    // Classic content.
+
+    // Classic content lives in resource.json.content.
     const content = ref.resource?.content
-    if (typeof content === "string" && content.includes(excerpt)) {
-      located.push(`${ref.groupSlug} → resource.json content`)
+    if (typeof content === "string" && content) {
+      const where = `${ref.groupSlug} → resource.json content`
+      if (repl && repl !== excerpt && content.includes(excerpt)) {
+        ref.resource.content = content.split(excerpt).join(repl)
+        const res = commitResource(workDir, ref, [{ rel: ref.resourceRel, value: ref.resource }], "", "")
+        if (!res.applied) return res
+        filesChanged.push(ref.resourceRel)
+      } else if (content.includes(excerpt)) {
+        located.push(where)
+      } else {
+        noteFieldMiss(content, where)
+      }
     }
   }
 
-  if (!located.length) {
-    return miss(
-      `grammar excerpt "${excerpt.slice(0, 60)}…" not found verbatim in any resource (copy may span markup, or live in the nav/theme)`,
-    )
+  if (filesChanged.length) {
+    return {
+      applied: true,
+      files: filesChanged,
+      description: `Corrected “${excerpt}” → “${repl}” across ${filesChanged.length} content file(s).`,
+      note: `grammar fix auto-written to ${filesChanged.length} file(s)`,
+    }
   }
 
-  const fixLine = suggestion ? `\nSuggested correction: "${suggestion}"` : ""
+  // Nothing written — say why, as a manual-review hand-off (never a fake fix).
+  const wantTo = suggestion ? ` to “${suggestion}”` : ""
+  if (alreadyClean) {
+    return {
+      applied: false,
+      files: [],
+      description:
+        `The source content already reads correctly (“${suggestion}”). The flagged text looks like a page ` +
+        `display/rendering issue (letters split or spaced by markup or styling), not a typo in the content — review the page manually.`,
+      note: "grammar: source already correct (display artifact)",
+    }
+  }
+  if (located.length) {
+    return {
+      applied: false,
+      files: [],
+      description:
+        `Found the flagged copy in ${located.length} content node(s) but it spans page markup, so it can’t be ` +
+        `auto-corrected safely. Review and correct it by hand${wantTo}:\n` +
+        located.map((l) => `• ${l}`).join("\n"),
+      note: `grammar located ${located.length} node(s); needs manual correction`,
+    }
+  }
   return {
     applied: false,
     files: [],
     description:
-      `Located the flagged copy in ${located.length} repo node(s). Apply the grammar correction by hand ` +
-      `(the suggestion is editorial, so it is not auto-written):\n` +
-      located.map((l) => `• ${l}`).join("\n") +
-      fixLine,
-    note: `grammar located ${located.length} repo node(s); correction needs review (not auto-applied)`,
+      `Could not find the flagged copy in the page content files (it may live in the navigation, theme, or ` +
+      `database). Review and correct it manually${wantTo}.`,
+    note: "grammar excerpt not found in content resources",
   }
 }
 
@@ -995,6 +1109,94 @@ export function applySingleScriptGitops(
   ctx: { projectId?: string | null; projectName?: string | null },
 ): Promise<GitopsFixResult> {
   return installCliffHanger(workDir, finding, ctx, "single_script")
+}
+
+// ---------------------------------------------------------------------------
+// callnow_links — add a global floating "Call Now" button site-wide.
+//
+// The scan passes when the live site already has a button/link to a phone
+// number (an `<a href="tel:…">`). When it doesn't, the fix installs a floating
+// circular phone button — fixed at bottom-left, 15px from the edges — linking to
+// the client's number (fetched from the TED contact notes). It is installed the
+// same self-contained way as the chatbot/single-script global scripts, so it
+// appears on every page even when the header/footer templates are empty. There
+// is NO WordPress-backend / Call-Now-plugin path anymore.
+//
+// Failure modes returned to the caller (encoded in `note`) when nothing lands:
+//   • callnow:phone-not-found     — no phone number in the TED contact notes
+//   • callnow:phone-not-linkable  — a value was present but isn't a valid number
+//   • callnow:write-failed        — writing the snippet threw
+// ---------------------------------------------------------------------------
+
+const CALLNOW_SNIPPET = {
+  slug: "g99-call-now-button",
+  gitId: "cpt-elementor-snippet-g99-call-now-button",
+  title: "Growth99 Call Now floating button",
+}
+
+/** Self-contained HTML+CSS for the floating call button (bottom-left, 15px). */
+function callNowSnippetHtml(tel: string, display: string): string {
+  const label = `Call ${display}`.replace(/[<>"]/g, "")
+  return (
+    `<style>` +
+    `.g99-callnow{position:fixed;left:15px;bottom:15px;z-index:99999;` +
+    `width:56px;height:56px;border-radius:50%;background:#1a8917;` +
+    `display:flex;align-items:center;justify-content:center;text-decoration:none;` +
+    `box-shadow:0 4px 12px rgba(0,0,0,.25);transition:transform .15s ease}` +
+    `.g99-callnow:hover{transform:scale(1.08)}` +
+    `.g99-callnow svg{width:26px;height:26px;fill:#fff}` +
+    `@media print{.g99-callnow{display:none}}` +
+    `</style>` +
+    `<a class="g99-callnow" href="tel:${tel}" aria-label="${label}" title="${label}">` +
+    `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M6.62 10.79a15.05 15.05 0 006.59 6.59l2.2-2.2a1 1 0 011.02-.24 11.36 11.36 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.36 11.36 0 00.57 3.57 1 1 0 01-.24 1.02l-2.2 2.2z"/></svg>` +
+    `</a>`
+  )
+}
+
+export async function applyCallNowGitops(
+  workDir: string,
+  _finding: Finding,
+  ctx: { projectId?: string | null; projectName?: string | null },
+): Promise<GitopsFixResult> {
+  const phone = await getClientPhone(ctx.projectName).catch(() => null)
+  if (!phone) {
+    return { applied: false, files: [], description: "", note: "callnow:phone-not-found" }
+  }
+  if (!phone.tel) {
+    return {
+      applied: false,
+      files: [],
+      description: `A contact number ("${phone.display}") is in the TED notes but it is not a valid, linkable phone number.`,
+      note: "callnow:phone-not-linkable",
+    }
+  }
+  try {
+    const res = writeGlobalScriptSnippet(workDir, {
+      ...CALLNOW_SNIPPET,
+      content: callNowSnippetHtml(phone.tel, phone.display),
+      alreadyMark: `tel:${phone.tel}`,
+    })
+    if (res.applied) {
+      return {
+        applied: true,
+        files: res.files,
+        description: `Added a floating Call Now button (circular phone icon, bottom-left, 15px from the edges) linking to tel:${phone.tel} — installed site-wide as an Elementor custom-code snippet so it shows on every page.`,
+        note: res.note,
+      }
+    }
+    // writeGlobalScriptSnippet only misses when the same button is already there.
+    if (/already installed/i.test(res.note)) {
+      return {
+        applied: true,
+        files: [],
+        description: `The floating Call Now button (tel:${phone.tel}) is already installed site-wide.`,
+        note: res.note,
+      }
+    }
+    return { applied: false, files: [], description: res.description || "", note: `callnow:write-failed: ${res.note}` }
+  } catch (e: any) {
+    return { applied: false, files: [], description: "", note: `callnow:write-failed: ${e?.message || "write error"}` }
+  }
 }
 
 // ---------------------------------------------------------------------------

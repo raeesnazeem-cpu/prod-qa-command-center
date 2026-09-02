@@ -64,6 +64,7 @@ import {
   applySingleScriptGitops,
   applyReviewsWidgetGitops,
   applyDeadLinksGitops,
+  applyCallNowGitops,
   type GitopsFixResult,
 } from "../lib/gitopsFix"
 import { renderPrivacyPolicy } from "../lib/privacyTemplate"
@@ -589,6 +590,142 @@ export async function processAiFixRunJob(job: Job) {
           lapse: false,
           placeCode: true,
         })
+      }
+      continue
+    }
+
+    // --- top_bar_sticky: NO auto-fix — always a manual hand-off -----------
+    // Making a header stick on scroll is a theme/design change we do not apply
+    // automatically, and a "stickiness not measured as failing" GitOps result
+    // literally means "nothing to fix" — it is NOT a completed fix. Either way
+    // this check must never stamp a "✅ Fixed" line or an "AI Fix — N fixes"
+    // banner, so we push NO fix record at all and `continue`. The check's own
+    // finding plus the subtask-level "Not auto-fixed — action needed" note carry
+    // the single honest outcome. Runs before the repo/LLM branches so every QA
+    // stage and repo kind behaves the same. (Mirrors the learn_more_buttons
+    // one-honest-outcome fix in commit 627a0aa.)
+    if (f.check_factor === "top_bar_sticky") {
+      continue
+    }
+
+    // --- grammar: one honest outcome — auto-correct or manual review ------
+    // Attempt a REAL correction in the source JSON. If the flagged phrase is in a
+    // content field verbatim and the suggestion is a clean drop-in, applyGrammar-
+    // Gitops writes it → we report "✅ AI Fix: Corrected …". If it can't be safely
+    // written (source already correct / spans markup / not in content files), it
+    // comes back applied:false → we record a MANUAL review hand-off (never a
+    // phantom "proposed" that would print a fake "✅ Fixed"). Clean-pass grammar
+    // findings ("No grammar issues found") are not defects — skip them entirely.
+    // Runs before the generic GitOps branch so grammar never takes the
+    // `proposed:!g.applied` path that caused the false-fixed contradiction.
+    if (f.check_factor === "grammar" && repoKind === "gitops" && workDir) {
+      if (!isCleanPassFinding(f)) {
+        const g = applyGrammarGitops(workDir, f)
+        if (g.applied) {
+          committed++
+          let diff = ""
+          if (g.files.length) {
+            try {
+              const { stdout } = await git(["diff", "--unified=3", "--", ...g.files])
+              diff = stdout.slice(0, MAX_DIFF_CHARS)
+            } catch {}
+          }
+          analysis.push({
+            findingId: f.id ? String(f.id) : null,
+            check_factor: f.check_factor,
+            title: f.title || f.check_factor,
+            pageUrl,
+            category: "fully_ai",
+            fix: g.description || g.note,
+            applied: true,
+            proposed: false,
+            lapse: false,
+            filesOffered: g.files,
+            filesChanged: g.files,
+            editNotes: [g.note],
+            diff,
+          })
+        } else {
+          // Could not auto-correct → honest manual review, NOT a proposal.
+          analysis.push({
+            findingId: f.id ? String(f.id) : null,
+            check_factor: f.check_factor,
+            title: f.title || f.check_factor,
+            pageUrl,
+            category: "manual",
+            fix: g.description || g.note,
+            applied: false,
+            proposed: false,
+            noAutoFix: true,
+            suggestedFix: g.description || g.note,
+            lapse: false,
+            filesChanged: [],
+          })
+        }
+      }
+      continue
+    }
+
+    // --- callnow_links: add a global floating Call Now button, or say why not
+    // The scan fails only when the site has no phone-number button. The fix adds
+    // a floating circular call button site-wide (number from TED contact notes).
+    // One honest outcome: applied → "✅ Fixed"; else the exact failure mode
+    // (number not found / not a valid number / write failed) — never a phantom
+    // proposal. Clean-pass ("Call Now button present") findings are skipped.
+    // Runs before the generic GitOps branch so it never takes the proposed path.
+    if (f.check_factor === "callnow_links" && repoKind === "gitops" && workDir) {
+      if (!isCleanPassFinding(f)) {
+        const g = await applyCallNowGitops(workDir, f, {
+          projectId: run?.project_id,
+          projectName: project?.name,
+        })
+        if (g.applied) {
+          committed++
+          let diff = ""
+          if (g.files.length) {
+            try {
+              const { stdout } = await git(["diff", "--unified=3", "--", ...g.files])
+              diff = stdout.slice(0, MAX_DIFF_CHARS)
+            } catch {}
+          }
+          analysis.push({
+            findingId: f.id ? String(f.id) : null,
+            check_factor: f.check_factor,
+            title: f.title || f.check_factor,
+            pageUrl,
+            category: "fully_ai",
+            fix: g.description || g.note,
+            applied: true,
+            proposed: false,
+            lapse: false,
+            filesOffered: g.files,
+            filesChanged: g.files,
+            editNotes: [g.note],
+            diff,
+          })
+        } else {
+          // Map the failure mode to an honest, non-green manual line.
+          const mode = g.note || ""
+          const reason = /phone-not-found/.test(mode)
+            ? "The client's phone number was not found in the TED contact notes. Add it there, then re-run to auto-add the Call Now button."
+            : /phone-not-linkable/.test(mode)
+              ? `${g.description || "The number in the TED contact notes is not a valid phone number."} Add a valid number to the TED contact notes, then re-run.`
+              : `Adding the Call Now button failed to write to the repository${g.description ? ` (${g.description})` : ""}. Add the button manually or re-run.`
+          analysis.push({
+            findingId: f.id ? String(f.id) : null,
+            check_factor: f.check_factor,
+            title: f.title || f.check_factor,
+            pageUrl,
+            category: "manual",
+            fix: reason,
+            applied: false,
+            proposed: false,
+            noAutoFix: true,
+            suggestedFix: reason,
+            lapse: false,
+            filesChanged: [],
+          })
+        }
       }
       continue
     }

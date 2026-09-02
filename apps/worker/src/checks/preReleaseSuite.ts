@@ -1990,203 +1990,100 @@ export async function checkCallnowLinks(
   url: string,
   runId: string,
   pageId: string,
-  wpPassword?: string,
   sharedBrowser?: any,
   onProgress?: (progress: number, message: string) => Promise<void>,
 ): Promise<Finding[]> {
   const { chromium } = require("playwright")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
 
-  if (!wpPassword) {
-    return [
-      {
-        check_factor: "callnow_links",
-        title: "Callnow Check Skipped - No Password",
-        description:
-          "The WordPress admin password was not provided. Skipping Callnow backend checks.",
-        status: "open",
-        ai_generated: false,
-      } as Finding,
-    ]
-  }
-
-  let pluginScreenshotUrl = ""
-  let settingsScreenshotUrl = ""
-  let mobileScreenshotUrl = ""
-
-  let browser
+  // The check does exactly ONE thing: is there a global button/link to a phone
+  // number (an `<a href="tel:…">`) on the site? Present → PASS (and we report the
+  // number). Absent → FAIL (the fix adds a floating Call Now button site-wide).
+  let ownBrowser: any = null
+  let context: any = null
+  let page: any = null
   try {
-    browser = sharedBrowser || (await chromium.launch({ headless: true }))
+    const browser = sharedBrowser || (ownBrowser = await chromium.launch({ headless: true }))
+    context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+    page = await context.newPage()
 
-    const adminContext = await browser.newContext()
-    const adminPage = await adminContext.newPage()
-    if (onProgress) await onProgress(10, "Logging into WordPress admin...")
+    if (onProgress) await onProgress(20, "Loading the page to look for a Call Now button...")
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {})
+    await page.waitForTimeout(800)
 
-    const baseUrl = new URL(url).origin
-    await adminPage
-      .goto(`${baseUrl}/wp-login.php`, {
-        waitUntil: "networkidle",
-        timeout: 30000,
+    // Collect every tel: link on the page (case-insensitive), with its number.
+    const tels: { href: string; number: string }[] = await page
+      .evaluate(() => {
+        const out: { href: string; number: string }[] = []
+        const seen = new Set<string>()
+        for (const a of Array.from(document.querySelectorAll("a"))) {
+          const href = (a.getAttribute("href") || "").trim()
+          if (!/^tel:/i.test(href) || seen.has(href)) continue
+          const s = getComputedStyle(a as HTMLElement)
+          if (s.display === "none" || s.visibility === "hidden") continue
+          seen.add(href)
+          out.push({ href, number: href.replace(/^tel:/i, "").trim() })
+        }
+        return out
       })
-      .catch(() => {})
+      .catch(() => [])
 
-    const userField = adminPage.locator('#user_login, input[name="log"]')
-    const passField = adminPage.locator('#user_pass, input[name="pwd"]')
-    const submitBtn = adminPage.locator('#wp-submit, input[type="submit"]')
+    // A real call link must carry an actual phone number (≥7 digits).
+    const valid = tels.filter((t) => t.number.replace(/\D/g, "").length >= 7)
 
-    let loginOk = false
-    if ((await userField.count()) > 0 && (await passField.count()) > 0) {
-      await userField.fill("onboarding.india@growth99.com")
-      await passField.fill(wpPassword)
-      await submitBtn.click()
-      // Use domcontentloaded instead of networkidle to prevent hangs from WordPress heartbeat/polling
-      await adminPage.waitForLoadState("domcontentloaded", { timeout: 15000 })
-      // Wait for the admin bar to signal a successful login. #wpadminbar only
-      // renders for an authenticated session — the login page (bad password)
-      // does NOT have it, so it's the reliable success signal (unlike ".wrap",
-      // which can appear elsewhere).
-      await adminPage
-        .waitForSelector("#wpadminbar", { timeout: 15000 })
-        .catch(() => {})
-      loginOk = (await adminPage.locator("#wpadminbar").count()) > 0
-    }
+    const buffer = await page.screenshot({ fullPage: false }).catch(() => null)
+    const shot = buffer
+      ? await uploadScreenshot(buffer, `${runId}/${pageId}/callnow.png`).catch(() => "")
+      : ""
 
-    // Guard against a fake report: if login failed (bad/expired password), every
-    // subsequent wp-admin navigation redirects back to wp-login.php, and we'd
-    // screenshot the LOGIN PAGE as a normal "Verify Call Now" card — a false
-    // pass. Emit a lapse finding instead.
-    if (!loginOk) {
-      const loginShot = await adminPage.screenshot({ fullPage: false }).catch(() => null)
-      let loginShotUrl = ""
-      if (loginShot) {
-        loginShotUrl = await uploadScreenshot(
-          loginShot,
-          `${runId}/${pageId}/callnow_login_failed.png`,
-        ).catch(() => "")
-      }
-      await adminPage.close().catch(() => {})
-      await adminContext.close().catch(() => {})
+    if (valid.length) {
+      const numbers = Array.from(new Set(valid.map((t) => t.number)))
+      // Phrased as a clean pass ("No issues found") so it registers as PASSED,
+      // while still surfacing the active number(s) the client can verify.
       return [
         {
           check_factor: "callnow_links",
-          title: "Call Now & Links Check Failed",
-          description:
-            "Could not log in to WordPress admin (the admin bar never appeared — the password may be incorrect or expired). The Call Now plugin/settings checks require admin access and could not complete.",
-          context_text: `URL: ${url}\nWP admin login: failed`,
-          screenshot_url: loginShotUrl || null,
+          title: "Call Now button present",
+          description: `A Call Now button linking to a phone number is present on the site. Active number: ${numbers.join(", ")}. No issues found.`,
+          context_text: `URL: ${url}\nActive number(s): ${numbers.join(", ")}`,
+          screenshot_url: shot || null,
           status: "open",
           ai_generated: false,
         } as Finding,
       ]
     }
 
-    await adminPage
-      .goto(`${baseUrl}/wp-admin/plugins.php`, {
-        waitUntil: "networkidle",
-        timeout: 30000,
-      })
-      .catch(() => {})
-    const pluginRow = adminPage
-      .locator(
-        'tr[data-slug="call-now-button"], tr:has-text("Call Now Button")',
-      )
-      .first()
-    if ((await pluginRow.count()) > 0) {
-      if (onProgress)
-        await onProgress(40, "Checking Call Now Button plugin status...")
-
-      const buffer = await pluginRow.screenshot()
-      pluginScreenshotUrl = await uploadScreenshot(
-        buffer,
-        `${runId}/${pageId}/callnow_plugin.png`,
-      )
-    } else {
-      if (onProgress)
-        await onProgress(40, "Call Now Button plugin not found in list...")
-
-      const buffer = await adminPage.screenshot({ fullPage: true })
-      pluginScreenshotUrl = await uploadScreenshot(
-        buffer,
-        `${runId}/${pageId}/callnow_plugin.png`,
-      )
-    }
-
-    await adminPage
-      .goto(`${baseUrl}/wp-admin/options-general.php?page=call-now-button`, {
-        waitUntil: "networkidle",
-        timeout: 30000,
-      })
-      .catch(() => {})
-    const settingsBuffer = await adminPage.screenshot({ fullPage: true })
-    if (onProgress) await onProgress(60, "Capturing plugin settings...")
-
-    settingsScreenshotUrl = await uploadScreenshot(
-      settingsBuffer,
-      `${runId}/${pageId}/callnow_settings.png`,
-    )
-
-    await adminPage.close()
-    await adminContext.close()
-
-    const mobileContext = await browser.newContext({
-      viewport: { width: 375, height: 812 },
-      userAgent:
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1",
-    })
-    const mobilePage = await mobileContext.newPage()
-    if (onProgress)
-      await onProgress(80, "Verifying Call Now button on mobile view...")
-
-    await mobilePage
-      .goto(url, { waitUntil: "domcontentloaded", timeout: 30000 })
-      .catch(() => {})
-    // Brief settle for the Call-Now button to paint (evidence screenshot only);
-    // was a blind 5 s on top of networkidle.
-    await mobilePage.waitForTimeout(1200)
-    const mobileBuffer = await mobilePage.screenshot({ fullPage: false })
-    mobileScreenshotUrl = await uploadScreenshot(
-      mobileBuffer,
-      `${runId}/${pageId}/callnow_mobile.png`,
-    )
-
-    await mobilePage.close()
-    await mobileContext.close()
-  } catch (error: any) {
-    console.error("Callnow Links check failed:", error)
     return [
       {
         check_factor: "callnow_links",
-        title: "Call Now & Links Check Failed",
-        description: `The check encountered an unexpected error: ${error.message}. Process aborted gracefully.`,
+        title: "No Call Now button found",
+        description:
+          "The site has no Call Now button — no clickable link to a phone number (a tel: link) was found anywhere on the page. A floating Call Now button should be added so it appears on every page.",
+        context_text: `URL: ${url}`,
+        screenshot_url: shot || null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  } catch (error: any) {
+    return [
+      {
+        check_factor: "callnow_links",
+        title: "Call Now Check Failed",
+        description: `The check encountered an unexpected error: ${error?.message}. Process aborted gracefully.`,
         screenshot_url: null,
         status: "open",
         ai_generated: false,
       } as Finding,
     ]
   } finally {
-    if (browser && !sharedBrowser) {
-      await browser.close()
-    }
+    try {
+      if (context) await context.close().catch(() => {})
+    } catch {}
+    try {
+      if (ownBrowser) await ownBrowser.close().catch(() => {})
+    } catch {}
   }
-
-  const screenshotUrls = [
-    pluginScreenshotUrl,
-    mobileScreenshotUrl,
-    settingsScreenshotUrl,
-  ]
-    .filter(Boolean)
-    .join(",")
-
-  return [
-    {
-      check_factor: "callnow_links",
-      title: "Verify Call Now Button & Links",
-      description: `Please verify the Call Now plugin setup and homepage links using the evidence screenshots.`,
-      screenshot_url: screenshotUrls,
-      status: "open",
-      ai_generated: false,
-    } as Finding,
-  ]
 }
 
 /**

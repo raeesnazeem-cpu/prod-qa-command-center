@@ -919,7 +919,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   contact_form: "Mention to embed the Growth99 contact form widget (per-client code from Basecamp)",
   chatbot_consultation: "Mention to add the Cliff Hanger chatbot & virtual consultation codes from Basecamp",
   logo_chatbot: "Mention to replace the chatbot launcher icon with the client's brand logo",
-  callnow_links: "Mention to verify the Call Now button plugin setup and homepage links",
+  callnow_links: "Mention to add the client's phone number to the TED contact notes so the floating Call Now button can be added site-wide",
   verify_plugin_updates: "Mention to update all plugins except All-in-Migration, LiteSpeed, WP-Rocket, Elementor & WooCommerce",
   social_share_heading: "Mention to verify the Facebook, X & LinkedIn social share preview headings",
   false_breakpoint: "Mention to fix the overflowing element causing horizontal scroll at the flagged width",
@@ -937,7 +937,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   live_site_link: "Mention to confirm the site is live on the correct client domain over HTTPS and not on a gogroth staging host",
   plugin_number: "Mention to verify the plugin count matches the expected set and remove any leftover or dev plugins",
   page_speed: "Mention to optimize page speed (compress images, defer JS, enable caching/CDN, reduce render-blocking)",
-  hamburger_menu: "Mention to add or fix the mobile hamburger menu so it opens under 1024px and its links and buttons work",
+  hamburger_menu: "Mention to add or fix the hamburger menu so it appears and toggles open on mobile and tablet (under 1024px) and its links and buttons work",
 }
 
 const titleCase = (s: string) =>
