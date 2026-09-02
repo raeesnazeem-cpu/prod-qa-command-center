@@ -173,6 +173,12 @@ function renderTable(report: TimingReport): string {
  * log AND persist the structured report as JSON, then clear the buffer.
  * Deliberately does NOT touch TED — timing is analytics only.
  */
+// The scan's built report is retained here AFTER the raw buffer is cleared, so
+// the later ai_fix_run job (separate job, same process) can re-log it and the two
+// timing tables sit together. Only the most recent run is kept (one run at a time
+// under the global run slot); consumed + deleted by logScanTimingRecap.
+const lastScanReports = new Map<string, TimingReport>()
+
 export async function saveTimingReport(runId: string): Promise<void> {
   try {
     const report = await buildTimingReport(runId)
@@ -180,6 +186,10 @@ export async function saveTimingReport(runId: string): Promise<void> {
       logger.info({ runId }, "No check timings recorded; nothing to save.")
       return
     }
+
+    // Retain for the fix-job recap (keep only the latest run).
+    lastScanReports.clear()
+    lastScanReports.set(runId, report)
 
     const table = renderTable(report)
     logger.info(
@@ -261,5 +271,47 @@ export function saveAiFixTimingReport(runId: string, totalWallMs?: number): void
     logger.warn({ runId, error: e?.message }, "Failed to log AI-fix step timings.")
   } finally {
     aiFixTimings.delete(runId)
+  }
+}
+
+/**
+ * Re-log the scan's check-timing table at the START of the ai_fix_run job, so
+ * both the scan table and the AI-fix table sit together in the worker log
+ * instead of minutes apart. Reads the retained in-memory report; if that's gone
+ * (e.g. a redeploy landed between scan and fix), falls back to the JSON file
+ * written by saveTimingReport. No-op if neither is available.
+ */
+export function logScanTimingRecap(runId: string): void {
+  try {
+    let report = lastScanReports.get(runId) || null
+    lastScanReports.delete(runId)
+
+    if (!report) {
+      // Fallback: the JSON persisted at scan completion.
+      try {
+        const dir =
+          process.env.CHECK_TIMINGS_DIR ||
+          path.join(os.tmpdir(), "qacc-check-timings")
+        const file = path.join(dir, `timings-${runId}.json`)
+        if (fs.existsSync(file)) {
+          report = JSON.parse(fs.readFileSync(file, "utf8")) as TimingReport
+        }
+      } catch {
+        /* ignore — recap is best-effort */
+      }
+    }
+
+    if (!report) {
+      logger.info({ runId }, "No scan-timing recap available for this run.")
+      return
+    }
+
+    const table = renderTable(report)
+    logger.info(
+      { runId },
+      `\n===== INTERNAL QA CHECK TIMINGS (scan recap) =====\nSite: ${report.siteUrl ?? "—"} · Pages: ${report.pagesTotal ?? "—"}\n${table}\n==================================================`,
+    )
+  } catch (e: any) {
+    logger.warn({ runId, error: e?.message }, "Failed to log scan-timing recap.")
   }
 }
