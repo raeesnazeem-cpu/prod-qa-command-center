@@ -270,3 +270,25 @@ export const stopAllRuns = async (
   )
   return response.data
 }
+
+export interface ActiveRun {
+  id: string
+  project_id: string
+  run_type: "pre_release" | "post_release" | "internal_qa"
+  status: RunStatus
+  started_at?: string | null
+  site_url?: string | null
+  custom_name?: string | null
+}
+
+// Live count of active QA runs across all projects (pending/running/paused).
+// DB-backed → survives worker restarts and page reloads.
+export const getActiveRuns = async (
+  axios: AxiosInstance,
+): Promise<{ count: number; runs: ActiveRun[] }> => {
+  const response = await axios.get<{ count: number; runs: ActiveRun[] }>(
+    "/api/runs/active",
+    { params: { _t: Date.now() } },
+  )
+  return response.data
+}

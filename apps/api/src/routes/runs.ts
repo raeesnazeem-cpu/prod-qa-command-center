@@ -164,6 +164,30 @@ router.post(
 )
 
 /**
+ * GET /api/runs/active
+ * Live count (+ lightweight list) of every active QA run across ALL projects —
+ * anything pending, running, or paused. DB-backed, so the count survives worker
+ * restarts/redeploys and page reloads, and still shows a run that crashed
+ * without cleanly completing (its row stays "running" until stopped) — which is
+ * exactly what the header "Stop all runs" control needs to surface.
+ * Registered BEFORE "/:id" so "active" isn't swallowed as a run id.
+ */
+router.get("/active", clerkAuth, async (_req: Request, res: Response) => {
+  try {
+    const { data, error } = await supabase
+      .from("qa_runs")
+      .select("id, project_id, run_type, status, started_at, site_url, custom_name")
+      .in("status", ["pending", "running", "paused"])
+      .order("started_at", { ascending: true })
+
+    if (error) throw error
+    return res.json({ count: data?.length || 0, runs: data || [] })
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message })
+  }
+})
+
+/**
  * GET /api/runs/projects/:id/runs
  * List runs for a project with pagination and summary stats.
  */

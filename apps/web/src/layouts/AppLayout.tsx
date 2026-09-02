@@ -22,10 +22,10 @@ import {
   PanelLeftOpen,
   StopCircle,
 } from "lucide-react"
-import { useQueryClient } from "@tanstack/react-query"
+import { useQueryClient, useQuery } from "@tanstack/react-query"
 import { toast } from "react-hot-toast"
 import { useAuthAxios } from "../lib/useAuthAxios"
-import { stopAllRuns } from "../api/runs.api"
+import { stopAllRuns, getActiveRuns } from "../api/runs.api"
 import { useRole } from "../hooks/useRole"
 import { useEffect, useState } from "react"
 import { ChatSidebar } from "../components/ChatSidebar"
@@ -51,6 +51,25 @@ export const AppLayout = () => {
   const api = useAuthAxios()
   const queryClient = useQueryClient()
   const [isStoppingAll, setIsStoppingAll] = useState(false)
+
+  // Live active-run count, polled from the DB so it survives worker restarts,
+  // redeploys and page reloads (and still surfaces a crashed run stuck at
+  // "running"). Drives the header button label.
+  const { data: activeRuns } = useQuery({
+    queryKey: ["active-runs"],
+    queryFn: () => getActiveRuns(api),
+    refetchInterval: 5000,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+  })
+  const activeCount = activeRuns?.count ?? 0
+  const activeBreakdown = (activeRuns?.runs ?? []).reduce(
+    (acc, r) => {
+      acc[r.run_type] = (acc[r.run_type] || 0) + 1
+      return acc
+    },
+    {} as Record<string, number>,
+  )
   const handleStopAllRuns = async () => {
     if (isStoppingAll) return
     if (
@@ -375,12 +394,29 @@ export const AppLayout = () => {
           <div className="flex items-center space-x-6">
             <button
               onClick={handleStopAllRuns}
-              disabled={isStoppingAll}
-              title="Stop all active QA runs (internal / pre / post)"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-red-50 text-red-600 dark:bg-red-900/30 dark:text-red-400 border border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isStoppingAll || activeCount === 0}
+              title={
+                activeCount === 0
+                  ? "No active QA runs"
+                  : `Stop ${activeCount} active QA run${activeCount > 1 ? "s" : ""}` +
+                    (Object.keys(activeBreakdown).length
+                      ? ` — ${Object.entries(activeBreakdown)
+                          .map(([t, n]) => `${n} ${t.replace("_", "-")}`)
+                          .join(", ")}`
+                      : "")
+              }
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold border transition-colors disabled:cursor-not-allowed ${
+                activeCount > 0
+                  ? "bg-red-50 text-red-600 dark:bg-red-900/30 dark:text-red-400 border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/50"
+                  : "bg-slate-50 text-slate-400 dark:bg-slate-800/40 dark:text-slate-500 border-slate-200 dark:border-slate-700"
+              } ${isStoppingAll ? "opacity-50" : ""}`}
             >
               <StopCircle className="w-4 h-4" />
-              {isStoppingAll ? "Stopping…" : "Stop all runs"}
+              {isStoppingAll
+                ? "Stopping…"
+                : activeCount > 0
+                  ? `Stop all runs (${activeCount})`
+                  : "No active runs"}
             </button>
 
             <ActiveUsersDropdown />
