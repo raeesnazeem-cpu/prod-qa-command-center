@@ -101,6 +101,39 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   })
 }
 
+// Per-run vision circuit breaker.
+//
+// A 429 (rate limit) or 500/503 (server overload) from Gemini won't clear
+// mid-run — the quota/outage persists. Once we see one, retrying every later
+// image is pure wasted wall-clock (2 attempts × timeout each). So the FIRST such
+// status trips the breaker, and every subsequent vision check in the run fails
+// fast with that same code instead of re-attempting.
+//
+// Only ONE run executes at a time (global run slot), so a module-level breaker
+// is correctly scoped to the current run. It is reset at run start and run end
+// (see resetVisionBreaker callers). A plain timeout or a one-off per-image error
+// does NOT trip it — only a real rate-limit/overload status code.
+const visionBreaker: { tripped: boolean; code: string | null } = {
+  tripped: false,
+  code: null,
+}
+
+/** Reset the vision breaker. Called at run start and run end. */
+export function resetVisionBreaker(): void {
+  visionBreaker.tripped = false
+  visionBreaker.code = null
+}
+
+/** Extract a trip-worthy status (429/500/503) from an error, else null. */
+function visionTripCode(err: any): string | null {
+  const status = err?.status ?? err?.code ?? err?.response?.status
+  if (status === 429 || status === 500 || status === 503) return String(status)
+  const msg = err?.message || String(err || "")
+  // Gemini errors carry it as `"code":503` / `"status":"UNAVAILABLE"` in the body.
+  const m = msg.match(/"code"\s*:\s*(429|500|503)\b/) || msg.match(/\b(429|500|503)\b/)
+  return m ? m[1] : null
+}
+
 // The paid Gemini client (GEMINI_API_KEY) is built lazily and reused. It is the
 // LAST-resort provider, so it is only ever constructed if every free provider
 // above it has failed at least once in a run.
@@ -248,6 +281,13 @@ export async function describeImageResult(
     return { text: "", ok: false, error }
   }
 
+  // Circuit open: a 429/500/503 already hit this run → fail fast, don't re-attempt.
+  if (visionBreaker.tripped) {
+    const error = `vision unavailable: provider returned ${visionBreaker.code} earlier this run (circuit open); failing fast without retry`
+    logger.warn({ code: visionBreaker.code }, "Vision circuit open; skipping attempts")
+    return { text: "", ok: false, error }
+  }
+
   const errors: string[] = []
   // Cap to VISION_MAX_ATTEMPTS provider attempts, each hard-bounded by a
   // timeout, so an overloaded Gemini (503) fails FAST instead of stalling the
@@ -269,6 +309,18 @@ export async function describeImageResult(
       const msg = e?.message || String(e)
       errors.push(`${p.name}: ${msg}`)
       logger.warn({ provider: p.name, attempt: attempts }, "Vision provider failed; trying next")
+      // Trip the per-run breaker on a rate-limit/overload status — it won't clear
+      // mid-run, so every later vision check fails fast instead of retrying.
+      const code = visionTripCode(e)
+      if (code) {
+        visionBreaker.tripped = true
+        visionBreaker.code = code
+        logger.warn(
+          { code },
+          `Vision circuit TRIPPED (${code}) — subsequent vision checks this run will fail fast`,
+        )
+        break
+      }
     }
   }
   const skipped = providers.length - attempts

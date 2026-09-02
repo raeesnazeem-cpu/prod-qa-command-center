@@ -200,3 +200,66 @@ export async function saveTimingReport(runId: string): Promise<void> {
     clearRunTimings(runId)
   }
 }
+
+// ---------------------------------------------------------------------------
+// AI-fix step timings — a SEPARATE bucket from the scan-check timings above.
+// The AI fix runs as its own job (ai_fix_run) after the scan, so it logs its own
+// "AI FIX STEP TIMINGS" table at the end of that job. Same single-run-at-a-time
+// invariant (global run slot) keeps the runId keying safe.
+// ---------------------------------------------------------------------------
+const aiFixTimings = new Map<string, CheckTiming[]>()
+
+/** Record one AI-fix step's wall-clock, labelled (usually the check_factor). */
+export function recordAiFixTiming(
+  runId: string,
+  label: string,
+  durationMs: number,
+  ok = true,
+): void {
+  const arr = aiFixTimings.get(runId) || []
+  arr.push({ name: label, pageUrl: "", durationMs, ok })
+  aiFixTimings.set(runId, arr)
+}
+
+/**
+ * Log the AI-fix step-timing table to the worker log and clear the buffer.
+ * `totalWallMs` is the whole ai_fix_run job's wall-clock (steps are largely
+ * serial here, so it should roughly equal the sum). Analytics only.
+ */
+export function saveAiFixTimingReport(runId: string, totalWallMs?: number): void {
+  try {
+    const rows = aiFixTimings.get(runId) || []
+    if (rows.length === 0) {
+      logger.info({ runId }, "No AI-fix timings recorded; nothing to log.")
+      return
+    }
+    const aggs = aggregate(rows)
+    const sum = rows.reduce((s, r) => s + r.durationMs, 0)
+
+    const pad = (s: string, n: number) => s.padEnd(n)
+    const padR = (s: string, n: number) => s.padStart(n)
+    const lines: string[] = []
+    lines.push(
+      `${pad("AI-FIX STEP", 26)} ${padR("N", 4)} ${padR("TOTAL", 10)} ${padR("AVG", 10)} ${padR("SLOWEST", 10)}`,
+    )
+    lines.push("-".repeat(64))
+    for (const a of aggs) {
+      lines.push(
+        `${pad(a.name, 26)} ${padR(String(a.count), 4)} ${padR(fmt(a.total), 10)} ${padR(fmt(Math.round(a.total / a.count)), 10)} ${padR(fmt(a.max), 10)}`,
+      )
+    }
+    lines.push("-".repeat(64))
+    lines.push(
+      `TOTAL ai-fix wall-clock: ${totalWallMs != null ? fmt(totalWallMs) : "—"}   ` +
+        `Sum of step times: ${fmt(sum)} across ${rows.length} steps`,
+    )
+    logger.info(
+      { runId },
+      `\n===== AI FIX STEP TIMINGS =====\n${lines.join("\n")}\n===============================`,
+    )
+  } catch (e: any) {
+    logger.warn({ runId, error: e?.message }, "Failed to log AI-fix step timings.")
+  } finally {
+    aiFixTimings.delete(runId)
+  }
+}
