@@ -260,3 +260,13 @@ export const deleteRuns = async (
 ): Promise<void> => {
   await axios.delete("/api/runs", { data: { runIds } })
 }
+
+// Emergency stop: cancel every active QA run (internal / pre / post) at once.
+export const stopAllRuns = async (
+  axios: AxiosInstance,
+): Promise<{ stopped: number; ids: string[] }> => {
+  const response = await axios.post<{ stopped: number; ids: string[] }>(
+    "/api/runs/stop-all",
+  )
+  return response.data
+}
