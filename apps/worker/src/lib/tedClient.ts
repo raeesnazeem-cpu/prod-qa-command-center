@@ -159,6 +159,38 @@ export async function getReviewsWidgetId(
 }
 
 /**
+ * The client's business phone from the TED contact notes, for the Call Now
+ * button fix. Prefers a labelled "Phone/Tel/Contact/Number: …" line, else the
+ * first phone-shaped token. Returns:
+ *   • null                       → no phone-like value in the notes ("not found")
+ *   • { display, tel: "" }       → a value was present but it's not a valid,
+ *                                  linkable number ("number not linked")
+ *   • { display, tel }           → a usable `tel:` value (E.164-ish; US numbers
+ *                                  default to +1)
+ */
+export async function getClientPhone(
+  clientIdOrName: string | number | null | undefined,
+): Promise<{ display: string; tel: string } | null> {
+  const notes = await getClientNotesText(clientIdOrName).catch(() => "")
+  if (!notes) return null
+  const labelled = notes.match(
+    /(?:phone|tel(?:ephone)?|contact(?:\s*(?:no\.?|number))?|number)\s*[:\-]?\s*(\+?\d[\d\s().\-]{6,}\d)/i,
+  )
+  const bare = notes.match(/\+?\d[\d\s().\-]{6,}\d/)
+  const raw = (labelled?.[1] || bare?.[0] || "").trim()
+  if (!raw) return null
+  const digits = raw.replace(/\D/g, "")
+  let tel = ""
+  if (digits.length >= 7) {
+    if (raw.startsWith("+")) tel = "+" + digits
+    else if (digits.length === 10) tel = "+1" + digits
+    else if (digits.length === 11 && digits.startsWith("1")) tel = "+" + digits
+    else tel = digits
+  }
+  return { display: raw, tel }
+}
+
+/**
  * The client's website domain — the join key into HubSpot. Prefers the explicit
  * clientDetails.website, then the "Client Domain/Website URL: …" line in notes,
  * then any bare domain in the notes. Returns a bare host (no scheme/path).

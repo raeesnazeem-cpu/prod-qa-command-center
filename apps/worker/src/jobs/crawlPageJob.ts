@@ -864,7 +864,6 @@ export async function processCrawlPageJob(job: Job) {
               pageUrl,
               runId,
               pageId,
-              wpPassword,
               browser,
               async (p, m) => {
                 await updateCheckProgress("callnow_links", p, m)
