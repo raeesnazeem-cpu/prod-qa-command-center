@@ -554,6 +554,45 @@ export async function processAiFixRunJob(job: Job) {
       continue
     }
 
+    // --- learn_more_buttons: ALWAYS a manual, editorial hand-off ----------
+    // Rewording a generic "Learn More" CTA is a judgement call about where the
+    // link goes, so it is NEVER auto-applied and NEVER a "proposal" the report
+    // can stamp "✅ Fixed". When the page files are available we locate the exact
+    // button/text-link + its page so the report points a developer straight at
+    // it; with nothing located we simply hand off. Either way the check stays a
+    // single honest "action needed" outcome — no fake fix line. This runs before
+    // the repo/LLM branches so every QA stage and repo kind behaves the same.
+    if (f.check_factor === "learn_more_buttons") {
+      let located = ""
+      if (workDir) {
+        try {
+          const g = applyLearnMoreGitops(workDir)
+          if (g.description?.trim()) located = g.description.trim()
+        } catch {}
+      }
+      // Only add a per-finding action line when we actually found the links in
+      // the repo (something concrete to point at). With nothing located, the
+      // finding's own "generic CTA found" detail plus the subtask-level
+      // "action needed" note already say everything — adding more is just noise.
+      if (located) {
+        analysis.push({
+          findingId: f.id ? String(f.id) : null,
+          check_factor: f.check_factor,
+          title: f.title || f.check_factor,
+          pageUrl,
+          category: "manual",
+          fix:
+            `Reword these generic CTA links to describe where each one goes (e.g. “Explore Our Services”, “View Pricing”). Found in the page files:\n` +
+            located.replace(/^[^\n]*\n/, ""),
+          applied: false,
+          proposed: false,
+          lapse: false,
+          placeCode: true,
+        })
+      }
+      continue
+    }
+
     // --- GitOps content repo: JSON/Elementor fix path --------------------
     // In a GitOps repo the fix targets are resources/*.json + elementor.json,
     // not theme files. Route the mechanical fixes here and `continue` so the
