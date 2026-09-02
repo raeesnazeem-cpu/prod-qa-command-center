@@ -94,6 +94,8 @@ const worker = new Worker(
   },
   {
     connection,
+    // Must match the queue prefix (lib/queue.ts + API). Unset → BullMQ default.
+    ...(process.env.BULLMQ_PREFIX ? { prefix: process.env.BULLMQ_PREFIX } : {}),
     concurrency: parseInt(process.env.WORKER_CONCURRENCY || "3", 10), // Reduced from 15 to prevent 100% CPU usage during browser scans
     drainDelay: 60, // Only poll every 60 seconds when the queue is empty
     stalledInterval: 300000, // 5 minutes

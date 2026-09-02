@@ -1541,6 +1541,9 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 status: "running",
                 created_by: runCreatorId, // Assigns to the actual person from TED, or the Ghost User
                 ted_task_id: preReleaseTaskId ? String(preReleaseTaskId) : null,
+                // Real TED client id → worker resolves the beta_site.env repo by
+                // id, not the QACC project name. See resolveBetaSiteRepo.
+                ted_client_id: task.clientId ? String(task.clientId) : null,
               })
               .select()
               .single()
@@ -2390,6 +2393,10 @@ webhookRouter.post(
                 status: "running",
                 created_by: runCreatorId,
                 ted_task_id: targetTaskId ? String(targetTaskId) : null,
+                // Real TED client id — the worker's AI-fix pass resolves the
+                // beta_site.env repo by this exact id (not the QACC project name,
+                // which may not match the TED client). See resolveBetaSiteRepo.
+                ted_client_id: task.clientId ? String(task.clientId) : null,
               })
               .select()
               .single()
@@ -2915,6 +2922,9 @@ webhookRouter.post(
                 status: "running",
                 created_by: runCreatorId,
                 ted_task_id: scanTaskId ? String(scanTaskId) : null,
+                // Real TED client id → worker resolves the beta_site.env repo by
+                // id, not the QACC project name. See resolveBetaSiteRepo.
+                ted_client_id: task.clientId ? String(task.clientId) : null,
                 // live_site_link compares these two TED-sourced URLs:
                 //   live_site_url    = HubSpot client-notes canonical domain
                 //   released_site_url = URL released in the release.security task
