@@ -20,7 +20,12 @@ import {
   X,
   PanelLeftClose,
   PanelLeftOpen,
+  StopCircle,
 } from "lucide-react"
+import { useQueryClient, useQuery } from "@tanstack/react-query"
+import { toast } from "react-hot-toast"
+import { useAuthAxios } from "../lib/useAuthAxios"
+import { stopAllRuns, getActiveRuns } from "../api/runs.api"
 import { useRole } from "../hooks/useRole"
 import { useEffect, useState } from "react"
 import { ChatSidebar } from "../components/ChatSidebar"
@@ -40,6 +45,57 @@ export const AppLayout = () => {
   const { role, profile, isLoading, isAdmin } = useRole()
   const { data: users } = useWorkspaceUsers()
   const { user: appUser, setUser } = useAppStore()
+
+  // Emergency "stop all runs" control (header). Cancels every active QA run —
+  // internal / pre / post — in one call; the worker no-ops cancelled runs.
+  const api = useAuthAxios()
+  const queryClient = useQueryClient()
+  const [isStoppingAll, setIsStoppingAll] = useState(false)
+
+  // Live active-run count, polled from the DB so it survives worker restarts,
+  // redeploys and page reloads (and still surfaces a crashed run stuck at
+  // "running"). Drives the header button label.
+  const { data: activeRuns } = useQuery({
+    queryKey: ["active-runs"],
+    queryFn: () => getActiveRuns(api),
+    refetchInterval: 5000,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+  })
+  const activeCount = activeRuns?.count ?? 0
+  const activeBreakdown = (activeRuns?.runs ?? []).reduce(
+    (acc, r) => {
+      acc[r.run_type] = (acc[r.run_type] || 0) + 1
+      return acc
+    },
+    {} as Record<string, number>,
+  )
+  const handleStopAllRuns = async () => {
+    if (isStoppingAll) return
+    if (
+      !window.confirm(
+        "Stop ALL active QA runs (internal / pre / post)?\n\nAny in-progress scan halts and nothing new starts. TED tasks are left as-is. This cannot be undone.",
+      )
+    )
+      return
+    setIsStoppingAll(true)
+    try {
+      const { stopped } = await stopAllRuns(api)
+      toast.success(
+        stopped > 0
+          ? `Stopped ${stopped} active run${stopped > 1 ? "s" : ""}.`
+          : "No active runs to stop.",
+      )
+      queryClient.invalidateQueries()
+    } catch (error: any) {
+      toast.error(
+        "Failed to stop runs: " +
+          (error?.response?.data?.error || error?.message || "unknown error"),
+      )
+    } finally {
+      setIsStoppingAll(false)
+    }
+  }
 
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const isDark =
@@ -336,6 +392,33 @@ export const AppLayout = () => {
           />
 
           <div className="flex items-center space-x-6">
+            <button
+              onClick={handleStopAllRuns}
+              disabled={isStoppingAll || activeCount === 0}
+              title={
+                activeCount === 0
+                  ? "No active QA runs"
+                  : `Stop ${activeCount} active QA run${activeCount > 1 ? "s" : ""}` +
+                    (Object.keys(activeBreakdown).length
+                      ? ` — ${Object.entries(activeBreakdown)
+                          .map(([t, n]) => `${n} ${t.replace("_", "-")}`)
+                          .join(", ")}`
+                      : "")
+              }
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold border transition-colors disabled:cursor-not-allowed ${
+                activeCount > 0
+                  ? "bg-red-50 text-red-600 dark:bg-red-900/30 dark:text-red-400 border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/50"
+                  : "bg-slate-50 text-slate-400 dark:bg-slate-800/40 dark:text-slate-500 border-slate-200 dark:border-slate-700"
+              } ${isStoppingAll ? "opacity-50" : ""}`}
+            >
+              <StopCircle className="w-4 h-4" />
+              {isStoppingAll
+                ? "Stopping…"
+                : activeCount > 0
+                  ? `Stop all runs (${activeCount})`
+                  : "No active runs"}
+            </button>
+
             <ActiveUsersDropdown />
 
             <button

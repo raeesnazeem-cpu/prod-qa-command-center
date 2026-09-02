@@ -260,3 +260,35 @@ export const deleteRuns = async (
 ): Promise<void> => {
   await axios.delete("/api/runs", { data: { runIds } })
 }
+
+// Emergency stop: cancel every active QA run (internal / pre / post) at once.
+export const stopAllRuns = async (
+  axios: AxiosInstance,
+): Promise<{ stopped: number; ids: string[] }> => {
+  const response = await axios.post<{ stopped: number; ids: string[] }>(
+    "/api/runs/stop-all",
+  )
+  return response.data
+}
+
+export interface ActiveRun {
+  id: string
+  project_id: string
+  run_type: "pre_release" | "post_release" | "internal_qa"
+  status: RunStatus
+  started_at?: string | null
+  site_url?: string | null
+  custom_name?: string | null
+}
+
+// Live count of active QA runs across all projects (pending/running/paused).
+// DB-backed → survives worker restarts and page reloads.
+export const getActiveRuns = async (
+  axios: AxiosInstance,
+): Promise<{ count: number; runs: ActiveRun[] }> => {
+  const response = await axios.get<{ count: number; runs: ActiveRun[] }>(
+    "/api/runs/active",
+    { params: { _t: Date.now() } },
+  )
+  return response.data
+}

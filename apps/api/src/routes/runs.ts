@@ -110,6 +110,84 @@ router.post(
 )
 
 /**
+ * POST /api/runs/stop-all
+ * Emergency stop: cancel EVERY active QA run (internal / pre / post) at once —
+ * anything currently pending, running, or paused. The worker checks run.status
+ * at the top of each job (start_run and every crawl page), so flipping the rows
+ * to "cancelled" makes all subsequent jobs no-op; the page in flight right now
+ * finishes but nothing new starts. We also release the global run slot each held
+ * run may own so a queued run isn't blocked behind a now-cancelled holder.
+ */
+router.post(
+  "/stop-all",
+  clerkAuth,
+  requireRole("qa_engineer"),
+  async (_req: Request, res: Response) => {
+    try {
+      const { data: active, error: fetchError } = await supabase
+        .from("qa_runs")
+        .select("id")
+        .in("status", ["pending", "running", "paused"])
+
+      if (fetchError) throw fetchError
+
+      const ids = (active || []).map((r) => r.id)
+      if (ids.length === 0) {
+        return res.json({ stopped: 0, ids: [] })
+      }
+
+      const { error: updateError } = await supabase
+        .from("qa_runs")
+        .update({ status: "cancelled", completed_at: new Date().toISOString() })
+        .in("id", ids)
+
+      if (updateError) throw updateError
+
+      // Release the global run slot held by whichever run owns it. The RPC only
+      // frees the slot for the run that actually holds it, so calling it for
+      // every cancelled id is safe and idempotent. Best-effort — a slot left
+      // held self-heals after RUN_SLOT_STALE_SECONDS anyway.
+      await Promise.all(
+        ids.map((id) =>
+          supabase.rpc("release_run_slot", { p_run_id: id }).then(
+            () => {},
+            () => {},
+          ),
+        ),
+      )
+
+      return res.json({ stopped: ids.length, ids })
+    } catch (error: any) {
+      return res.status(500).json({ error: error.message })
+    }
+  },
+)
+
+/**
+ * GET /api/runs/active
+ * Live count (+ lightweight list) of every active QA run across ALL projects —
+ * anything pending, running, or paused. DB-backed, so the count survives worker
+ * restarts/redeploys and page reloads, and still shows a run that crashed
+ * without cleanly completing (its row stays "running" until stopped) — which is
+ * exactly what the header "Stop all runs" control needs to surface.
+ * Registered BEFORE "/:id" so "active" isn't swallowed as a run id.
+ */
+router.get("/active", clerkAuth, async (_req: Request, res: Response) => {
+  try {
+    const { data, error } = await supabase
+      .from("qa_runs")
+      .select("id, project_id, run_type, status, started_at, site_url, custom_name")
+      .in("status", ["pending", "running", "paused"])
+      .order("started_at", { ascending: true })
+
+    if (error) throw error
+    return res.json({ count: data?.length || 0, runs: data || [] })
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message })
+  }
+})
+
+/**
  * GET /api/runs/projects/:id/runs
  * List runs for a project with pagination and summary stats.
  */
