@@ -57,6 +57,127 @@ async function openAiCompatible(
   return text
 }
 
+/**
+ * Vision completion against an OpenAI-compatible provider (Groq, OpenRouter).
+ * Sends the prompt plus one or more PNG screenshots as base64 data URIs and
+ * tries each model in order. On an HTTP error the response status is attached to
+ * the thrown error (err.status) so the caller's exhaustion/unreachable check can
+ * see a 429/500/503/401/403 and mark the provider dead for the rest of the run.
+ */
+async function openAiCompatibleVision(
+  baseUrl: string,
+  apiKey: string,
+  models: string[],
+  buffer: Buffer | Buffer[],
+  prompt: string,
+): Promise<string> {
+  const bufs = Array.isArray(buffer) ? buffer : [buffer]
+  const imageParts = bufs.map((b) => ({
+    type: "image_url",
+    image_url: { url: `data:image/png;base64,${b.toString("base64")}` },
+  }))
+
+  let lastErr: any
+  for (const model of models) {
+    try {
+      const r = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          // Cap the reply length. Our vision prompts want a short sentence or a
+          // small JSON verdict, and OpenRouter reserves credits against this
+          // ceiling up-front (a high default 402s on a low balance), so keep it
+          // tight. Env-tunable for a prompt that legitimately needs more.
+          max_tokens: Math.max(64, Number(process.env.VISION_MAX_TOKENS || 1024)),
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: prompt }, ...imageParts],
+            },
+          ],
+        }),
+      })
+      const body: any = await r.json().catch(() => ({}))
+      const text = body?.choices?.[0]?.message?.content
+      if (!r.ok) {
+        const err: any = new Error(
+          `${model}: HTTP ${r.status} ${body?.error?.message || ""}`,
+        )
+        err.status = r.status
+        throw err
+      }
+      if (text) return text
+      lastErr = new Error(`${model}: returned an empty reply`)
+    } catch (e) {
+      lastErr = e
+      // Try the next model unless this is a hard exhaustion/unreachable signal —
+      // those won't clear by switching models on the same provider, so surface
+      // them immediately and let the caller mark the whole provider dead.
+      if (isExhaustedOrUnreachable(e)) throw e
+    }
+  }
+  throw lastErr || new Error("vision: no model returned text")
+}
+
+/**
+ * Vision via Cloudflare Workers AI (native /ai/run endpoint). Unlike the OpenAI
+ * providers, CF takes the image as a raw byte array plus a prompt, and its
+ * OpenAI-compat endpoint does NOT accept image_url — so this speaks the native
+ * shape. Handles ONE image (CF's `image` field is a single image); multi-image
+ * callers are handled upstream by not registering CF for them. On an HTTP error
+ * the status is attached so the caller's exhaustion check can mark CF dead when
+ * the daily free neuron allowance is spent (then the run falls to OpenRouter).
+ */
+async function cloudflareVision(
+  models: string[],
+  buffer: Buffer | Buffer[],
+  prompt: string,
+): Promise<string> {
+  const acc = process.env.CLOUDFLARE_ACCOUNT_ID || ""
+  const tok = process.env.CLOUDFLARE_API_TOKEN || ""
+  const buf = Array.isArray(buffer) ? buffer[0] : buffer
+  const image = Array.from(buf) // CF wants the image as an array of byte values
+  const maxTokens = Math.max(64, Number(process.env.VISION_MAX_TOKENS || 1024))
+
+  let lastErr: any
+  for (const model of models) {
+    try {
+      const r = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${model}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tok}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ prompt, image, max_tokens: maxTokens }),
+        },
+      )
+      const body: any = await r.json().catch(() => ({}))
+      if (!r.ok) {
+        const err: any = new Error(
+          `${model}: HTTP ${r.status} ${body?.errors?.[0]?.message || ""}`,
+        )
+        err.status = r.status
+        throw err
+      }
+      const text = body?.result?.response
+      if (text) return text
+      lastErr = new Error(`${model}: returned an empty reply`)
+    } catch (e) {
+      lastErr = e
+      // A hard exhaustion/unreachable signal won't clear by switching models on
+      // the same provider — surface it so the caller marks CF dead for the run.
+      if (isExhaustedOrUnreachable(e)) throw e
+    }
+  }
+  throw lastErr || new Error("cloudflare vision: no model returned text")
+}
+
 // gemini-2.5-flash-lite is the cheap, capable default that covers every LLM job
 // we have (grammar, watermark vision, fix triage). gemini-1.5-flash is RETIRED
 // (404) — do not resurrect it. `gemini-flash-latest` is a living alias that
@@ -64,15 +185,57 @@ async function openAiCompatible(
 // this list does not rot the next time Google retires a version.
 const GEMINI_MODELS = ["gemini-2.5-flash-lite", "gemini-flash-latest"]
 
-// Vision must never stall the scan. When Gemini is overloaded (503 "high
-// demand") the SDK backs off internally, so a single attempt can hang 60–90s;
-// walking every provider/model then costs minutes PER image, and the run only
-// finishes when its slowest check does. So we cap vision to a small number of
-// attempts, each hard-bounded by a timeout, and then report the check as failed
-// (ok:false) rather than grinding on. Both are env-tunable.
+// Vision models for the OpenAI-compatible providers (Groq, OpenRouter). These
+// are multimodal — unlike the llama/mistral/cohere TEXT models — so they extend
+// the vision chain beyond Gemini. Kept as env-overridable, comma-separated lists
+// (each tried in order) so a retired slug is a one-line ops fix, not a redeploy,
+// same self-healing rationale as GEMINI_MODELS above.
+//   Groq       → EMPTY by default: as of this writing Groq's account catalogue
+//                has NO multimodal model (Llama-4 Scout/Maverick were removed),
+//                so the Groq vision provider stays dormant. Set GROQ_VISION_MODELS
+//                to a valid slug to light it up the moment one lands.
+//   OpenRouter → Qwen3-VL (the current Qwen vision line). Both are ~$0.0001/image
+//                and only hit when Gemini's free quota (20/day) is exhausted. The
+//                8B is the cheap default; the 32B is a slightly stronger backup.
+const GROQ_VISION_MODELS = (process.env.GROQ_VISION_MODELS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+const OPENROUTER_VISION_MODELS = (
+  process.env.OPENROUTER_VISION_MODELS ||
+  "qwen/qwen3-vl-8b-instruct,qwen/qwen3-vl-32b-instruct"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+
+// Cloudflare Workers AI — the FREE primary. Llama-3.2-Vision reads a screenshot
+// well (~15 neurons/call measured), and the free plan grants 10,000 neurons/day
+// (~650 vision calls) that reset daily. On the Workers *free* plan there is no
+// paid overage — once the daily allowance is spent the API errors and the
+// dead-marking guard falls the run through to OpenRouter, so it stays free.
+// Needs CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (Workers AI: Read). Note the
+// model requires a one-time licence acceptance on the account before first use.
+const CLOUDFLARE_VISION_MODELS = (
+  process.env.CLOUDFLARE_VISION_MODELS ||
+  "@cf/meta/llama-3.2-11b-vision-instruct"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+
+// Vision must never stall the scan. When a provider is overloaded (e.g. Gemini
+// 503 "high demand") the SDK backs off internally, so a single attempt can hang
+// 60–90s; walking every provider/model then costs minutes PER image, and the run
+// only finishes when its slowest check does. So we cap vision to a small number
+// of provider attempts PER image, each hard-bounded by a timeout, and then report
+// the check as failed (ok:false) rather than grinding on. The default of 3 lets a
+// single image reach the first two fallbacks (Groq → OpenRouter → Gemini) while
+// staying bounded; dead providers are skipped and don't consume an attempt. Both
+// are env-tunable.
 const VISION_MAX_ATTEMPTS = Math.max(
   1,
-  Number(process.env.VISION_MAX_ATTEMPTS || 2),
+  Number(process.env.VISION_MAX_ATTEMPTS || 3),
 )
 const VISION_ATTEMPT_TIMEOUT_MS = Math.max(
   1000,
@@ -117,22 +280,24 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   })
 }
 
-// Per-run vision circuit breaker.
+// Per-run vision provider health (the anti-retry-loop guard).
 //
-// A 429 (rate limit) or 500/503 (server overload) from Gemini won't clear
-// mid-run — the quota/outage persists. Once we see one, retrying every later
-// image is pure wasted wall-clock (2 attempts × timeout each). So the FIRST such
-// status trips the breaker, and every subsequent vision check in the run fails
-// fast with that same code instead of re-attempting.
+// A vision provider that returns a hard exhaustion/unreachable signal — rate
+// limit / quota (429), server overload (500/503), bad/again-limited key
+// (401/403), or a network-unreachable error — will NOT recover mid-run. So the
+// first such failure marks THAT provider dead, and it is skipped for every later
+// image this run: no point re-hitting a provider we already know is exhausted.
+// A one-off transient error or an empty reply does NOT mark a provider dead — it
+// just falls through to the next provider and stays eligible next image.
 //
-// Only ONE run executes at a time (global run slot), so a module-level breaker
-// is correctly scoped to the current run. It is reset at run start and run end
-// (see resetAiBreakers callers). A plain timeout or a one-off per-image error
-// does NOT trip it — only a real rate-limit/overload status code.
-const visionBreaker: { tripped: boolean; code: string | null } = {
-  tripped: false,
-  code: null,
-}
+// When EVERY configured provider is dead, describeImageResult fails fast with no
+// attempts at all — that is the guard against grinding the whole provider chain
+// on image after image once it's clear they're all exhausted or unreachable.
+//
+// Only ONE run executes at a time (global run slot), so this module-level set is
+// correctly scoped to the current run; it is cleared at run start and run end
+// (see resetAiBreakers callers).
+const deadVisionProviders = new Set<string>()
 
 // Per-run TEXT circuit breaker — same rationale and scoping as the vision one
 // above: a 429/500/503 from Gemini won't clear mid-run, so the first one trips
@@ -143,10 +308,10 @@ const textBreaker: { tripped: boolean; code: string | null } = {
   code: null,
 }
 
-/** Reset both per-run AI circuit breakers. Called at run start and run end. */
+/** Reset the per-run AI guards (text circuit breaker + dead vision providers).
+ *  Called at run start and run end. */
 export function resetAiBreakers(): void {
-  visionBreaker.tripped = false
-  visionBreaker.code = null
+  deadVisionProviders.clear()
   textBreaker.tripped = false
   textBreaker.code = null
 }
@@ -159,6 +324,26 @@ function tripStatusCode(err: any): string | null {
   // Gemini errors carry it as `"code":503` / `"status":"UNAVAILABLE"` in the body.
   const m = msg.match(/"code"\s*:\s*(429|500|503)\b/) || msg.match(/\b(429|500|503)\b/)
   return m ? m[1] : null
+}
+
+/**
+ * True when an error means a provider is exhausted (rate limit / quota / bad
+ * key) or unreachable (network) — i.e. it won't recover mid-run, so the provider
+ * should be marked dead and skipped for the rest of the run. Broader than
+ * tripStatusCode: also catches auth failures (401/403) and connection errors.
+ */
+function isExhaustedOrUnreachable(err: any): boolean {
+  if (tripStatusCode(err)) return true
+  // 401/403 bad key, 402 out of credits — none clear mid-run, so the provider is
+  // effectively exhausted and should be skipped for the rest of the run.
+  const status = err?.status ?? err?.response?.status
+  if (status === 401 || status === 403 || status === 402) return true
+  const msg = (err?.message || String(err || "")).toLowerCase()
+  if (/\b(401|402|403)\b/.test(msg)) return true
+  // Node fetch surfaces network failures as "fetch failed" with an errno cause.
+  return /fetch failed|enotfound|econnrefused|eai_again|getaddrinfo|econnreset|socket hang up|und_err|network/.test(
+    msg,
+  )
 }
 
 // The paid Gemini client (GEMINI_API_KEY) is built lazily and reused. It is the
@@ -299,12 +484,17 @@ export async function completeText(system: string, user: string): Promise<AiResu
 }
 
 /**
- * Vision: describe/analyze a screenshot, with the same free→paid fallback as
- * text. Only Gemini is multimodal among our providers (the llama/mistral/cohere
- * text models can't take an image), so the vision chain is:
- *   gemini (GOOGLE_AI_API_KEY) → gemini-keys-N (GEMINI_KEYS) → gemini-paid (GEMINI_API_KEY, last).
- * Each provider tries GEMINI_MODELS in order. Best-effort: returns "" if every
- * provider fails or no key is set — callers already treat empty as "no result".
+ * Vision: describe/analyze a screenshot, with multi-provider fallback. The chain
+ * puts the free Cloudflare tier first, then the cheap APIs, then Gemini keys:
+ *   cloudflare (Llama-3.2-Vision, free ~650/day, single-image only)
+ *     → groq (dormant) → openrouter (Qwen3-VL)
+ *     → gemini (GOOGLE_AI_API_KEY) → gemini-keys-N (GEMINI_KEYS) → gemini-paid.
+ * Providers without a key are skipped, so adding GROQ/OPENROUTER keys activates
+ * them automatically. Each Gemini provider tries GEMINI_MODELS; Groq/OpenRouter
+ * try their own model lists. A provider that comes back exhausted/unreachable is
+ * marked dead and skipped for the rest of the run; once all are dead, vision
+ * fails fast. Best-effort: returns "" (via describeImage) or ok:false (here) when
+ * every provider fails or no key is set — callers treat that as "no result".
  */
 export interface VisionResult {
   /** The model's reply, or "" when no provider returned text. */
@@ -331,37 +521,83 @@ export async function describeImageResult(
   prompt: string,
 ): Promise<VisionResult> {
   const env = process.env
-  const providers: { name: string; client: GeminiClient }[] = []
-  if (env.GOOGLE_AI_API_KEY) providers.push({ name: "gemini", client: genAI })
-  // Extra Gemini keys (GEMINI_KEYS) before the paid key, same as the text chain.
-  geminiKeyList().forEach((client, i) => providers.push({ name: `gemini-keys-${i + 1}`, client }))
-  if (env.GEMINI_API_KEY) providers.push({ name: "gemini-paid", client: paidGemini() })
+  const providers: { name: string; run: () => Promise<string> }[] = []
+  // Cloudflare Workers AI first — free (~650 calls/day), single-image only (CF's
+  // `image` field takes one), so it's registered only when this call has a lone
+  // screenshot; multi-image calls skip straight to the providers below.
+  const singleImage = !Array.isArray(buffer) || buffer.length === 1
+  if (
+    env.CLOUDFLARE_ACCOUNT_ID &&
+    env.CLOUDFLARE_API_TOKEN &&
+    CLOUDFLARE_VISION_MODELS.length &&
+    singleImage
+  )
+    providers.push({
+      name: "cloudflare",
+      run: () => cloudflareVision(CLOUDFLARE_VISION_MODELS, buffer, prompt),
+    })
+  // ...then the fast/cheap multimodal APIs...
+  if (env.GROQ_API_KEY && GROQ_VISION_MODELS.length)
+    providers.push({
+      name: "groq",
+      run: () =>
+        openAiCompatibleVision(
+          "https://api.groq.com/openai/v1",
+          env.GROQ_API_KEY!,
+          GROQ_VISION_MODELS,
+          buffer,
+          prompt,
+        ),
+    })
+  if (env.OPENROUTER_API_KEY && OPENROUTER_VISION_MODELS.length)
+    providers.push({
+      name: "openrouter",
+      run: () =>
+        openAiCompatibleVision(
+          "https://openrouter.ai/api/v1",
+          env.OPENROUTER_API_KEY!,
+          OPENROUTER_VISION_MODELS,
+          buffer,
+          prompt,
+        ),
+    })
+  // ...then the free→paid Gemini chain as deeper fallback.
+  if (env.GOOGLE_AI_API_KEY)
+    providers.push({ name: "gemini", run: () => analyzeImageWith(genAI, GEMINI_MODELS, buffer, prompt) })
+  geminiKeyList().forEach((client, i) =>
+    providers.push({ name: `gemini-keys-${i + 1}`, run: () => analyzeImageWith(client, GEMINI_MODELS, buffer, prompt) }),
+  )
+  if (env.GEMINI_API_KEY)
+    providers.push({ name: "gemini-paid", run: () => analyzeImageWith(paidGemini(), GEMINI_MODELS, buffer, prompt) })
 
   if (providers.length === 0) {
     const error =
-      "no vision provider configured — set GOOGLE_AI_API_KEY, GEMINI_KEYS, or GEMINI_API_KEY"
+      "no vision provider configured — set CLOUDFLARE_ACCOUNT_ID+CLOUDFLARE_API_TOKEN, GROQ_API_KEY, OPENROUTER_API_KEY, GOOGLE_AI_API_KEY, GEMINI_KEYS, or GEMINI_API_KEY"
     logger.error({ error }, "Vision unavailable: no provider configured")
     return { text: "", ok: false, error }
   }
 
-  // Circuit open: a 429/500/503 already hit this run → fail fast, don't re-attempt.
-  if (visionBreaker.tripped) {
-    const error = `vision unavailable: provider returned ${visionBreaker.code} earlier this run (circuit open); failing fast without retry`
-    logger.warn({ code: visionBreaker.code }, "Vision circuit open; skipping attempts")
+  // Guard: skip providers already known dead this run. If they're ALL dead,
+  // every provider is exhausted/unreachable — fail fast with no attempts rather
+  // than grinding the chain again on this and every later image.
+  const live = providers.filter((p) => !deadVisionProviders.has(p.name))
+  if (live.length === 0) {
+    const error = `vision unavailable: all ${providers.length} provider(s) exhausted/unreachable earlier this run (${[...deadVisionProviders].join(", ")}); failing fast without retry`
+    logger.warn({ dead: [...deadVisionProviders] }, "Vision: all providers dead this run; skipping attempts")
     return { text: "", ok: false, error }
   }
 
   const errors: string[] = []
-  // Cap to VISION_MAX_ATTEMPTS provider attempts, each hard-bounded by a
-  // timeout, so an overloaded Gemini (503) fails FAST instead of stalling the
-  // whole scan. After the cap we report the check failed (ok:false).
+  // Cap to VISION_MAX_ATTEMPTS live-provider attempts, each hard-bounded by a
+  // timeout, so an overloaded provider fails FAST instead of stalling the whole
+  // scan. Dead providers were already filtered out and don't consume an attempt.
   let attempts = 0
-  for (const p of providers) {
+  for (const p of live) {
     if (attempts >= VISION_MAX_ATTEMPTS) break
     attempts++
     try {
       const text = await withTimeout(
-        analyzeImageWith(p.client, GEMINI_MODELS, buffer, prompt),
+        p.run(),
         VISION_ATTEMPT_TIMEOUT_MS,
         `vision attempt ${attempts} (${p.name})`,
       )
@@ -371,27 +607,26 @@ export async function describeImageResult(
     } catch (e: any) {
       const msg = e?.message || String(e)
       errors.push(`${p.name}: ${msg}`)
-      logger.warn({ provider: p.name, attempt: attempts }, "Vision provider failed; trying next")
-      // Trip the per-run breaker on a rate-limit/overload status — it won't clear
-      // mid-run, so every later vision check fails fast instead of retrying.
-      const code = tripStatusCode(e)
-      if (code) {
-        visionBreaker.tripped = true
-        visionBreaker.code = code
+      // Mark the provider dead ONLY on a real exhaustion/unreachable signal — it
+      // won't recover mid-run, so skip it for every later image. A one-off
+      // transient error just falls through to the next provider.
+      if (isExhaustedOrUnreachable(e)) {
+        deadVisionProviders.add(p.name)
         logger.warn(
-          { code },
-          `Vision circuit TRIPPED (${code}) — subsequent vision checks this run will fail fast`,
+          { provider: p.name },
+          `Vision provider ${p.name} exhausted/unreachable — marked dead, skipped for the rest of this run`,
         )
-        break
+      } else {
+        logger.warn({ provider: p.name, attempt: attempts }, "Vision provider failed (transient); trying next")
       }
     }
   }
-  const skipped = providers.length - attempts
+  const skipped = live.length - attempts
   const error =
     errors.join(" | ") +
     (skipped > 0 ? ` | (${skipped} more provider(s) skipped after ${VISION_MAX_ATTEMPTS}-attempt cap)` : "")
   logger.error(
-    { error, attempts, cap: VISION_MAX_ATTEMPTS },
+    { error, attempts, cap: VISION_MAX_ATTEMPTS, dead: [...deadVisionProviders] },
     `Vision unavailable: failed after ${attempts} attempt(s)`,
   )
   return { text: "", ok: false, error }
