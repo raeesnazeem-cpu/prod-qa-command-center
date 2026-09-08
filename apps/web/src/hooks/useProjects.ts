@@ -9,6 +9,7 @@ import {
   updateProjectMemberRole,
   getWorkspaceUsers,
   transitionProjectReleaseState,
+  deleteProject,
   Project,
   ProjectWithMembers,
   WorkspaceMember 
@@ -69,6 +70,34 @@ export const useUpdateProject = (id: string) => {
     },
     onError: (error: any) => {
       const message = error.response?.data?.error || 'Failed to update project';
+      toast.error(message);
+    },
+  });
+};
+
+export const useDeleteProjects = () => {
+  const axios = useAuthAxios();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (ids: string[]) => {
+      const results = await Promise.allSettled(
+        ids.map((id) => deleteProject(axios, id)),
+      );
+      const failed = results.filter((r) => r.status === 'rejected').length;
+      return { total: ids.length, failed };
+    },
+    onSuccess: ({ total, failed }) => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      const deleted = total - failed;
+      if (failed === 0) {
+        toast.success(`${deleted} project${deleted === 1 ? '' : 's'} deleted`);
+      } else {
+        toast.error(`Deleted ${deleted}, failed ${failed}`);
+      }
+    },
+    onError: (error: any) => {
+      const message = error.response?.data?.error || 'Failed to delete projects';
       toast.error(message);
     },
   });
