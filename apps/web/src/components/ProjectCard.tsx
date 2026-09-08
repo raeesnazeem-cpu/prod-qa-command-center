@@ -24,9 +24,17 @@ import { useQueryClient } from "@tanstack/react-query"
 
 interface ProjectCardProps {
   project: Project
+  selectionMode?: boolean
+  selected?: boolean
+  onToggleSelect?: (id: string) => void
 }
 
-export const ProjectCard = ({ project }: ProjectCardProps) => {
+export const ProjectCard = ({
+  project,
+  selectionMode = false,
+  selected = false,
+  onToggleSelect,
+}: ProjectCardProps) => {
   const navigate = useNavigate()
   const axios = useAuthAxios()
   const { role: userRole } = useRole()
@@ -91,9 +99,31 @@ export const ProjectCard = ({ project }: ProjectCardProps) => {
   return (
     <div className="relative group/card flex flex-col h-full">
       <div
-        onClick={() => !isManageOpen && navigate(`/projects/${project.id}`)}
-        className="bg-slate-50/60 dark:bg-[#1D2A31] backdrop-blur-md border border-transparent dark:border-slate-800 rounded-lg p-6 cursor-pointer transition-all group flex flex-col h-full shadow-lg hover:shadow-xl dark:shadow-sm dark:hover:shadow-md relative"
+        onClick={() => {
+          if (isManageOpen) return
+          if (selectionMode) {
+            onToggleSelect?.(project.id)
+            return
+          }
+          navigate(`/projects/${project.id}`)
+        }}
+        className={`bg-slate-50/60 dark:bg-[#1D2A31] backdrop-blur-md border rounded-lg p-6 cursor-pointer transition-all group flex flex-col h-full shadow-lg hover:shadow-xl dark:shadow-sm dark:hover:shadow-md relative ${
+          selected
+            ? "border-accent ring-2 ring-accent/60"
+            : "border-transparent dark:border-slate-800"
+        }`}
       >
+        {selectionMode && (
+          <div
+            className={`absolute top-3 left-3 z-20 w-5 h-5 rounded-md border flex items-center justify-center transition-colors ${
+              selected
+                ? "bg-accent border-accent text-white"
+                : "bg-white/80 dark:bg-slate-900/80 border-slate-300 dark:border-slate-600 text-transparent"
+            }`}
+          >
+            <Check className="w-3.5 h-3.5" />
+          </div>
+        )}
         <div
           className="absolute inset-0 rounded-lg pointer-events-none p-[1px] drop-shadow-sm opacity-100 dark:opacity-50 dark:group-hover:opacity-100 transition-opacity duration-500 overflow-hidden"
           style={{
@@ -149,7 +179,7 @@ export const ProjectCard = ({ project }: ProjectCardProps) => {
                 </div>
               )}
 
-            {canManage && (
+            {!selectionMode && canManage && (
               <button
                 onClick={(e) => {
                   e.stopPropagation()
@@ -165,7 +195,7 @@ export const ProjectCard = ({ project }: ProjectCardProps) => {
                 <Users className="w-4 h-4" />
               </button>
             )}
-            {canEdit && (
+            {!selectionMode && canEdit && (
               <button
                 onClick={(e) => {
                   e.stopPropagation()
@@ -177,7 +207,7 @@ export const ProjectCard = ({ project }: ProjectCardProps) => {
                 <Edit className="w-4 h-4" />
               </button>
             )}
-            {canEdit && (
+            {!selectionMode && canEdit && (
               <button
                 onClick={(e) => {
                   e.stopPropagation()
