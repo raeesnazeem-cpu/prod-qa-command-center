@@ -275,7 +275,8 @@ export async function processStartRunJob(job: Job) {
     // --- DEMO OVERRIDE (restore after demo): cap the crawl to 2 pages
     // (home + contact, keyword-matched) so the demo run stays small and fast.
     // Remove this line to crawl normally.
-    if (urls.length > 0) urls = pickDemoPages(urls, run.site_url)
+    // DEMO OVERRIDE DISABLED: uncomment the next line to re-enable the 2-page cap.
+    // if (urls.length > 0) urls = pickDemoPages(urls, run.site_url)
 
     logger.info({ runId, count: urls.length }, "URL collection complete")
 
