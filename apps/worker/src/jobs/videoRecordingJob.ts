@@ -30,17 +30,24 @@ const START_POLL_MS = parseInt(process.env.VIDEO_START_POLL_MS || "6000", 10)
 // before giving up and closing the video subtask as failed+Completed.
 const START_CONFIRM_ATTEMPTS = parseInt(process.env.VIDEO_START_ATTEMPTS || "5", 10)
 
-// The deferred URL-verify pass. First look ~35 min after start (recording takes
-// ~30 min), then re-check a few times before giving up. Overridable for testing.
+// The URL-verify pass POLLS the DB for the recorder's GCS URLs. There is NO
+// mandatory "wait ~30 min": the recorder may finish in a few minutes or take
+// longer, so we look almost immediately and then on a tight interval. The moment
+// all viewport URLs are present we post + close — no fixed delay is imposed.
+// The wide attempt budget only bounds the OUTER window (so a recording that
+// never finishes eventually gives up); it does NOT delay a finished recording.
+// All overridable for testing.
 const URL_VERIFY_FIRST_DELAY_MS = parseInt(
-  process.env.VIDEO_URL_VERIFY_FIRST_DELAY_MS || `${35 * 60 * 1000}`,
+  process.env.VIDEO_URL_VERIFY_FIRST_DELAY_MS || `${30 * 1000}`, // ~30s: recorder may already be done
   10,
 )
 const URL_VERIFY_RETRY_DELAY_MS = parseInt(
-  process.env.VIDEO_URL_VERIFY_RETRY_DELAY_MS || `${15 * 60 * 1000}`,
+  process.env.VIDEO_URL_VERIFY_RETRY_DELAY_MS || `${45 * 1000}`, // ~45s between polls
   10,
 )
-const URL_VERIFY_MAX_ATTEMPTS = parseInt(process.env.VIDEO_URL_VERIFY_MAX_ATTEMPTS || "4", 10)
+// 80 × 45s ≈ 60 min outer window — enough for a slow recording, while a fast one
+// posts within ~one poll interval of the URLs landing.
+const URL_VERIFY_MAX_ATTEMPTS = parseInt(process.env.VIDEO_URL_VERIFY_MAX_ATTEMPTS || "80", 10)
 
 function flattenIds(raw: any): string[] {
   const arr = Array.isArray(raw) ? raw : raw ? [raw] : []
@@ -186,7 +193,7 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
   const claimed = !!claim && claim.length > 0
 
   const startingBody =
-    "<p>🎬 <strong>Video Recording — in progress</strong>. Recording result appears in ~30 min.</p>"
+    "<p>🎬 <strong>Video Recording — in progress</strong>. Recording result will be posted here as soon as it is ready.</p>"
   for (const subId of videoSubtaskIds) {
     await postTedComment(subId, startingBody, `ext:video-starting-${runId}-${subId}`, { ...ctxBase }).catch(() => {})
     // Keep the video subtask In Progress while recording runs — it closes only
@@ -366,13 +373,19 @@ async function finalizeRunCloseout(opts: {
 // =====================================================================
 // DEFERRED: video_url_verify
 // ---------------------------------------------------------------------
-// Recording runs ~30 min on the cloud provider. This pass posts each viewport's
-// recording URL to the VIDEO SUBTASK as it becomes available. It is the ONLY
-// success path: once a URL has posted back (all viewports, or ≥1 by the final
-// deadline), it closes the video subtask (Completed) and then the parent — last
-// of all. If NO URL is retrievable by the final deadline, it FAILS: the subtask
-// is left In Progress and the parent is left open for a person (video has no
-// auto-fix). Bounded retries guarantee it never loops forever.
+// POLLS the DB for the recorder's GCS URLs — there is NO fixed "~30 min" wait.
+// The recorder (recordingWorker.ts) writes each viewport's URL into
+// qa_runs.recording_video_urls as it finishes, and flips recording_status to
+// 'completed' once all three are present (or 'error' on failure). This pass
+// posts each viewport's URL to the VIDEO SUBTASK the moment it is available, on
+// a tight poll interval. It is the ONLY success path: once all viewport URLs
+// have posted back (or ≥1 by the final deadline), it closes the video subtask
+// (Completed) and then the parent — last of all. It short-circuits to FAIL the
+// moment the recorder reports 'error', instead of polling the full window. If NO
+// URL is retrievable by the final deadline it FAILS: the subtask is left In
+// Progress and the parent is left open for a person (video has no auto-fix).
+// The bounded attempt budget only caps the OUTER window; it never delays a
+// finished recording.
 // =====================================================================
 export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
   const { runId } = job.data
@@ -388,6 +401,7 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
     .single()
   const projectId = run?.project_id as string | undefined
   const urls = (run?.recording_video_urls as Record<string, string>) || {}
+  const recordingStatus = String(run?.recording_status || "")
   // Needed to close the video subtask + parent on success (this job is the only
   // path that closes them now — the barrier no longer closes on start).
   const map: Record<string, any> = (run?.ted_subtask_map as any) || {}
@@ -398,6 +412,14 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
   for (const viewport of RECORDING_VIEWPORTS) {
     const url = urls[viewport]
     if (url && (await isRetrievable(url))) available.push({ viewport, url })
+  }
+
+  // Short-circuit: the recorder reported a hard failure. Post whatever URLs did
+  // land (if any) then stop — no point polling the full outer window. If at
+  // least one viewport is available we still treat it as a (partial) success;
+  // otherwise fail now instead of at the deadline.
+  if (recordingStatus === "error" && available.length === 0) {
+    return await failUrlVerify(runId, projectId, videoSubtaskIds, "recorder reported error")
   }
 
   // Post each available viewport to the video subtask once (stable key dedupes).
@@ -419,10 +441,23 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
 
   const allDone = available.length >= RECORDING_VIEWPORTS.length
   if (allDone) {
-    // PASS: every viewport URL posted back → NOW close the video subtask
-    // (Completed) and the parent (last of all). This is the ONLY success path.
+    // PASS: every viewport URL posted back → close the video subtask (Completed)
+    // and the parent (last of all), immediately — no waiting for any timer. This
+    // is the ONLY success path.
     await finalizeRunCloseout({ runId, tedTaskId: parentId, map, videoSubtaskIds })
     logger.info({ runId }, "video_url_verify: all viewport URLs posted; video subtask + parent Completed.")
+    return
+  }
+
+  // Recorder finished (reported 'error' or 'completed') but only some viewports
+  // produced a URL. Don't keep polling for URLs that will never arrive — take
+  // what we have now as a partial success.
+  if ((recordingStatus === "error" || recordingStatus === "completed") && available.length > 0) {
+    await finalizeRunCloseout({ runId, tedTaskId: parentId, map, videoSubtaskIds })
+    logger.warn(
+      { runId, recordingStatus, available: available.length },
+      "video_url_verify: recorder finished with partial URLs; posted available, video subtask + parent Completed.",
+    )
     return
   }
 
@@ -454,9 +489,19 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
     return
   }
 
-  // FAIL: nothing posted back within the window. Video has no fix → leave the
-  // subtask In Progress and DO NOT close the parent (parent closes only on
-  // video success — URLs posted).
+  // FAIL: nothing posted back within the window.
+  await failUrlVerify(runId, projectId, videoSubtaskIds, "no retrievable URL by deadline")
+}
+
+// FAIL path for video_url_verify. Video has no fix → leave the subtask In
+// Progress and DO NOT close the parent (parent closes only on video success —
+// URLs posted). Shared by the deadline and the recorder-error short-circuit.
+async function failUrlVerify(
+  runId: string,
+  projectId: string | undefined,
+  videoSubtaskIds: string[],
+  reason: string,
+): Promise<void> {
   const body =
     "<p>⚠️ <strong>Video recording verification failed</strong> — no video URL was posted or it was not retrievable within the expected window.</p>"
   for (const subId of videoSubtaskIds) {
@@ -468,7 +513,7 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
     }).catch(() => {})
     await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
   }
-  logger.error({ runId }, "video_url_verify: no retrievable URL by deadline; video left In Progress, parent left open.")
+  logger.error({ runId, reason }, "video_url_verify: failed; video left In Progress, parent left open.")
 }
 
 async function isRetrievable(url: string): Promise<boolean> {
