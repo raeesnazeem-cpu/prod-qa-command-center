@@ -745,6 +745,50 @@ export async function processAiFixRunJob(job: Job) {
       continue
     }
 
+    // --- false_breakpoint: one honest outcome — auto-fix or manual hand-off
+    // The header line-wrap fix can shrink header typography (applied); a
+    // horizontal-overflow finding, or a header that isn't Elementor, is
+    // locate-only. A located-but-not-applied result is NOT a completed fix, so it
+    // must never print a "✅ Fixed" line or an "AI Fix — N fixes" banner — that is
+    // exactly what produced the "fixed AND not-fixed" contradiction. When we
+    // can't apply, push NO fix record: the finding body plus the subtask-level
+    // "Not auto-fixed — action needed" note are the single honest outcome. Runs
+    // before the generic GitOps branch (which takes the proposed:!applied path).
+    // Mirrors top_bar_sticky / grammar / callnow.
+    if (f.check_factor === "false_breakpoint" && repoKind === "gitops" && workDir) {
+      if (!isCleanPassFinding(f)) {
+        const g = applyFalseBreakpointGitops(workDir, f)
+        if (g.applied) {
+          committed++
+          let diff = ""
+          if (g.files.length) {
+            try {
+              const { stdout } = await git(["diff", "--unified=3", "--", ...g.files])
+              diff = stdout.slice(0, MAX_DIFF_CHARS)
+            } catch {}
+          }
+          analysis.push({
+            findingId: f.id ? String(f.id) : null,
+            check_factor: f.check_factor,
+            title: f.title || f.check_factor,
+            pageUrl,
+            category: "fully_ai",
+            fix: g.description || g.note,
+            applied: true,
+            proposed: false,
+            lapse: false,
+            filesOffered: g.files,
+            filesChanged: g.files,
+            editNotes: [g.note],
+            diff,
+          })
+        }
+        // Not applied → no fix record; the "Not auto-fixed — action needed" note
+        // on the subtask is the single, conclusive outcome.
+      }
+      continue
+    }
+
     // --- GitOps content repo: JSON/Elementor fix path --------------------
     // In a GitOps repo the fix targets are resources/*.json + elementor.json,
     // not theme files. Route the mechanical fixes here and `continue` so the
