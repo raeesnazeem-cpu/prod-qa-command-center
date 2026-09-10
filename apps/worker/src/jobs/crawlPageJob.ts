@@ -120,7 +120,7 @@ export async function processCrawlPageJob(job: Job) {
   const { data: run, error: runError } = await supabase
     .from("qa_runs")
     .select(
-      "status, is_woocommerce, site_url, enabled_checks, project_id, live_site_url, released_site_url, theme_type",
+      "status, is_woocommerce, site_url, enabled_checks, project_id, live_site_url, released_site_url, theme_type, run_type",
     )
     .eq("id", runId)
     .single()
@@ -596,6 +596,10 @@ export async function processCrawlPageJob(job: Job) {
                 async (p, m) => {
                   await updateCheckProgress("contact_form", p, m)
                 },
+                // Post-release scans the LIVE site: submit a real (clearly
+                // test-labelled) lead and gate pass/fail on the full
+                // fill → submit → thank-you flow, scoped to the contact page.
+                run.run_type === "post_release",
               )
             } catch (e) {
               logger.error("Contact form check failed:", e)

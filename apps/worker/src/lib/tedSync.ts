@@ -916,7 +916,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   url_tab_compare: "Mention to reconcile the dev vs live page URLs and tab names",
   top_bar_sticky: "Mention to make the top bar header sticky on scroll",
   favicon: "Mention to add a working favicon (site icon)",
-  contact_form: "Mention to embed the Growth99 contact form widget (per-client code from Basecamp)",
+  contact_form: "Mention to check the contact form with the team — decide whether to add it or correct the embed code (no automatic fix for the correction decision)",
   chatbot_consultation: "Mention to add the Cliff Hanger chatbot & virtual consultation codes from Basecamp",
   logo_chatbot: "Mention to replace the chatbot launcher icon with the client's brand logo",
   callnow_links: "Mention to add the client's phone number to the TED contact notes so the floating Call Now button can be added site-wide",

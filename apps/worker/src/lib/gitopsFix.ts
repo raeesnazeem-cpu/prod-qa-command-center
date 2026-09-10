@@ -19,6 +19,7 @@ import { parseSpellingFinding } from "./spellingFix"
 import {
   getSingleScriptCodeFromBasecamp,
   getReviewsWidgetFromBasecamp,
+  getContactFormCodeFromBasecamp,
 } from "./basecampClient"
 import { getReviewsWidgetId, getClientPhone } from "./tedClient"
 import { reviewsEmbedSnippet } from "./reviewsWidgetFix"
@@ -1482,13 +1483,44 @@ function cloneWithNewIds(node: any, taken: Set<string>): any {
   return copy
 }
 
-export function applyContactFormGitops(
+/** Build a top-level container holding one HTML widget with the given embed. */
+function contactFormContainer(html: string, taken: Set<string>): any {
+  return {
+    id: newElementorId(taken),
+    elType: "container",
+    settings: {},
+    elements: [
+      {
+        id: newElementorId(taken),
+        elType: "widget",
+        settings: { html },
+        elements: [],
+        widgetType: "html",
+      },
+    ],
+    isInner: false,
+  }
+}
+
+export async function applyContactFormGitops(
   workDir: string,
   finding: Finding,
-  ctx: { pageUrl?: string | null },
-): GitopsFixResult {
-  if (!/not found/i.test(finding.title || "")) {
-    return miss("contact_form finding is not the 'not found' case (nothing to inject)")
+  ctx: {
+    pageUrl?: string | null
+    projectId?: string | null
+    projectName?: string | null
+  },
+): Promise<GitopsFixResult> {
+  const title = finding.title || ""
+  const isNotFound = /not found/i.test(title)
+  // "Present but not loading" — the embed is on the page but its fields don't
+  // render / can't be submitted. This is the case we CORRECT (replace the
+  // broken block); a genuinely missing form (isNotFound) is only INJECTED.
+  const isNotLoading = /not loading|not submittable|not fillable|present but/i.test(
+    title,
+  )
+  if (!isNotFound && !isNotLoading) {
+    return miss("contact_form finding is not an actionable defect (nothing to do)")
   }
 
   const target = resolveResourceByUrl(workDir, ctx.pageUrl || "")
@@ -1502,10 +1534,17 @@ export function applyContactFormGitops(
     )
   }
 
-  // Idempotency: the embed is already on this page.
-  if (findElementorNodes(elementor, nodeHasFormMark).length) {
-    return miss(`contact form already present on ${target.groupSlug}`)
-  }
+  const taken = new Set<string>()
+  findElementorNodes(elementor, (n) => {
+    if (n.id) taken.add(String(n.id))
+    return false
+  })
+
+  // The top-level container that currently holds a form embed on the target
+  // page (if any). Used to REPLACE a broken embed in place.
+  const existingTopIdx = elementor.elements.findIndex((top: any) =>
+    findElementorNodes(top, nodeHasFormMark).length,
+  )
 
   // Find a DONOR page that already has the form, and the top-level container in
   // it that holds the form (so we copy the real wrapper + placement).
@@ -1524,29 +1563,67 @@ export function applyContactFormGitops(
       break
     }
   }
-  if (!donorContainer) {
-    return miss(
-      "no page in the repo has the contact form yet — nothing to copy the pattern from; add the embed to one page (or place it by hand) first",
+
+  // ---- MISSING form (pre-release / non-post-release path): INSERT by donor ---
+  if (isNotFound) {
+    // Idempotency: the embed is already on this page.
+    if (existingTopIdx >= 0) {
+      return miss(`contact form already present on ${target.groupSlug}`)
+    }
+    if (!donorContainer) {
+      return miss(
+        "no page in the repo has the contact form yet — nothing to copy the pattern from; add the embed to one page (or place it by hand) first",
+      )
+    }
+    const clone = cloneWithNewIds(donorContainer, taken)
+    const insertAt = Math.min(donorIndex, elementor.elements.length)
+    elementor.elements.splice(insertAt, 0, clone)
+    return commitResource(
+      workDir,
+      target,
+      [{ rel: target.elementorRel, value: elementor }],
+      `Added the contact form to ${target.groupSlug} by copying the exact block already used on ${donorRef!.groupSlug} (same embed and placement).`,
+      `contact_form copied from ${donorRef!.groupSlug} into ${target.elementorRel}`,
     )
   }
 
-  // Clone the donor's form container with fresh ids (unique within the target),
-  // and insert it at the same relative position the donor uses.
-  const taken = new Set<string>()
-  findElementorNodes(elementor, (n) => {
-    if (n.id) taken.add(String(n.id))
-    return false
-  })
-  const clone = cloneWithNewIds(donorContainer, taken)
-  const insertAt = Math.min(donorIndex, elementor.elements.length)
-  elementor.elements.splice(insertAt, 0, clone)
+  // ---- PRESENT BUT NOT LOADING: correct the embed ---------------------------
+  // Step 1: replace the broken block with a working donor block from another
+  // page in the same repo.
+  if (donorContainer) {
+    const clone = cloneWithNewIds(donorContainer, taken)
+    if (existingTopIdx >= 0) elementor.elements.splice(existingTopIdx, 1, clone)
+    else elementor.elements.splice(Math.min(donorIndex, elementor.elements.length), 0, clone)
+    return commitResource(
+      workDir,
+      target,
+      [{ rel: target.elementorRel, value: elementor }],
+      `Replaced the non-loading contact form on ${target.groupSlug} with the working block already used on ${donorRef!.groupSlug} (same embed and placement).`,
+      `contact_form replaced from ${donorRef!.groupSlug} into ${target.elementorRel}`,
+    )
+  }
 
-  return commitResource(
-    workDir,
-    target,
-    [{ rel: target.elementorRel, value: elementor }],
-    `Added the contact form to ${target.groupSlug} by copying the exact block already used on ${donorRef!.groupSlug} (same embed and placement).`,
-    `contact_form copied from ${donorRef!.groupSlug} into ${target.elementorRel}`,
+  // Step 2: no working donor in the repo — re-apply the client's embed from the
+  // Basecamp "G99+ Contact Form Code" message.
+  const cf = await getContactFormCodeFromBasecamp(ctx.projectId, ctx.projectName).catch(
+    () => null,
+  )
+  if (cf?.found && cf.snippet) {
+    const container = contactFormContainer(cf.snippet, taken)
+    if (existingTopIdx >= 0) elementor.elements.splice(existingTopIdx, 1, container)
+    else elementor.elements.push(container)
+    return commitResource(
+      workDir,
+      target,
+      [{ rel: target.elementorRel, value: elementor }],
+      `Re-applied the contact form on ${target.groupSlug} using this project's "G99+ Contact Form Code" from Basecamp (no working donor page in the repo).`,
+      `contact_form re-applied from Basecamp into ${target.elementorRel}`,
+    )
+  }
+
+  // Step 3: nothing worked — report it so a human corrects the embed.
+  return miss(
+    "contact form is present but not loading, and could not be corrected automatically: no working donor page in the repo and no 'G99+ Contact Form Code' in Basecamp — correct the embed manually",
   )
 }
 
