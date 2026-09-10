@@ -1464,6 +1464,12 @@ export async function checkGrowth99ContactForm(
   pageId: string,
   sharedBrowser?: any,
   onProgress?: (progress: number, message: string) => Promise<void>,
+  // POST-RELEASE ONLY. When true the check runs on the client's LIVE site and
+  // its pass/fail reflects the full flow — the form must be found, fillable,
+  // submittable, AND show a thank-you confirmation. It also submits a real
+  // (clearly test-labelled) lead. When false the pre-release behaviour is
+  // unchanged: pass on mere presence. See POST_RELEASE_SECTIONS in the API.
+  isPostRelease: boolean = false,
 ): Promise<Finding[]> {
   const { chromium } = require("playwright")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
@@ -1472,6 +1478,15 @@ export async function checkGrowth99ContactForm(
   let hasForm = false
   let screenshots: string[] = []
   let contactFormCheckError: string | null = null
+  // Post-release flow outcomes (only meaningful on the page that actually
+  // submitted — the screenshot-lock holder that found the form).
+  let submitAttempted = false // we entered the fill/submit block with a form
+  let fillOk = false // the form's fields were present and fillable
+  let submitOk = false // a submit control existed and was clicked
+  let thankYouSeen = false // a thank-you/confirmation state appeared after submit
+  // "Contact Us" pages are where the form is expected to live. Used post-release
+  // to avoid flagging "not found" on every non-contact page in a full crawl.
+  const isContactPage = /contact/i.test(url)
 
   const browser = sharedBrowser || (await chromium.launch({ headless: true }))
   let context: any = null
@@ -1590,6 +1605,7 @@ export async function checkGrowth99ContactForm(
         if (onProgress)
           await onProgress(70, "Submitting dummy data to the contact form...")
 
+        submitAttempted = true
         const iframeElement = await page
           .waitForSelector(
             'iframe[src*="widget-ui.growth99.com/assets/widgets/new-form.html"]',
@@ -1600,40 +1616,57 @@ export async function checkGrowth99ContactForm(
           await iframeElement.scrollIntoViewIfNeeded().catch(() => {})
           const frame = await iframeElement.contentFrame()
           if (frame) {
-            await frame
-              .fill('input[name="First Name"]', "Test Name", { timeout: 3000 })
-              .catch(() => {})
-            await frame
-              .fill('input[name="Last Name"]', "User", { timeout: 3000 })
-              .catch(() => {})
-            await frame
-              .fill('input[name="Email"]', "test@growth99.com", {
-                timeout: 3000,
-              })
-              .catch(() => {})
-            await frame
-              .fill('input[name="Phone Number"]', "1234567890", {
-                timeout: 3000,
-              })
-              .catch(() => {})
-            await frame
-              .fill('input[name="Message"]', "Test Message", { timeout: 3000 })
-              .catch(() => {})
-            await frame
-              .click('button[type="submit"]', { timeout: 3000 })
-              .catch(() => {})
+            // Dummy lead data, clearly labelled as a test so the client can
+            // recognise/ignore it in their CRM. The word "test" is carried in
+            // every free-text field; the phone stays a plain dummy number, and
+            // the email stays a valid deliverable address.
+            const fields: { sel: string; value: string }[] = [
+              { sel: 'input[name="First Name"]', value: "QA Test" },
+              { sel: 'input[name="Last Name"]', value: "Test" },
+              { sel: 'input[name="Email"]', value: "qa-test@growth99.com" },
+              { sel: 'input[name="Phone Number"]', value: "1234567890" },
+              {
+                sel: 'input[name="Message"]',
+                value: "This is an automated QA test submission — please ignore.",
+              },
+            ]
+            // fillOk = the form's fields were actually present and fillable.
+            // Require the core lead fields (first name, email, message) so a
+            // shell iframe with no inputs is correctly reported "not fillable".
+            let filled = 0
+            for (const { sel, value } of fields) {
+              const loc = frame.locator(sel)
+              if ((await loc.count().catch(() => 0)) === 0) continue
+              const ok = await loc
+                .fill(value, { timeout: 3000 })
+                .then(() => true)
+                .catch(() => false)
+              if (ok) filled++
+            }
+            fillOk = filled >= 3
 
-            // Replace the blind 4s wait with the form-frame's own thank-you
-            // signal: submit renders a "thank you" state inside the widget frame.
-            // Resolve as soon as that text appears; otherwise fall through at the
-            // same 4s cap, so a form that never shows a thank-you is timed (and
-            // screenshotted) exactly as before.
-            await frame
+            // submitOk = a submit control existed and the click landed.
+            const submitBtn = frame.locator('button[type="submit"]')
+            if ((await submitBtn.count().catch(() => 0)) > 0) {
+              submitOk = await submitBtn
+                .click({ timeout: 3000 })
+                .then(() => true)
+                .catch(() => false)
+            }
+
+            // thankYouSeen = the widget frame rendered a thank-you/confirmation
+            // state after submit. This is the post-release pass gate, so allow a
+            // little longer than the old blind 4s wait for the live round-trip.
+            thankYouSeen = await frame
               .waitForFunction(
-                () => /thank/i.test(document.body?.innerText || ""),
-                { timeout: 4000 },
+                () =>
+                  /thank|success|received|message sent|submitted/i.test(
+                    document.body?.innerText || "",
+                  ),
+                { timeout: 8000 },
               )
-              .catch(() => {}) // Wait for thank you page
+              .then(() => true)
+              .catch(() => false)
 
             const thankYouBuffer = await page.screenshot({ fullPage: false })
             const thankYouUrl = await uploadScreenshot(
@@ -1677,8 +1710,110 @@ export async function checkGrowth99ContactForm(
   const findingData = {
     url,
     hasForm,
+    submitAttempted,
+    fillOk,
+    submitOk,
+    thankYouSeen,
+  }
+  const shotUrl = screenshots.length > 0 ? screenshots.join(",") : null
+  // Short, standing note appended to every contact-form failure: there is no
+  // blanket auto-fix for the correction decision — a genuinely missing form is a
+  // team call (add vs correct the embed).
+  const TEAM_NOTE =
+    " No automatic fix for this — check with the team whether to add the form or correct the embed code."
+
+  // -------------------------------------------------------------------------
+  // POST-RELEASE: the check runs on the LIVE site and gates pass/fail on the
+  // full flow — found → fillable → submittable → thank-you confirmation.
+  // -------------------------------------------------------------------------
+  if (isPostRelease) {
+    // Scope to the contact page: on a full crawl, only the contact page (or any
+    // page that actually carries the form) should be able to FAIL "not found".
+    // A non-contact page with no form emits nothing, so it can't false-fail the
+    // subtask.
+    if (!hasForm) {
+      if (!isContactPage) return []
+      return [
+        {
+          check_factor: "contact_form",
+          title: "Contact Form Not Found",
+          description: `No contact form was found on the contact page.${TEAM_NOTE}`,
+          context_text: JSON.stringify(findingData),
+          screenshot_url: null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+
+    // Form embed is present in the page. If THIS page didn't run the submit test
+    // (another page holds the run's screenshot lock), just report presence — the
+    // lock-holder page owns the definitive submit verdict.
+    if (!submitAttempted) {
+      return [
+        {
+          check_factor: "contact_form",
+          title: "Contact Form Verified",
+          description:
+            "No contact form issues found. The contact form is present on this page.",
+          context_text: JSON.stringify(findingData),
+          screenshot_url: shotUrl,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+
+    // Present but the fields/widget did not render or could not be submitted →
+    // "present but not loading". This is the case the auto-fix targets.
+    if (!fillOk || !submitOk) {
+      return [
+        {
+          check_factor: "contact_form",
+          title: "Contact Form Present But Not Loading",
+          description: `The contact form embed is present on the page but its fields did not load or could not be submitted, so a real submission could not be completed.`,
+          context_text: JSON.stringify(findingData),
+          screenshot_url: shotUrl,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+
+    // Submitted, but no thank-you/confirmation appeared → backend/confirmation
+    // problem (not an embed-loading issue), so no auto-fix.
+    if (!thankYouSeen) {
+      return [
+        {
+          check_factor: "contact_form",
+          title: "Contact Form Submitted But No Confirmation",
+          description: `The contact form was filled and submitted, but no thank-you/confirmation page or message appeared, so the submission could not be confirmed as successful.${TEAM_NOTE}`,
+          context_text: JSON.stringify(findingData),
+          screenshot_url: shotUrl,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+
+    // Found, filled, submitted, thank-you loaded → pass.
+    return [
+      {
+        check_factor: "contact_form",
+        title: "Contact Form Verified",
+        description:
+          "No contact form issues found. The form was filled with test data, submitted, and the thank-you confirmation loaded successfully.",
+        context_text: JSON.stringify(findingData),
+        screenshot_url: shotUrl,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
   }
 
+  // -------------------------------------------------------------------------
+  // PRE-RELEASE (unchanged): pass on mere presence, fail when not found.
+  // -------------------------------------------------------------------------
   // hasForm was set by scanning the rendered page source for the Growth99 form
   // widget (matched on a stable substring, independent of the per-form id). The
   // report must NEVER echo that widget URL/snippet — only the found/not-found
@@ -1693,7 +1828,7 @@ export async function checkGrowth99ContactForm(
         description:
           "No contact form issues found. The contact form is present on this page.",
         context_text: JSON.stringify(findingData),
-        screenshot_url: screenshots.length > 0 ? screenshots.join(",") : null,
+        screenshot_url: shotUrl,
         status: "open",
         ai_generated: false,
       } as Finding,

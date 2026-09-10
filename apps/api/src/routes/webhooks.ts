@@ -1009,6 +1009,7 @@ const POST_RELEASE_DEFAULT_CHECKS = [
   "plugin_number",
   "verify_plugin_updates",
   "page_speed",
+  "contact_form",
 ]
 
 // The `release.qa_post` SUBTASKS → the QACC check(s) that report into each,
@@ -1016,10 +1017,10 @@ const POST_RELEASE_DEFAULT_CHECKS = [
 // each subtask matches exactly one section. Subtasks with no safe automated
 // check are intentionally absent — a human owns those: "Desktop & Mobile View
 // Video", "Send email to client", "Verify backup size", and "Two-Way Text
-// Setup". #21985 ("G99 Contact form, ChatBot and VC") maps to chatbot_consultation
-// ONLY — the contact_form check submits a real test lead, which is unsafe on a
-// live production site, so form verification stays a human check. Mirrors
-// PRE_RELEASE_SECTIONS.
+// Setup". "G99 Contact form, ChatBot and VC" maps to BOTH chatbot_consultation
+// AND contact_form: the contact_form check runs the full live flow (find → fill
+// → submit → thank-you) on the contact page, submitting a clearly test-labelled
+// lead. Mirrors PRE_RELEASE_SECTIONS.
 const POST_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   { matchers: ["testthelive", "livewebsite"], checks: ["functionality_check"] },
   { matchers: ["gsr"], checks: ["gsr_check"] },
@@ -1033,9 +1034,9 @@ const POST_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   // "Cross verify the live site link (Domain Name)" → the live_site_link check
   // asserts the released URL matches the client-notes domain.
   { matchers: ["livesitelink", "domainname"], checks: ["live_site_link"] },
-  // "G99 Contact form, ChatBot and VC" → chatbot/VC detection only (no live
-  // contact-form submission — see header note).
-  { matchers: ["chatbot"], checks: ["chatbot_consultation"] },
+  // "G99 Contact form, ChatBot and VC" → chatbot/VC detection AND the live
+  // contact-form flow (find → fill → submit → thank-you) — see header note.
+  { matchers: ["chatbot"], checks: ["chatbot_consultation", "contact_form"] },
   // "Desktop & Mobile View Video" (or any video-recording subtask) → the
   // video_recording post-verification barrier. Recording is fired only after
   // every other post-release check passes; the barrier owns this subtask's

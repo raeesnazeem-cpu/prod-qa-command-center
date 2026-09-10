@@ -235,6 +235,7 @@ async function runGitopsFix(
     siteUrl: string
     pageUrl: string
     projectId?: string | null
+    runType?: string | null
   },
 ): Promise<GitopsFixResult | null> {
   const text = `${f.title || ""} ${f.description || ""}`.toLowerCase()
@@ -307,8 +308,22 @@ async function runGitopsFix(
           projectName: ctx.company,
         }),
       )
-    case "contact_form":
-      return guard(() => applyContactFormGitops(workDir, f, { pageUrl: ctx.pageUrl }))
+    case "contact_form": {
+      // Post-release: only a form that is PRESENT but not loading is auto-
+      // corrected. A genuinely missing form is a team decision (add vs correct)
+      // and is never auto-injected on the live site — report it instead.
+      const isNotLoading = /not loading|not submittable|not fillable|present but/i.test(
+        f.title || "",
+      )
+      if (ctx.runType === "post_release" && !isNotLoading) return null
+      return guardAsync(() =>
+        applyContactFormGitops(workDir, f, {
+          pageUrl: ctx.pageUrl,
+          projectId: ctx.projectId,
+          projectName: ctx.company,
+        }),
+      )
+    }
     case "privacy_policy": {
       // Only act on a genuine "missing/blank policy" defect.
       if (!/privacy/.test(text)) return null
@@ -742,6 +757,7 @@ export async function processAiFixRunJob(job: Job) {
         siteUrl: run?.site_url || "",
         pageUrl,
         projectId: run?.project_id,
+        runType: run?.run_type,
       })
       if (g) {
         if (g.applied) committed++
@@ -1515,6 +1531,24 @@ export async function processAiFixRunJob(job: Job) {
     // Reported as MANUAL (developer placement across per-client "desired spaces"
     // on all pages) — carrying the real code, never a bare suggestion.
     if (f.check_factor === "contact_form" && /not found/i.test(f.title || "")) {
+      // Post-release: a genuinely missing form is a team decision (add vs
+      // correct the embed), not an automatic push or code suggestion.
+      if (run?.run_type === "post_release") {
+        analysis.push({
+          findingId: f.id ? String(f.id) : null,
+          check_factor: f.check_factor,
+          title: f.title || f.check_factor,
+          pageUrl,
+          category: "manual",
+          fix: `No contact form was found on the contact page. No automatic fix — check with the team whether to add the form or correct the embed code.`,
+          applied: false,
+          proposed: false,
+          lapse: false,
+          filesOffered: [],
+          filesChanged: [],
+        })
+        continue
+      }
       const cf = await getContactFormCodeFromBasecamp(run?.project_id, project?.name).catch(
         () => null,
       )
