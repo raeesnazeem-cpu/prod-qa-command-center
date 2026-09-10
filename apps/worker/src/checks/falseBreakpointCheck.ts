@@ -49,12 +49,37 @@ interface Culprit {
   width: number
 }
 
+// Header-integrity metrics captured at a given viewport width. A "break" here is
+// NOT horizontal overflow — it is the header losing its single-row layout above
+// the tablet breakpoint: nav items wrapping to a second line, or the CTA button
+// text wrapping, while the hamburger has not yet taken over.
+interface HeaderMetrics {
+  present: boolean
+  hamburgerVisible?: boolean
+  navVisible?: boolean
+  navItemCount?: number
+  navWrapped?: boolean
+  navSel?: string
+  buttonPresent?: boolean
+  buttonWrapped?: boolean
+  buttonSel?: string
+}
+
+// Same shape as HeaderMetrics, named for use inside the in-page evaluate body
+// (where `hdr` starts as { present: false } and is reassigned with full metrics).
+type HeaderMetricsInPage = HeaderMetrics
+
 interface Measurement {
   vw: number
   sw: number
   overflow: number
   culprits: Culprit[]
+  header?: HeaderMetrics
 }
+
+// Header font-size floor for the auto-fix cap lives in gitopsFix; here we only
+// cap how many header findings we emit.
+const MAX_HEADER_FINDINGS = 2
 
 export async function checkFalseBreakpoints(
   pageUrl: string,
@@ -181,7 +206,134 @@ export async function checkFalseBreakpoints(
           }
         }
 
-        return { vw, sw, overflow, culprits }
+        // --- HEADER INTEGRITY (cheap; always measured) ---
+        // Detects a header that has lost its single-row layout: nav items or the
+        // CTA button text wrapping to a second line while the hamburger toggle is
+        // not yet shown. Uses geometry only (row spread + text line count).
+        const vis = (el: Element | null): boolean => {
+          if (!el) return false
+          const st = getComputedStyle(el)
+          if (st.display === "none" || st.visibility === "hidden" || parseFloat(st.opacity || "1") === 0)
+            return false
+          const r = el.getBoundingClientRect()
+          return r.width > 0 && r.height > 0
+        }
+        // Nearest ancestor Elementor element id (so the fix can target the widget).
+        const elemId = (el: Element | null): string => {
+          let p: Element | null = el
+          while (p && p !== document.body) {
+            if (p.classList) {
+              for (const c of Array.from(p.classList)) {
+                const m = /^elementor-element-([0-9a-f]{7,8})$/i.exec(c)
+                if (m) return m[1]
+              }
+            }
+            p = p.parentElement
+          }
+          return ""
+        }
+        // Number of visual text lines an element occupies (via its text rects).
+        const lineCount = (el: Element): number => {
+          try {
+            const range = document.createRange()
+            range.selectNodeContents(el)
+            const rects = Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0)
+            if (!rects.length) return 1
+            return new Set(rects.map((r) => Math.round(r.top))).size
+          } catch {
+            return 1
+          }
+        }
+
+        let header: Element | null = null
+        for (const s of [
+          '[data-elementor-type="header"]',
+          ".elementor-location-header",
+          "header#masthead",
+          ".site-header",
+          "header",
+        ]) {
+          const el = document.querySelector(s)
+          if (el) {
+            header = el
+            break
+          }
+        }
+
+        let hdr: HeaderMetricsInPage = { present: false }
+        if (header) {
+          const toggle = header.querySelector(
+            '.elementor-menu-toggle, [class*="menu-toggle"], button.menu-toggle, button[aria-label*="menu" i], [aria-label*="menu" i][role="button"]',
+          )
+          const hamburgerVisible = vis(toggle)
+
+          // Pick the DESKTOP menu = the candidate <ul> with the most VISIBLE
+          // top-level items. A header often holds both a desktop and a hidden
+          // mobile menu; choosing by visible-item count avoids grabbing the
+          // hidden one. Works for Elementor and plain theme/Gutenberg headers.
+          const menuCands = Array.from(
+            header.querySelectorAll(
+              ".elementor-nav-menu--main, ul.elementor-nav-menu, .elementor-nav-menu, nav ul, header ul",
+            ),
+          )
+          let menu: Element | null = null
+          let visItems: Element[] = []
+          for (const u of menuCands) {
+            const lis = Array.from(u.children)
+              .filter((el) => el.tagName === "LI")
+              .filter(vis)
+            if (lis.length > visItems.length) {
+              visItems = lis
+              menu = u
+            }
+          }
+          const navVisible = visItems.length > 0
+          let navWrapped = false
+          if (visItems.length > 1) {
+            const rects = visItems.map((el) => el.getBoundingClientRect())
+            const line = Math.max(...rects.map((r) => r.height)) || 20
+            const minTop = Math.min(...rects.map((r) => r.top))
+            const maxTop = Math.max(...rects.map((r) => r.top))
+            navWrapped = maxTop - minTop > line * 0.5
+          }
+
+          // CTA button — framework-agnostic (Elementor button, theme `.btn`,
+          // Gutenberg button). Flag the first visible one whose text wraps.
+          const btnCands = Array.from(
+            header.querySelectorAll(
+              '.elementor-button, a.elementor-button-link, a.btn, a.button, .btn, .wp-block-button__link, [class*="button"] a, a[class*="btn"]',
+            ),
+          ).filter((el) => {
+            if (!vis(el)) return false
+            const t = (el.textContent || "").trim()
+            return t.length > 0 && t.length < 40
+          })
+          const buttonPresent = btnCands.length > 0
+          let buttonWrapped = false
+          let buttonSel = ""
+          for (const b of btnCands) {
+            const textEl = b.querySelector(".elementor-button-text") || b
+            if (lineCount(textEl) > 1) {
+              buttonWrapped = true
+              buttonSel = elemId(b)
+              break
+            }
+          }
+
+          hdr = {
+            present: true,
+            hamburgerVisible,
+            navVisible,
+            navItemCount: visItems.length,
+            navWrapped,
+            navSel: menu ? elemId(menu) : "",
+            buttonPresent,
+            buttonWrapped,
+            buttonSel,
+          }
+        }
+
+        return { vw, sw, overflow, culprits, header: hdr }
         },
         { tol: TOLERANCE, collect: collectCulprits },
       )) as Measurement
@@ -280,6 +432,182 @@ export async function checkFalseBreakpoints(
         status: "open",
         ai_generated: false,
       } as Finding)
+    }
+
+    // --- 3b. HEADER INTEGRITY (new dimension) ---
+    // A header "break" is the header losing its single row ABOVE the tablet
+    // breakpoint: nav items wrapping to a second line, or the CTA button text
+    // wrapping, while the hamburger has not yet taken over. This is separate from
+    // horizontal overflow above and rides the same check_factor.
+    if (loadOk) {
+      const { describeImageResult } = require("../lib/aiFallback")
+
+      // Empirical tablet breakpoint: the largest sampled width where the
+      // hamburger toggle is visible (the switchover to the mobile menu). Below
+      // this the hamburger is expected to own the menu; above it the full nav
+      // must fit on one row.
+      let hamburgerMaxWidth: number | null = null
+      let headerSeen = false
+      for (const s of samples) {
+        const h = s.m.header
+        if (!h?.present) continue
+        headerSeen = true
+        if (h.hamburgerVisible) {
+          hamburgerMaxWidth = Math.max(hamburgerMaxWidth ?? 0, s.width)
+        }
+      }
+
+      // A width is a header-wrap break when: header present, hamburger NOT yet
+      // shown (still full-nav mode), the nav is visible, and either the nav items
+      // or the button text has wrapped to a second line.
+      const isWrapBreak = (m: Measurement): boolean => {
+        const h = m.header
+        return !!(
+          h?.present &&
+          !h.hamburgerVisible &&
+          h.navVisible &&
+          (h.navWrapped || h.buttonWrapped)
+        )
+      }
+
+      if (headerSeen) {
+        // Widest sampled width that wraps — wrap runs from here down to the
+        // hamburger switchover, so this is the meaningful onset to report.
+        let widestWrapIdx = -1
+        for (let i = samples.length - 1; i >= 0; i--) {
+          if (isWrapBreak(samples[i].m)) {
+            widestWrapIdx = i
+            break
+          }
+        }
+
+        if (widestWrapIdx >= 0) {
+          const wrapSample = samples[widestWrapIdx]
+          // Refine onset: the largest width that still wraps, between this
+          // wrapping sample (lo) and the next-larger clean sample (hi).
+          let onsetWidth = wrapSample.width
+          const cleanLarger = samples[widestWrapIdx + 1]
+          if (cleanLarger) {
+            let lo = wrapSample.width // wraps
+            let hi = cleanLarger.width // clean
+            while (hi - lo > 2) {
+              const mid = Math.round((lo + hi) / 2)
+              const m = await measure(mid)
+              if (isWrapBreak(m)) lo = mid
+              else hi = mid
+            }
+            onsetWidth = lo
+          }
+
+          // Re-measure at the onset for culprit ids + screenshot evidence.
+          const worst = await measure(onsetWidth)
+          const h = worst.header!
+          const whatWrapped = [
+            h.navWrapped ? "navigation menu items" : "",
+            h.buttonWrapped ? "call-to-action button text" : "",
+          ]
+            .filter(Boolean)
+            .join(" and ")
+
+          // Screenshot the header region as evidence (and for vision confirm).
+          let headerShot: Buffer | null = null
+          try {
+            const handle = await page.$(
+              '[data-elementor-type="header"], .elementor-location-header, header',
+            )
+            headerShot = handle ? await handle.screenshot() : await page.screenshot()
+          } catch {
+            headerShot = null
+          }
+
+          // Vision confirmation: suppress a geometric false positive when a
+          // working vision provider says the header is NOT wrapped. If vision is
+          // unavailable (!ok), keep the deterministic geometric verdict.
+          let confirmed = true
+          let visionReason = ""
+          if (headerShot) {
+            const vr = await describeImageResult(
+              headerShot,
+              'This image is a website header at a desktop/tablet width. Do the navigation menu items or the call-to-action button text WRAP onto a second line (the header is not on a single row)? Reply strictly as JSON: {"wrapped": true|false, "reason": "short"}.',
+            ).catch(() => ({ ok: false, text: "" }) as any)
+            if (vr.ok && vr.text) {
+              const m = vr.text.match(/\{[\s\S]*\}/)
+              if (m) {
+                try {
+                  const j = JSON.parse(m[0])
+                  if (typeof j.wrapped === "boolean") {
+                    confirmed = j.wrapped
+                    visionReason = String(j.reason || "")
+                  }
+                } catch {}
+              }
+            }
+          }
+
+          if (confirmed) {
+            let shotUrl = ""
+            if (headerShot) {
+              try {
+                const jpg = await sharp(headerShot).jpeg({ quality: 85 }).toBuffer()
+                shotUrl = await uploadScreenshot(
+                  jpg,
+                  `${runId}/header_break_${onsetWidth}_${Date.now()}.jpg`,
+                  { bucket: "evidence", isPublic: true },
+                ).catch(() => "")
+              } catch {}
+            }
+
+            const bpNote =
+              hamburgerMaxWidth !== null
+                ? `The hamburger menu takes over at ${hamburgerMaxWidth}px; the header must stay on one row from there up to full desktop width.`
+                : `No hamburger menu was detected at any sampled width — the header also has no mobile fallback.`
+
+            const culpritList = [
+              h.navWrapped && h.navSel
+                ? `- <code>.elementor-element-${h.navSel}</code> — the navigation menu`
+                : "",
+              h.buttonWrapped && h.buttonSel
+                ? `- <code>.elementor-element-${h.buttonSel}</code> — the header button`
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n")
+
+            findings.push({
+              check_factor: CHECK_FACTOR,
+              title: `Header items break onto a second line at ${onsetWidth}px`,
+              description: `The header loses its single-row layout at a viewport width of <strong>${onsetWidth}px</strong>: the ${whatWrapped} wrap${
+                whatWrapped.includes(" and ") ? "" : "s"
+              } onto a second line while the desktop navigation is still shown. Header navigation and button text must stay on one line until the tablet breakpoint, where the hamburger menu takes over. ${bpNote}${
+                visionReason ? `\n\nVision confirmation: ${visionReason}` : ""
+              }${culpritList ? `\n\nElements to adjust:\n\n${culpritList}` : ""}`,
+              context_text: `URL: ${pageUrl}\nHeader break onset: ${onsetWidth}px\nWrapped: ${whatWrapped}\nHamburger switchover: ${
+                hamburgerMaxWidth !== null ? `${hamburgerMaxWidth}px` : "none detected"
+              }\nnav element: ${h.navSel || "n/a"}\nbutton element: ${h.buttonSel || "n/a"}`,
+              screenshot_url: shotUrl || null,
+              status: "open",
+              ai_generated: false,
+            } as Finding)
+          }
+        }
+
+        // Secondary: a header with a desktop nav but NO hamburger at any small
+        // width never switches to a mobile menu at all.
+        if (
+          findings.filter((f) => /header/i.test(f.title)).length < MAX_HEADER_FINDINGS &&
+          hamburgerMaxWidth === null &&
+          samples.some((s) => s.m.header?.present && s.m.header?.navVisible)
+        ) {
+          findings.push({
+            check_factor: CHECK_FACTOR,
+            title: `Header has no hamburger menu at mobile widths`,
+            description: `The header keeps its desktop navigation at every sampled width down to ${COARSE_WIDTHS[0]}px and never switches to a hamburger menu. A responsive header should collapse the navigation into a hamburger toggle at the tablet breakpoint.`,
+            context_text: `URL: ${pageUrl}\nHamburger switchover: none detected\nWidths sampled: ${COARSE_WIDTHS.length}`,
+            status: "open",
+            ai_generated: false,
+          } as Finding)
+        }
+      }
     }
 
     // --- 4. PASS / LAPSE FINDING ---

@@ -1236,8 +1236,135 @@ function locateElementorNodeById(
   return null
 }
 
-export function applyFalseBreakpointGitops(workDir: string, finding: Finding): GitopsFixResult {
+// Header line-wrap auto-fix cap: never shrink header typography below this
+// fraction of its original size, nor below the absolute floor. If one line can't
+// be reached within the cap, we fall back to a manual recommendation.
+const HEADER_FONT_CAP_RATIO = 0.85
+const HEADER_FONT_FLOOR_PX = 12
+
+/** Elementor typography control prefix differs per widget (button vs nav-menu). */
+function headerTypoKeys(widgetType?: string): { fontKey: string; flagKey: string } {
+  if (widgetType === "nav-menu")
+    return { fontKey: "menu_typography_font_size", flagKey: "menu_typography_typography" }
+  return { fontKey: "typography_font_size", flagKey: "typography_typography" }
+}
+
+/**
+ * Shrink a header widget's DESKTOP font-size within the 85% cap (floor 12px).
+ * The full-nav range is the desktop range (> tablet breakpoint, where the
+ * hamburger has not yet taken over), so the desktop value is what governs
+ * whether the header stays on one line. Returns null when there is no explicit
+ * px font-size to shrink (inherited from the kit → can't cap safely) or the
+ * value is already at/under the floor.
+ */
+function shrinkHeaderNodeFont(
+  node: ElementorNode,
+): { from: number; to: number } | null {
+  node.settings = node.settings || {}
+  const { fontKey, flagKey } = headerTypoKeys(node.widgetType)
+  const v = node.settings[fontKey]
+  const cur = v && typeof v.size === "number" ? v.size : null
+  const unitOk = !v || v.unit === "px" || v.unit === undefined
+  if (cur === null || !unitOk) return null
+  const to = Math.max(HEADER_FONT_FLOOR_PX, Math.round(cur * HEADER_FONT_CAP_RATIO))
+  if (to >= cur) return null // already at/under the cap floor — can't help
+  node.settings[flagKey] = "custom"
+  node.settings[fontKey] = { ...(v || {}), unit: "px", size: to, sizes: (v && v.sizes) || [] }
+  return { from: cur, to }
+}
+
+/**
+ * Header line-wrap fix: the header lost its single row above the tablet
+ * breakpoint (nav items or CTA button text wrapped). Auto-apply a bounded
+ * font-size reduction on the offending header widgets; fall back to a manual
+ * recommendation when no explicit font-size exists to cap.
+ */
+function applyHeaderLineFix(workDir: string, finding: Finding): GitopsFixResult {
+  const header = findHeaderTemplate(workDir)
+  if (!header)
+    return miss("no header elementor template in repo — header line-wrap fix needs the header template")
+  const elementor = readJson<any>(workDir, header.elementorRel)
+  if (!elementor || !Array.isArray(elementor.elements) || elementor.elements.length === 0)
+    return miss("header template has no design yet — cannot adjust header typography")
+
   const hay = `${finding.description || ""}\n${finding.context_text || ""}`
+  const ids = new Set(
+    Array.from(hay.matchAll(/elementor-element-([0-9a-f]{7,8})\b/gi)).map((m) => m[1].toLowerCase()),
+  )
+  for (const m of hay.matchAll(/(?:nav|button) element:\s*([0-9a-f]{7,8})\b/gi))
+    ids.add(m[1].toLowerCase())
+
+  // Prefer the exact widgets the finding named; else fall back to the header's
+  // nav-menu / button widgets.
+  let targets: ElementorNode[] = []
+  if (ids.size)
+    targets = findElementorNodes(elementor, (n) => ids.has(String(n.id || "").toLowerCase()))
+  if (!targets.length)
+    targets = findElementorNodes(
+      elementor,
+      (n) => n.widgetType === "nav-menu" || n.widgetType === "button",
+    )
+  if (!targets.length)
+    return miss("no nav-menu or button widget found in the header template to adjust")
+
+  const bpMatch = hay.match(/Hamburger switchover:\s*(\d+)px/i)
+  const tabletBp = bpMatch ? `${bpMatch[1]}px` : "the tablet breakpoint (default 1024px)"
+
+  const label = (n: ElementorNode) =>
+    n.widgetType === "nav-menu"
+      ? "navigation menu"
+      : n.widgetType === "button"
+        ? "button"
+        : n.widgetType || n.elType || "element"
+
+  const changed: string[] = []
+  const skipped: string[] = []
+  for (const node of targets) {
+    const res = shrinkHeaderNodeFont(node)
+    if (res) changed.push(`${label(node)} font-size ${res.from}px → ${res.to}px`)
+    else skipped.push(label(node))
+  }
+
+  if (!changed.length) {
+    return {
+      applied: false,
+      files: [],
+      description:
+        `The header items wrap because the ${skipped.join(" and ")} typography has no explicit ` +
+        `font-size in the template (it inherits from the global kit), so an 85%-capped reduction ` +
+        `cannot be computed safely. Reduce the header font-size and/or the container width / menu ` +
+        `item spacing manually so the header stays on one line up to ${tabletBp}.`,
+      note: `header line-wrap: targets found but no explicit font-size to shrink within cap — recommend manual`,
+    }
+  }
+
+  return commitResource(
+    workDir,
+    header,
+    [{ rel: header.elementorRel, value: elementor }],
+    `Reduced header typography to keep the header on one line up to ${tabletBp}: ${changed.join(
+      "; ",
+    )} (capped at 85% of the original, floor 12px). If items still wrap after this, reduce the header container width or menu-item spacing manually.`,
+    `header line-wrap: shrank ${changed.length} widget font-size(s) within 85% cap on ${header.elementorRel}`,
+  )
+}
+
+export function applyFalseBreakpointGitops(workDir: string, finding: Finding): GitopsFixResult {
+  const title = (finding.title || "").toLowerCase()
+  const hay = `${finding.description || ""}\n${finding.context_text || ""}`
+
+  // Header line-wrap break (new dimension) → bounded header typography fix.
+  if (/header items break onto a second line/i.test(title) || /header break onset/i.test(hay)) {
+    return applyHeaderLineFix(workDir, finding)
+  }
+  // Missing hamburger has no safe deterministic fix — building a mobile menu is
+  // a manual header rebuild.
+  if (/no hamburger menu/i.test(title)) {
+    return miss(
+      "header has no responsive hamburger menu — adding a mobile menu is a manual header rebuild, not an auto-fix",
+    )
+  }
+
   // Elementor wraps every element in `.elementor-element-<id>` (7–8 hex).
   const ids = Array.from(
     new Set(
