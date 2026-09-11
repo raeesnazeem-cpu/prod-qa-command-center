@@ -326,9 +326,13 @@ export async function checkPluginUpdatesCredentialFree(
           : indeterminate.length
             ? `Plugins current; ${indeterminate.length} indeterminate`
             : "All detected plugins up to date",
-        description:
-          "Compared each plugin's readme.txt `Stable tag:` against api.wordpress.org (credential-free, no wp-admin login). " +
-          "Indeterminate plugins are premium/custom with no public version record, so the scan could not auto-confirm them — they are NOT counted as passing.",
+        description: hasProblems
+          ? "Compared each plugin's readme.txt `Stable tag:` against api.wordpress.org (credential-free, no wp-admin login). " +
+            "Indeterminate plugins are premium/custom with no public version record, so the scan could not auto-confirm them — they are NOT counted as passing."
+          : "No issues found. Every detected plugin's installed version matches the latest on api.wordpress.org." +
+            (indeterminate.length
+              ? ` ${indeterminate.length} premium/custom plugin${indeterminate.length === 1 ? " has" : "s have"} no public version record and can't be auto-confirmed — verify manually.`
+              : ""),
         context_text: `URL: ${url}\n\n${parts.join("\n\n")}`,
         screenshot_url: null,
         status: "open",
@@ -492,8 +496,9 @@ export async function checkLiveSiteLink(
         title: ok
           ? `Released domain matches client notes (${hostname})`
           : "Live site link issues",
-        description:
-          "Confirms the URL released in the TED `release.security` task matches the canonical site URL from the HubSpot client notes, resolves over a valid HTTPS certificate, and is not still on a `*.gogroth.com` staging host.",
+        description: ok
+          ? "No issues found. The released URL matches the canonical site URL from the HubSpot client notes, resolves over a valid HTTPS certificate, and is not on a `*.gogroth.com` staging host."
+          : "Confirms the URL released in the TED `release.security` task matches the canonical site URL from the HubSpot client notes, resolves over a valid HTTPS certificate, and is not still on a `*.gogroth.com` staging host.",
         context_text:
           `Client-notes URL (HubSpot via TED): ${notesUrl || "unresolved"}\n` +
           `Released URL (release.security via TED): ${releasedUrl || "unresolved"}\n` +

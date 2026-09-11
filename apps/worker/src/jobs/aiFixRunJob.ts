@@ -271,6 +271,10 @@ async function runGitopsFix(
       return guard(() => applyLearnMoreGitops(workDir))
     case "meta_tags":
     case "text_share":
+    case "social_share_heading":
+      // social_share_heading fails when required og:*/twitter:* share tags are
+      // missing; its finding title names them, which applySeoOgGitops backfills
+      // from the page's own SEO values (same Rank Math OG/Twitter fields).
       return guard(() =>
         applySeoOgGitops(workDir, f, { company: ctx.company, pageUrl: ctx.pageUrl }),
       )

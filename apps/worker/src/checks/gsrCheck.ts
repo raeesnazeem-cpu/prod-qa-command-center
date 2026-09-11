@@ -188,7 +188,7 @@ export async function checkGsr(
     return [
       {
         check_factor: "gsr_check",
-        title: `${serps.length} SERPs Found`,
+        title: `${serps.length} SERPs found — no issues detected`,
         description: JSON.stringify(serps),
         context_text: `Found ${serps.length} SERPs for site:${domain}`,
         screenshot_url: null,

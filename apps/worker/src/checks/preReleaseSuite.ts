@@ -414,9 +414,11 @@ At [Your Business Name], we are dedicated to respecting and protecting your priv
         {
           check_factor: "privacy_policy",
           title: "Privacy Policy Verified",
-          description: checkoutExists
-            ? "The Privacy Policy link was successfully found in the footer, and the WooCommerce checkout privacy notice is present."
-            : "The Privacy Policy link was successfully found in the footer. This site has no WooCommerce checkout, so a checkout privacy notice is not applicable.",
+          description:
+            "No issues found. " +
+            (checkoutExists
+              ? "The Privacy Policy link was successfully found in the footer, and the WooCommerce checkout privacy notice is present."
+              : "The Privacy Policy link was successfully found in the footer. This site has no WooCommerce checkout, so a checkout privacy notice is not applicable."),
           context_text: `Footer Link: Found\nCheckout Notice: ${checkoutStatus}\nContent Match: ${isContentMatch ? "Yes" : "No"}\n\n===ACTUAL POLICY TEXT===\n${actualPolicyText}`,
           screenshot_url: finalScreenshotUrl,
           status: "open",
@@ -1108,12 +1110,46 @@ export async function checkTopBarAndStickyHeader(
       ? "Sticky header measurement: could not be measured this run."
       : "Sticky header measurement: no header element was located."
 
+  const stickyContext = `Header found: ${headerFound ? "Yes" : "No"}\nSticky measured: ${stickyMeasured ? "Yes" : "No"}\nSticky observed: ${stickyMeasured ? (stickyObserved ? "Pinned" : "Not pinned") : "N/A"}`
+
+  // Measured and pinned → real pass.
+  if (stickyMeasured && stickyObserved) {
+    return [
+      {
+        check_factor: "top_bar_sticky",
+        title: "Top bar & sticky header verified",
+        description:
+          "No issues found. The header stays pinned near the top after an ~800px scroll.",
+        context_text: stickyContext,
+        screenshot_url: screenshotUrls,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+  // Measured and NOT pinned → real defect.
+  if (stickyMeasured && !stickyObserved) {
+    return [
+      {
+        check_factor: "top_bar_sticky",
+        title: "Sticky header not pinned on scroll",
+        description:
+          "The header did not stay pinned after an ~800px scroll — it scrolls out of view. Make the top bar/header sticky on scroll.",
+        context_text: stickyContext,
+        screenshot_url: screenshotUrls,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+  // Stickiness could not be measured (or no header located) → inconclusive,
+  // keep the manual-verify card.
   return [
     {
       check_factor: "top_bar_sticky",
       title: "Verify Top Bar & Sticky Header",
       description: `Please verify the top bar using the provided screenshots. ${stickyLine}`,
-      context_text: `Header found: ${headerFound ? "Yes" : "No"}\nSticky measured: ${stickyMeasured ? "Yes" : "No"}\nSticky observed: ${stickyMeasured ? (stickyObserved ? "Pinned" : "Not pinned") : "N/A"}`,
+      context_text: stickyContext,
       screenshot_url: screenshotUrls,
       status: "open",
       ai_generated: false,
@@ -1353,13 +1389,27 @@ export async function checkFavicon(
     ]
   }
 
+  // HTTP verification ran and the favicon resolved → a real pass.
+  if (faviconChecked) {
+    return [
+      {
+        check_factor: "favicon",
+        title: "Favicon verified",
+        description: `No issues found. The favicon resource resolved successfully (HTTP ${faviconHttpStatus}) and displays in the browser tab across Desktop, Tablet, and Mobile.`,
+        screenshot_url: screenshotUrls,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+  // HTTP verification could not run this pass → inconclusive, keep the
+  // manual-verify card (never a false pass).
   return [
     {
       check_factor: "favicon",
       title: "Verify Favicon",
-      description: faviconChecked
-        ? `The favicon resource resolved successfully (HTTP ${faviconHttpStatus}). Please verify it displays correctly across Desktop, Tablet, Mobile.`
-        : "Please verify the favicon across Desktop, Tablet, Mobile and verify the favicon code addition.",
+      description:
+        "Please verify the favicon across Desktop, Tablet, Mobile and verify the favicon code addition.",
       screenshot_url: screenshotUrls,
       status: "open",
       ai_generated: false,
@@ -2416,8 +2466,14 @@ export async function checkUrlTabComparison(
     return [
       {
         check_factor: "url_tab_compare",
-        title: `URL & Tab Name Comparison — ${totalMissing} discrepancies found`,
-        description: `Compared ${devPages.length} dev site pages with ${livePages.length} live site pages. Found ${missingInDev.length} URLs missing in dev (present in live) and ${missingInLive.length} URLs missing in live (present in dev).`,
+        title:
+          totalMissing === 0
+            ? "URL & tab names match the live site"
+            : `URL & Tab Name Comparison — ${totalMissing} discrepancies found`,
+        description:
+          totalMissing === 0
+            ? `No issues found. Compared ${devPages.length} dev site pages with ${livePages.length} live site pages — every page path matches, with no missing or extra URLs.`
+            : `Compared ${devPages.length} dev site pages with ${livePages.length} live site pages. Found ${missingInDev.length} URLs missing in dev (present in live) and ${missingInLive.length} URLs missing in live (present in dev).`,
         context_text: JSON.stringify(contextData),
         status: "open",
         ai_generated: false,
@@ -2654,6 +2710,17 @@ export async function checkSocialShareHeading(
     // fails the whole check" semantics.
     if (onProgress) await onProgress(95, "Capturing meta tags source code...")
     let metaTagsError: any = null
+    // The parsed Open Graph / Twitter values, filled by the capture task below.
+    // Gate 1 of the pass/fail verdict reads these deterministically.
+    let metaValues: {
+      ogTitle: string | null
+      ogDesc: string | null
+      ogImage: string | null
+      twCard: string | null
+      twTitle: string | null
+      twDesc: string | null
+      twImage: string | null
+    } | null = null
     const metaTagsTask: Promise<string> = (async () => {
       const codeContext = await browser.newContext({
         userAgent:
@@ -2665,20 +2732,49 @@ export async function checkSocialShareHeading(
           .goto(url, { waitUntil: "networkidle", timeout: 30000 })
           .catch(() => {})
 
-        const codeSnippet = await codePage.evaluate(() => {
+        const parsed = await codePage.evaluate(() => {
+          const content = (sel: string): string | null => {
+            const el = document.querySelector(sel)
+            const v = el ? (el.getAttribute("content") || "").trim() : ""
+            return v ? v : null
+          }
           const tags = document.querySelectorAll(
             'title, meta[name="description"], meta[property^="og:"], meta[name^="twitter:"], meta[property^="twitter:"]',
           )
-          return tags.length > 0
-            ? Array.from(tags)
-                .map((tag) => tag.outerHTML)
-                .join("\n")
-            : "Meta tags not found in page source"
+          const snippet =
+            tags.length > 0
+              ? Array.from(tags)
+                  .map((tag) => tag.outerHTML)
+                  .join("\n")
+              : "Meta tags not found in page source"
+          // Twitter tags are normally name="twitter:*"; some themes emit them as
+          // property="twitter:*" — accept either spelling.
+          return {
+            snippet,
+            values: {
+              ogTitle: content('meta[property="og:title"]'),
+              ogDesc: content('meta[property="og:description"]'),
+              ogImage: content('meta[property="og:image"]'),
+              twCard:
+                content('meta[name="twitter:card"]') ||
+                content('meta[property="twitter:card"]'),
+              twTitle:
+                content('meta[name="twitter:title"]') ||
+                content('meta[property="twitter:title"]'),
+              twDesc:
+                content('meta[name="twitter:description"]') ||
+                content('meta[property="twitter:description"]'),
+              twImage:
+                content('meta[name="twitter:image"]') ||
+                content('meta[property="twitter:image"]'),
+            },
+          }
         })
+        metaValues = parsed.values
 
         const renderPage = await codeContext.newPage()
         await renderPage.setContent(
-          `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
+          `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${parsed.snippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
         )
         const codeBuffer = await renderPage.screenshot({ fullPage: false })
         return await uploadScreenshot(
@@ -2740,7 +2836,153 @@ export async function checkSocialShareHeading(
     metaTagsUrl = await metaTagsTask
     if (metaTagsError) throw metaTagsError
 
+    const screenshotUrls = [facebookUrl, xUrl, linkedinUrl, metaTagsUrl]
+      .filter(Boolean)
+      .join(",")
+
+    // -------------------------------------------------------------------
+    // VERDICT. social_share_heading is a real pass/fail assertion with TWO
+    // gates that must BOTH hold to pass:
+    //   1. metaOk   — every required Open Graph + Twitter share tag is present
+    //                 and not a WordPress/Elementor placeholder (deterministic).
+    //   2. visionOk — AI vision confirms the Facebook / X / LinkedIn preview
+    //                 cards actually render a real title, description and share
+    //                 image (not broken/placeholder).
+    // Both true → clean pass. Either false → a defect whose title names the
+    // exact tags so the OG/Twitter auto-fix (applySeoOgGitops) can backfill
+    // them. If AI vision is UNAVAILABLE we cannot confirm gate 2, so we fall
+    // back to the historical "please verify" review finding.
+    // The pass wording ("No issues found") is the sentinel both the TED report
+    // (isCleanPassFinding, tedSync.ts) and the web card (findingVerdict.ts) key
+    // on to render a pass instead of a defect.
+    // -------------------------------------------------------------------
+    const BOILERPLATE = /\b(wordpress|elementor|my blog|my website|just another)\b/i
+    const badTag = (v: string | null): boolean => !v || BOILERPLATE.test(v)
+    const mv: {
+      ogTitle: string | null
+      ogDesc: string | null
+      ogImage: string | null
+      twCard: string | null
+      twTitle: string | null
+      twDesc: string | null
+      twImage: string | null
+    } = metaValues || {
+      ogTitle: null,
+      ogDesc: null,
+      ogImage: null,
+      twCard: null,
+      twTitle: null,
+      twDesc: null,
+      twImage: null,
+    }
+    const missing: string[] = []
+    if (badTag(mv.ogTitle)) missing.push("og:title")
+    if (badTag(mv.ogDesc)) missing.push("og:description")
+    if (badTag(mv.ogImage)) missing.push("og:image")
+    if (badTag(mv.twCard)) missing.push("twitter:card")
+    if (badTag(mv.twTitle)) missing.push("twitter:title")
+    if (badTag(mv.twDesc)) missing.push("twitter:description")
+    if (badTag(mv.twImage)) missing.push("twitter:image")
+    const metaOk = missing.length === 0
+
+    // Gate 2 — AI vision over the three preview cards.
+    if (onProgress)
+      await onProgress(97, "Verifying social share previews (AI vision)...")
+    const { describeImageResult } = require("../lib/aiFallback")
+    const visionBuffers = [fbBuffer, xBuffer, lnBuffer].filter(
+      Boolean,
+    ) as Buffer[]
+    const visionPrompt =
+      'These images are social-share preview cards for the SAME web page — Facebook, X (Twitter) and LinkedIn — from a share-preview tool. Decide whether the page\'s social share is configured CORRECTLY: each card should show a meaningful title and description AND a real, fully-loaded share image (NOT a broken/blank/placeholder image, NOT a generic default, NOT just the bare URL). Answer with JSON only: {"configured": true|false, "reason": "one short sentence"}.'
+    const vision = await describeImageResult(visionBuffers, visionPrompt)
+
     if (!sharedBrowser) await browser.close()
+
+    // Gate 2 unavailable (no key / every provider errored) → we cannot confirm
+    // the preview, so keep the historical "please verify" review behaviour
+    // rather than invent a verdict.
+    if (!vision.ok) {
+      return [
+        {
+          check_factor: "social_share_heading",
+          title: "Social Share Heading Check",
+          description:
+            "Verify the social sharing preview headings for Facebook, X, and LinkedIn.",
+          context_text: `AI preview verification unavailable: ${(
+            vision.error || "no result"
+          ).slice(0, 200)}`,
+          screenshot_url: screenshotUrls,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+
+    let visionOk = false
+    let visionReason = ""
+    try {
+      const j = JSON.parse(
+        (vision.text || "").match(/\{[\s\S]*\}/)?.[0] || "{}",
+      )
+      visionOk = j.configured === true
+      visionReason = String(j.reason || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 300)
+    } catch {
+      // Unparseable reply → treat as "not confirmed", never a silent pass.
+      visionOk = false
+      visionReason = "AI vision returned an unparseable reply"
+    }
+
+    // CLEAN PASS — both gates hold.
+    if (metaOk && visionOk) {
+      return [
+        {
+          check_factor: "social_share_heading",
+          title: "Social share metadata verified",
+          description:
+            "No issues found. All required Open Graph and Twitter share tags are present, and AI vision confirmed the Facebook, X, and LinkedIn preview cards render correctly.",
+          context_text: `AI vision: ${visionReason || "previews render correctly"}`,
+          screenshot_url: screenshotUrls,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+
+    // FAIL — required tags missing / placeholder. The title names the exact
+    // tags so applySeoOgGitops can backfill them.
+    if (!metaOk) {
+      const previewNote = visionOk
+        ? ""
+        : ` The AI preview check also did not confirm the share cards render correctly${visionReason ? ` (${visionReason})` : ""}.`
+      return [
+        {
+          check_factor: "social_share_heading",
+          title: `Social share metadata incomplete — missing ${missing.join(", ")}`,
+          description: `The following required social-share meta tags are missing or contain placeholder text: ${missing.join(", ")}. Add proper Open Graph and Twitter meta tags so links shared to Facebook, X, and LinkedIn show a correct title, description, and share image.${previewNote}`,
+          screenshot_url: screenshotUrls,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+
+    // FAIL — tags all present but the rendered preview is wrong (e.g. a broken
+    // or placeholder og:image / twitter:image). No copy to backfill; flag for
+    // review.
+    return [
+      {
+        check_factor: "social_share_heading",
+        title: "Social share preview not rendering correctly",
+        description: `All required Open Graph and Twitter tags are present, but the AI preview check found the Facebook / X / LinkedIn share card does not render correctly${visionReason ? ` — ${visionReason}` : ""}. Check that the og:image / twitter:image loads and is not a broken or placeholder image.`,
+        context_text: `AI vision: ${visionReason || "previews not confirmed"}`,
+        screenshot_url: screenshotUrls,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
   } catch (err: any) {
     if (!sharedBrowser && browser) await browser.close().catch(() => null)
     console.error("Social Share Heading Check failed:", err)
@@ -2755,22 +2997,6 @@ export async function checkSocialShareHeading(
       } as Finding,
     ]
   }
-
-  const screenshotUrls = [facebookUrl, xUrl, linkedinUrl, metaTagsUrl]
-    .filter(Boolean)
-    .join(",")
-
-  return [
-    {
-      check_factor: "social_share_heading",
-      title: "Social Share Heading Check",
-      description:
-        "Verify the social sharing preview headings for Facebook, X, and LinkedIn.",
-      screenshot_url: screenshotUrls,
-      status: "open",
-      ai_generated: false,
-    } as Finding,
-  ]
 }
 
 /**
