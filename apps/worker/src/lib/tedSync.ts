@@ -921,7 +921,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   logo_chatbot: "Mention to replace the chatbot launcher icon with the client's brand logo",
   callnow_links: "Mention to add the client's phone number to the TED contact notes so the floating Call Now button can be added site-wide",
   verify_plugin_updates: "Mention to update all plugins except All-in-Migration, LiteSpeed, WP-Rocket, Elementor & WooCommerce",
-  social_share_heading: "Mention to verify the Facebook, X & LinkedIn social share preview headings",
+  social_share_heading: "Mention to add proper Open Graph & Twitter social-share meta tags (title, description & share image) so the Facebook, X & LinkedIn share previews render correctly",
   false_breakpoint: "Fix the flagged element at the breaking width — reduce its width/overflow, or shrink the header font so nav and button stay on one line until the tablet breakpoint",
   backend_check: "Mention to clean up the WordPress backend — remove default content (Hello world post, Sample Page, default tagline), close comments, add a custom 404, and fix the contact number",
   review_reputation_check: "Mention to fix the /reviews page — ensure the review popup opens and the phone, email, social, and Google Business links are present and match the GMB listing",

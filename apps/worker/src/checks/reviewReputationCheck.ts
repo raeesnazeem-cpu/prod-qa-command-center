@@ -185,10 +185,10 @@ export async function checkReviewReputation(
     if (data.google.length === 0) missing.push("Google (My Business / Maps) reference")
 
     const summaryLines = [
-      `Contact number: ${data.tel.length ? data.tel.join(", ") : "❌ none found"}`,
-      `Email: ${data.mail.length ? data.mail.join(", ") : "❌ none found"}`,
-      `Social: ${data.social.length ? data.social.join(", ") : "❌ none found"}`,
-      `Google reference: ${data.google.length ? data.google.join(", ") : "❌ none found"}`,
+      `Contact number: ${data.tel.length ? data.tel.join(", ") : "❌ missing"}`,
+      `Email: ${data.mail.length ? data.mail.join(", ") : "❌ missing"}`,
+      `Social: ${data.social.length ? data.social.join(", ") : "❌ missing"}`,
+      `Google reference: ${data.google.length ? data.google.join(", ") : "❌ missing"}`,
       ``,
       `Address and Google-My-Business match are shown in the screenshot — please confirm they match the client's GMB listing.`,
     ]
@@ -199,7 +199,10 @@ export async function checkReviewReputation(
         missing.length > 0
           ? `Review & Reputation: missing ${missing.join(", ")}`
           : "Review & Reputation: contact & social present",
-      description: summaryLines.join("\n"),
+      description:
+        missing.length > 0
+          ? summaryLines.join("\n")
+          : `No issues found. The reviews page shows the contact number, email, social links, and Google reference.\n\n${summaryLines.join("\n")}`,
       context_text: `URL: ${reviewsUrl}\nPopup opened: ${popupOpened ? "yes" : "no"}`,
       screenshot_url: popupShot || null,
       status: "open",

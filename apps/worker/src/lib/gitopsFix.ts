@@ -815,14 +815,39 @@ export function applySeoOgGitops(
   const wantsOgDesc = /og:description|open graph description/.test(title)
   const wantsOgImage = /og:image|open graph image/.test(title)
   const wantsSiteName = /site name|og:site_name/.test(title)
+  // Twitter card fields — social_share_heading requires the twitter:* set too.
+  const wantsTwTitle = /twitter:title/.test(title)
+  const wantsTwDesc = /twitter:description/.test(title)
+  const wantsTwImage = /twitter:image/.test(title)
+  const wantsTwCard = /twitter:card/.test(title)
 
-  if (!wantsOgTitle && !wantsOgDesc && !wantsOgImage && !wantsSiteName) {
-    return miss("finding is not an OG title/description/image/site-name defect")
+  if (
+    !wantsOgTitle &&
+    !wantsOgDesc &&
+    !wantsOgImage &&
+    !wantsSiteName &&
+    !wantsTwTitle &&
+    !wantsTwDesc &&
+    !wantsTwImage &&
+    !wantsTwCard
+  ) {
+    return miss(
+      "finding is not an OG/Twitter title/description/image/card/site-name defect",
+    )
   }
 
   // og:site_name is site-wide (blogname), not per-page. Only replace a known
   // placeholder with the real business name; a real name is left untouched.
-  if (wantsSiteName && !wantsOgTitle && !wantsOgDesc && !wantsOgImage) {
+  if (
+    wantsSiteName &&
+    !wantsOgTitle &&
+    !wantsOgDesc &&
+    !wantsOgImage &&
+    !wantsTwTitle &&
+    !wantsTwDesc &&
+    !wantsTwImage &&
+    !wantsTwCard
+  ) {
     const site = readJson<any>(workDir, "resources/site.json")
     if (!site) return miss("no resources/site.json in repo")
     const current = String(site.blogname || "").trim()
@@ -880,6 +905,41 @@ export function applySeoOgGitops(
       seo.fields.rank_math_facebook_image_id = media
       changes.push(`OG image → ${media}`)
     }
+  }
+
+  // Twitter card fields (Rank Math keeps them separate from Facebook/OG).
+  // Backfill from the OG value just set above, else the page's own SEO copy —
+  // never invented text. twitter:card has a single correct default value.
+  if (wantsTwTitle && !seo.fields.rank_math_twitter_title) {
+    const src =
+      seo.fields.rank_math_facebook_title ||
+      seo.fields.rank_math_title ||
+      ref.resource?.title
+    if (src && !BOILERPLATE_TITLE.test(String(src))) {
+      seo.fields.rank_math_twitter_title = src
+      changes.push(`Twitter title → "${src}"`)
+    }
+  }
+  if (wantsTwDesc && !seo.fields.rank_math_twitter_description) {
+    const src =
+      seo.fields.rank_math_facebook_description || seo.fields.rank_math_description
+    if (src) {
+      seo.fields.rank_math_twitter_description = src
+      changes.push("Twitter description (from the page's SEO description)")
+    }
+  }
+  if (wantsTwImage && !seo.fields.rank_math_twitter_image_id) {
+    const media =
+      seo.fields.rank_math_facebook_image_id ||
+      findMediaByHint(workDir, /social[-_]?share|og[-_]?image|share[-_]?image/i)
+    if (media) {
+      seo.fields.rank_math_twitter_image_id = media
+      changes.push(`Twitter image → ${media}`)
+    }
+  }
+  if (wantsTwCard && !seo.fields.rank_math_twitter_card_type) {
+    seo.fields.rank_math_twitter_card_type = "summary_large_image"
+    changes.push("Twitter card type → summary_large_image")
   }
 
   if (!changes.length) {

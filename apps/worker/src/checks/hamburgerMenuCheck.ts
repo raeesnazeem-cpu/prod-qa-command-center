@@ -604,7 +604,7 @@ export async function checkHamburgerMenu(
       const verified = perView.filter((v) => v.r.loadOk).map((v) => v.label).join(" and ")
       push(
         "Hamburger menu verified",
-        `The hamburger menu is present in the header and opens on tap at ${verified} width (under 1024px). Menu links and buttons checked and valid.`,
+        `No issues found. The hamburger menu is present and opens on tap at ${verified} width (under 1024px), with valid menu links and buttons.`,
         evidenceShot,
       )
     }
