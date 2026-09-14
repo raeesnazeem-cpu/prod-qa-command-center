@@ -10,7 +10,9 @@ import {
   postDetectionSummary,
   precomputeFindingMedia,
   markAllTedTasksCompleted,
+  postTedComment,
 } from "../lib/tedSync"
+import { releaseRunSlot } from "../lib/runSlot"
 import { runCrossBrowserCheck } from "../checks/crossBrowserCheck"
 import { checkExternalLinks } from "../checks/externalLinkCheck"
 import { checkMeta } from "../checks/metaCheck"
@@ -1382,6 +1384,29 @@ async function maybeTriggerAiFix(
   report: { hasIssues: boolean; issueCount: number } | null,
 ): Promise<void> {
   if (!report) return
+
+  // Full scan: Test and Fix are separate suites. The scan report has ALREADY been
+  // posted (postFinalReportToTED does not defer for full_scan), so the scan is
+  // done here — do NOT auto-run the fix and do NOT change any TED status (a full
+  // scan is ad-hoc). The fix is a separate, on-demand action
+  // (POST /webhooks/ted/full-scan/fix). Free the global run slot here, since we
+  // skip markAllTedTasksCompleted which normally releases it.
+  const { data: fsRun } = await supabase
+    .from("qa_runs")
+    .select("run_type")
+    .eq("id", runId)
+    .single()
+  if (fsRun?.run_type === "full_scan") {
+    await releaseRunSlot(runId).catch(() => {})
+    await postTedComment(
+      tedTaskId,
+      `<p>✅ <strong>Full scan complete.</strong> Review the results above. To apply automated (GitOps) fixes, use <em>Send to Fix</em>.</p>`,
+      `ext:qacc-fullscan-scandone-${runId}`,
+      { runId },
+    ).catch(() => {})
+    logger.info({ runId }, "full_scan: scan report posted; fix left for the on-demand fix endpoint.")
+    return
+  }
 
   // If the AI-fix module is off, the run is finished here — close out the TED
   // tasks so nothing is left "In Progress" and the flow can advance.

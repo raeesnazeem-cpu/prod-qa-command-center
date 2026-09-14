@@ -124,7 +124,7 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
 
   const { data: run, error } = await supabase
     .from("qa_runs")
-    .select("id, project_id, status, ted_task_id, ted_subtask_map, recording_status")
+    .select("id, project_id, status, ted_task_id, ted_subtask_map, recording_status, run_type")
     .eq("id", runId)
     .single()
   if (error || !run) {
@@ -136,12 +136,24 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
   }
 
   const map: Record<string, any> = (run.ted_subtask_map as any) || {}
-  const videoSubtaskIds = flattenIds(map[VIDEO_FACTOR])
+  const tedTaskId = tedTaskIdArg || (run.ted_task_id as string | undefined)
+  // Full scan: there is no video subtask. The recording is the LAST step of the
+  // fix module and its proof is posted to the PARENT task itself; a full scan must
+  // never change task status, so every postTedStatus call below is suppressed when
+  // fullScan is true, and the sibling gate / status-based closeout are skipped.
+  const fullScan = job.data.fullScan === true || run.run_type === "full_scan"
+  const videoSubtaskIds = fullScan
+    ? tedTaskId
+      ? [String(tedTaskId)]
+      : []
+    : flattenIds(map[VIDEO_FACTOR])
   if (!videoSubtaskIds.length) {
-    logger.info({ runId }, "video_recording_check: no video subtask mapped; nothing to do.")
+    logger.info(
+      { runId, fullScan },
+      "video_recording_check: no target for the video proof; nothing to do.",
+    )
     return
   }
-  const tedTaskId = tedTaskIdArg || (run.ted_task_id as string | undefined)
   const projectId = run.project_id as string | undefined
   const ctxBase = { runId, projectId, targetKind: "subtask" as const, checkFactor: VIDEO_FACTOR }
 
@@ -158,8 +170,9 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
     for (const subId of videoSubtaskIds) {
       await postTedComment(subId, body, `ext:video-blocked-${runId}-${subId}`, { ...ctxBase }).catch(() => {})
       // Video has no fix → leave its subtask In Progress and DO NOT close the
-      // parent; the parent closes only when the video subtask succeeds.
-      await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
+      // parent; the parent closes only when the video subtask succeeds. Full scan
+      // never changes task status.
+      if (!fullScan) await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
     }
     logger.info({ runId }, "Video recording blocked: QA run did not complete successfully; video left In Progress, parent left open.")
     return
@@ -170,15 +183,19 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
   // sibling not yet finalized is a timing case (the report normally finalizes
   // them before this barrier is enqueued): don't start and don't blame — throw
   // so BullMQ retries (attempts: 5).
-  const openSiblings = await openSiblingSubtasks(runId, map, new Set(videoSubtaskIds))
-  if (openSiblings.length > 0) {
-    logger.warn(
-      { runId, openSiblings },
-      "video_recording_check: siblings passed but not all finalized yet; will retry.",
-    )
-    throw new Error(
-      `video_recording_check: ${openSiblings.length} sibling subtask(s) not yet finalized for ${runId}`,
-    )
+  // Full scan has no sibling subtasks to wait on — the fix module already ran and
+  // this barrier IS its last step, so skip the sibling gate entirely.
+  if (!fullScan) {
+    const openSiblings = await openSiblingSubtasks(runId, map, new Set(videoSubtaskIds))
+    if (openSiblings.length > 0) {
+      logger.warn(
+        { runId, openSiblings },
+        "video_recording_check: siblings passed but not all finalized yet; will retry.",
+      )
+      throw new Error(
+        `video_recording_check: ${openSiblings.length} sibling subtask(s) not yet finalized for ${runId}`,
+      )
+    }
   }
 
   // ---- PATH 2: everything passed → start recording.
@@ -197,8 +214,9 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
   for (const subId of videoSubtaskIds) {
     await postTedComment(subId, startingBody, `ext:video-starting-${runId}-${subId}`, { ...ctxBase }).catch(() => {})
     // Keep the video subtask In Progress while recording runs — it closes only
-    // once the recording URLs post back (video_url_verify), never on start.
-    await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
+    // once the recording URLs post back (video_url_verify), never on start. Full
+    // scan never changes task status.
+    if (!fullScan) await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
   }
 
   let started = false
@@ -249,8 +267,8 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
       }).catch(() => {})
       // FAIL: the DB never signalled a start. Video has no fix → leave the
       // subtask In Progress and DO NOT close the parent (parent closes only on
-      // video success — URLs posted back).
-      await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
+      // video success — URLs posted back). Full scan never changes task status.
+      if (!fullScan) await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
     }
     await supabase
       .from("qa_runs")
@@ -267,7 +285,7 @@ export async function processVideoRecordingJob(job: Job): Promise<void> {
   await qaQueue
     .add(
       "video_url_verify",
-      { runId, tedTaskId, videoSubtaskIds, attempt: 1 },
+      { runId, tedTaskId, videoSubtaskIds, attempt: 1, fullScan },
       { delay: URL_VERIFY_FIRST_DELAY_MS, removeOnComplete: true, attempts: 2 },
     )
     .catch((e) => logger.error({ runId, error: e?.message }, "Failed to enqueue video_url_verify."))
@@ -392,6 +410,9 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
   const tedTaskId = job.data.tedTaskId as string | undefined
   const videoSubtaskIds: string[] = job.data.videoSubtaskIds || []
   const attempt: number = job.data.attempt || 1
+  // Full scan posts the video proof to the parent task and never changes status:
+  // skip the status-based run closeout below.
+  const fullScan = job.data.fullScan === true
   if (!runId) return
 
   const { data: run } = await supabase
@@ -419,7 +440,7 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
   // least one viewport is available we still treat it as a (partial) success;
   // otherwise fail now instead of at the deadline.
   if (recordingStatus === "error" && available.length === 0) {
-    return await failUrlVerify(runId, projectId, videoSubtaskIds, "recorder reported error")
+    return await failUrlVerify(runId, projectId, videoSubtaskIds, "recorder reported error", fullScan)
   }
 
   // Post each available viewport to the video subtask once (stable key dedupes).
@@ -444,8 +465,10 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
     // PASS: every viewport URL posted back → close the video subtask (Completed)
     // and the parent (last of all), immediately — no waiting for any timer. This
     // is the ONLY success path.
-    await finalizeRunCloseout({ runId, tedTaskId: parentId, map, videoSubtaskIds })
-    logger.info({ runId }, "video_url_verify: all viewport URLs posted; video subtask + parent Completed.")
+    if (!fullScan) {
+      await finalizeRunCloseout({ runId, tedTaskId: parentId, map, videoSubtaskIds })
+    }
+    logger.info({ runId, fullScan }, "video_url_verify: all viewport URLs posted; video proof complete.")
     return
   }
 
@@ -453,10 +476,12 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
   // produced a URL. Don't keep polling for URLs that will never arrive — take
   // what we have now as a partial success.
   if ((recordingStatus === "error" || recordingStatus === "completed") && available.length > 0) {
-    await finalizeRunCloseout({ runId, tedTaskId: parentId, map, videoSubtaskIds })
+    if (!fullScan) {
+      await finalizeRunCloseout({ runId, tedTaskId: parentId, map, videoSubtaskIds })
+    }
     logger.warn(
-      { runId, recordingStatus, available: available.length },
-      "video_url_verify: recorder finished with partial URLs; posted available, video subtask + parent Completed.",
+      { runId, recordingStatus, available: available.length, fullScan },
+      "video_url_verify: recorder finished with partial URLs; posted available.",
     )
     return
   }
@@ -466,7 +491,7 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
     await qaQueue
       .add(
         "video_url_verify",
-        { runId, tedTaskId, videoSubtaskIds, attempt: attempt + 1 },
+        { runId, tedTaskId, videoSubtaskIds, attempt: attempt + 1, fullScan },
         { delay: URL_VERIFY_RETRY_DELAY_MS, removeOnComplete: true, attempts: 2 },
       )
       .catch(() => {})
@@ -481,16 +506,18 @@ export async function processVideoUrlVerifyJob(job: Job): Promise<void> {
   if (available.length > 0) {
     // PASS (partial): at least one viewport URL posted back = the recording is
     // available → close the video subtask (Completed) and the parent.
-    await finalizeRunCloseout({ runId, tedTaskId: parentId, map, videoSubtaskIds })
+    if (!fullScan) {
+      await finalizeRunCloseout({ runId, tedTaskId: parentId, map, videoSubtaskIds })
+    }
     logger.warn(
-      { runId, available: available.length },
-      "video_url_verify: deadline with partial URLs; posted available, video subtask + parent Completed.",
+      { runId, available: available.length, fullScan },
+      "video_url_verify: deadline with partial URLs; posted available.",
     )
     return
   }
 
   // FAIL: nothing posted back within the window.
-  await failUrlVerify(runId, projectId, videoSubtaskIds, "no retrievable URL by deadline")
+  await failUrlVerify(runId, projectId, videoSubtaskIds, "no retrievable URL by deadline", fullScan)
 }
 
 // FAIL path for video_url_verify. Video has no fix → leave the subtask In
@@ -501,6 +528,7 @@ async function failUrlVerify(
   projectId: string | undefined,
   videoSubtaskIds: string[],
   reason: string,
+  fullScan = false,
 ): Promise<void> {
   const body =
     "<p>⚠️ <strong>Video recording verification failed</strong> — no video URL was posted or it was not retrievable within the expected window.</p>"
@@ -511,7 +539,8 @@ async function failUrlVerify(
       targetKind: "subtask",
       checkFactor: VIDEO_FACTOR,
     }).catch(() => {})
-    await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
+    // Full scan never changes task status.
+    if (!fullScan) await postTedStatus(subId, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
   }
   logger.error({ runId, reason }, "video_url_verify: failed; video left In Progress, parent left open.")
 }

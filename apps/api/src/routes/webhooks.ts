@@ -91,7 +91,7 @@ const NO_LIVE_URL_REASON =
 // failure. site_url is stored empty (the column is NOT NULL) since there is none.
 async function createAbortedRun(opts: {
   projectId: string
-  runType: "pre_release" | "internal_qa" | "post_release"
+  runType: "pre_release" | "internal_qa" | "post_release" | "full_scan"
   enabledChecks: string[]
   tedSubtaskMap: Record<string, string[]>
   tedTaskId: string | null
@@ -1749,6 +1749,76 @@ const INTERNAL_QA_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   },
 ]
 
+// =====================================================================
+// FULL SCAN (run_type = 'full_scan') — the complete check universe.
+// ---------------------------------------------------------------------
+// A full scan runs EVERY check QACC knows about against one URL (a superset of
+// pre/internal/post). These are the DISPATCH GATE KEYS the worker actually
+// switches on — apps/worker/src/jobs/crawlPageJob.ts (`enabledChecks.includes`),
+// the standalone API checks (project_plan, paid_media), plus the run-level
+// cross_browser pass. Keep this list in sync with those gates.
+//
+// Checks that need inputs a URL-only scan may lack (backend_check → WP password,
+// url_tab_compare → a live URL, woocommerce → the is_woocommerce flag) are kept
+// in on purpose: each self-lapses cleanly ("could not complete — missing input")
+// rather than failing the run, so a full scan stays honest about what it could
+// not verify.
+//
+// video_recording is deliberately ABSENT: it is not a scan check but the proof
+// step that runs as the LAST action of the Fix module (see aiFixRunJob) — a full
+// scan on its own never records video.
+const FULL_SCAN_CHECKS = [
+  // Standalone API checks (enqueued directly by startRunJob).
+  "project_plan",
+  "paid_media",
+  // All-pages / composite page checks.
+  "visual_regression",
+  "accessibility",
+  "performance",
+  "spelling",
+  "console_errors",
+  "seo",
+  "dummy_content",
+  "dead_links",
+  "learn_more_buttons",
+  "url_matching",
+  "url_tab_compare",
+  "contact_form",
+  "false_breakpoint",
+  "functionality_check",
+  "image_quality",
+  "grammar",
+  "accessibility_check",
+  // Homepage-scoped checks.
+  "privacy_policy",
+  "callnow_links",
+  "hero_media",
+  "footer_logo",
+  "single_script",
+  "top_bar_sticky",
+  "favicon",
+  "chatbot_consultation",
+  "text_share",
+  "verify_plugin_updates",
+  "social_share_heading",
+  "logo_chatbot",
+  "gsr_check",
+  "backend_check",
+  "review_reputation_check",
+  "gbp_check",
+  "blog_verification",
+  "hamburger_menu",
+  // Live/released-site checks.
+  "live_site_link",
+  "plugin_number",
+  "page_speed",
+  "meta",
+  // WooCommerce (only fires when the run's is_woocommerce flag is set).
+  "woocommerce",
+  // Run-level (once, at closeout).
+  "cross_browser",
+]
+
 const normalizeTitle = (s: unknown): string =>
   String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "")
 
@@ -3236,3 +3306,431 @@ function makeRunControlHandler(
 webhookRouter.post("/ted/pause", makeRunControlHandler("pause", "paused"))
 webhookRouter.post("/ted/resume", makeRunControlHandler("resume", "running"))
 webhookRouter.post("/ted/cancel", makeRunControlHandler("cancel", "cancelled"))
+
+// ============================================================================
+// TED Webhook Receiver: FULL SCAN (standalone, on-demand)
+// ----------------------------------------------------------------------------
+// A standalone QA tool triggered from inside a TED project: an operator enters a
+// site URL and clicks Scan. Unlike the three stage webhooks this is NOT bound to
+// a project stage or a template-key/status gate — it is ad-hoc and may run any
+// number of times a day. It runs the ENTIRE check suite (FULL_SCAN_CHECKS)
+// against the ONE URL TED sends, and reports a single timestamped summary to the
+// project's release.qa_post parent task.
+//
+// TEST/FIX SPLIT: this endpoint runs only the TEST suite and ALWAYS publishes its
+// own results (the worker does not defer the report to the fix pass for
+// full_scan). The FIX suite is a separate, on-demand action — POST
+// /webhooks/ted/full-scan/fix — the "send it to the fix module" button.
+//
+// STATUS: a full scan is random, so it NEVER changes the release.qa_post task's
+// status (no In Progress / Completed). It only posts comments (the start note and
+// the report). Video recording is not part of the scan — it runs as the last step
+// of the fix module (proof the final state is fixed).
+//
+//   POST /webhooks/ted/full-scan   { trigger: { url, clientId?, clientName? } }
+//
+// Auth: X-TED-Webhook-Secret, identical to the other receivers.
+// ============================================================================
+webhookRouter.post("/ted/full-scan", async (req: Request, res: Response) => {
+  console.log("\n--- INCOMING TED WEBHOOK (FULL SCAN) ---")
+
+  let webhookEventId: string | null = null
+  let createdRunId: string | null = null
+  // The report target = the project's release.qa_post parent task, resolved from
+  // clientId. Null when it can't be resolved (results then live in QACC only).
+  let reportTaskId: string | null = null
+
+  try {
+    const payload = parseTedWebhookBody(req.body)
+    if (!payload) {
+      return res.status(400).json({ error: "Failed: No body received." })
+    }
+
+    // Normalize (same tolerant shape as the other TED endpoints).
+    const task = payload.trigger || payload.data || {}
+    const eventType = payload.event
+    const clientName =
+      task.clientName ||
+      task.client_name ||
+      task.client?.name ||
+      payload.clientName ||
+      payload.client?.name ||
+      payload.client_name ||
+      null
+
+    // Auth — same secret check as every other receiver.
+    const secretFromHeader =
+      req.headers["x-ted-webhook-secret"] || req.headers["x-webhook-secret"]
+    const secretFromBody = payload?.headers?.["X-TED-Webhook-Secret"]
+    const secret = secretFromHeader || secretFromBody
+    const expectedSecret = process.env.TED_WEBHOOK_SECRET
+    if (!expectedSecret) {
+      console.log("❌ SERVER ERROR: TED_WEBHOOK_SECRET is missing!")
+      return res.status(500).json({ error: "Server misconfigured" })
+    }
+    if (secret !== expectedSecret) {
+      console.log("❌ Unauthorized full-scan TED webhook attempt.")
+      return res.status(401).json({ error: "Unauthorized: Invalid secret" })
+    }
+
+    // Health-check ping.
+    if (eventType === "PING_TEST") {
+      return res.status(200).json({
+        status: 200,
+        statusText: "OK",
+        message: "pong: QACC full-scan webhook endpoint is alive",
+        timestamp: new Date().toISOString(),
+        data: { acknowledged: true, event: "PING_TEST" },
+      })
+    }
+
+    // The single required input: the URL TED's input box supplies. Accept the
+    // common field names; clean off surrounding whitespace and a trailing slash.
+    const rawUrl =
+      task.url ||
+      task.siteUrl ||
+      task.site_url ||
+      payload.url ||
+      payload.siteUrl ||
+      payload.site_url ||
+      null
+    const scanUrl =
+      typeof rawUrl === "string"
+        ? rawUrl.trim().replace(/\/+$/, "")
+        : null
+    if (!scanUrl || !/^https?:\/\//i.test(scanUrl)) {
+      return res.status(400).json({
+        error:
+          "Missing or invalid url. Provide the site URL to scan in trigger.url (must start with http(s)://).",
+      })
+    }
+
+    console.log(
+      `📥 Full-scan request | URL: ${scanUrl} | client: ${clientName || "?"} (#${task.clientId || "?"})`,
+    )
+
+    // Audit the event (best-effort; never breaks processing).
+    try {
+      const { data: logRow } = await supabase
+        .from("ted_webhook_events")
+        .insert({
+          event_type: eventType || "FULL_SCAN",
+          source: payload.source || null,
+          ted_task_id: task.id ? String(task.id) : null,
+          template_key: task.templateKey || null,
+          task_title: task.title || null,
+          assignee: task.assignee || null,
+          status: task.status || null,
+          client_name: clientName,
+          raw_payload: payload,
+        })
+        .select("id")
+        .single()
+      webhookEventId = logRow?.id || null
+    } catch (logErr) {
+      console.error("⚠️ Failed to persist full-scan webhook event (continuing):", logErr)
+    }
+
+    // Report target: the project's release.qa_post parent task, resolved from the
+    // TED clientId (client-agnostic). A full scan reports here but NEVER touches
+    // its status. If it can't be resolved, the run still happens — results live in
+    // the QACC dashboard only.
+    if (task.clientId != null) {
+      reportTaskId = await resolveTaskIdByTemplateKeyFromTED(
+        task.clientId,
+        POST_RELEASE_TARGET_TEMPLATE_KEY,
+        /post-?release testing/i,
+      )
+    }
+
+    // Resolve the QACC project. Prefer the TED client name; otherwise key a
+    // standalone project off the URL host so a URL-only scan still has a home.
+    let hostName = scanUrl
+    try {
+      hostName = new URL(scanUrl).host
+    } catch {}
+    const projectName = clientName || `Full Scan — ${hostName}`
+
+    let { data: project } = await supabase
+      .from("projects")
+      .select("*")
+      .ilike("name", projectName)
+      .single()
+
+    if (!project) {
+      const { data: orgData } = await supabase
+        .from("users")
+        .select("org_id")
+        .not("org_id", "is", null)
+        .limit(1)
+        .single()
+      if (!orgData?.org_id) {
+        console.log("❌ Full scan: cannot determine a default org_id — aborting.")
+        return res.status(500).json({ error: "No org available to own the run." })
+      }
+      const { data: newProject, error: createError } = await supabase
+        .from("projects")
+        .insert({
+          name: projectName,
+          client_name: clientName || projectName,
+          org_id: orgData.org_id,
+          status: "active",
+          site_url: scanUrl,
+        })
+        .select()
+        .single()
+      if (createError || !newProject) {
+        console.error("❌ Full scan: failed to create project:", createError)
+        return res.status(500).json({ error: "Failed to create project for the scan." })
+      }
+      project = newProject
+      console.log(`✅ Full scan: created project ${project.name} (${project.id}).`)
+    }
+
+    // Keep the project's active site_url pointing at what is being scanned now.
+    if ((project.site_url || "").trim() !== scanUrl) {
+      const { data: upd } = await supabase
+        .from("projects")
+        .update({ site_url: scanUrl })
+        .eq("id", project.id)
+        .select()
+        .single()
+      if (upd) project = upd
+    }
+
+    // Resolve the run creator: real TED assignee, else a ghost user, else any
+    // user in the org (mirrors the other receivers).
+    let runCreatorId: string | null = null
+    const assigneeName = task.assignee || "TED System"
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("id")
+      .ilike("full_name", assigneeName)
+      .eq("org_id", project.org_id)
+      .limit(1)
+      .single()
+    if (existingUser?.id) {
+      runCreatorId = existingUser.id
+    } else {
+      const safeEmail = `${assigneeName.replace(/[^a-zA-Z0-9]/g, "").toLowerCase() || "ted"}-${Date.now()}@ted.internal`
+      const { data: newUser } = await supabase
+        .from("users")
+        .insert({
+          id: randomUUID(),
+          clerk_user_id: `ghost_${Date.now()}`,
+          clerk_id: `ghost_${Date.now()}`,
+          full_name: assigneeName,
+          email: safeEmail,
+          org_id: project.org_id,
+          role: "qa_engineer",
+        })
+        .select("id")
+        .single()
+      runCreatorId = newUser?.id || null
+    }
+    if (!runCreatorId) {
+      const { data: adminUser } = await supabase
+        .from("users")
+        .select("id")
+        .eq("org_id", project.org_id)
+        .limit(1)
+        .single()
+      runCreatorId = adminUser?.id || null
+    }
+
+    // Create the full-scan run. run_type "full_scan" only labels the run and
+    // switches on the Test/Fix-split reporting — the worker dispatches on
+    // enabled_checks. No dedupe: a full scan may run any number of times a day and
+    // each run is its own stored record. ted_subtask_map is {} → the report posts
+    // to the parent task only.
+    const nowIso = new Date().toISOString()
+    const { data: run, error: runError } = await supabase
+      .from("qa_runs")
+      .insert({
+        project_id: project.id,
+        run_type: "full_scan",
+        site_url: scanUrl,
+        enabled_checks: FULL_SCAN_CHECKS,
+        ted_subtask_map: {},
+        device_matrix: ["desktop", "mobile"],
+        status: "running",
+        created_by: runCreatorId,
+        // Report target (release.qa_post parent). Its STATUS is never changed by a
+        // full scan — the worker's full_scan branch posts the report and stops.
+        ted_task_id: reportTaskId ? String(reportTaskId) : null,
+        // For the on-demand GitOps fix pass to resolve the beta_site.env repo.
+        ted_client_id: task.clientId ? String(task.clientId) : null,
+        custom_name: `Full Scan — ${nowIso}`,
+      })
+      .select()
+      .single()
+
+    if (runError || !run) {
+      console.error("❌ Failed to create full-scan QA Run:", runError)
+      return res.status(500).json({ error: "Failed to create the scan run." })
+    }
+    createdRunId = run.id
+    console.log(`🚀 Created full-scan run ${run.id}. Enqueuing...`)
+    try {
+      const { addRunJob } = require("../lib/queue")
+      await addRunJob(run.id)
+    } catch (queueErr) {
+      console.error("❌ Failed to add full-scan run to worker queue:", queueErr)
+    }
+
+    // Post a scan-START note to the report task — a COMMENT only, so the operator
+    // sees the run is live. No status change (full scans are ad-hoc). The full
+    // results (with the same timestamp) follow when the run completes.
+    if (reportTaskId && createdRunId && process.env.TED_API_TOKEN) {
+      await postTedComment(
+        String(reportTaskId),
+        `<p>🔎 <strong>Full scan started</strong> for ${scanUrl} at ${nowIso}. Results will be posted here when the scan finishes.</p>`,
+        `ext:qacc-fullscan-started-${createdRunId}`,
+        createdRunId,
+      ).catch(() => {})
+    }
+
+    if (webhookEventId) {
+      await supabase
+        .from("ted_webhook_events")
+        .update({ triggered_run: !!createdRunId, qa_run_id: createdRunId })
+        .eq("id", webhookEventId)
+        .then(undefined, () => {})
+    }
+
+    return res.status(200).json({
+      status: 200,
+      statusText: "OK",
+      message: "Full-scan webhook payload received and processed successfully",
+      timestamp: new Date().toISOString(),
+      data: {
+        acknowledged: true,
+        workflowId: "qacc-ted-full-scan",
+        executionId: reportTaskId || "unknown",
+        // The QACC run this trigger started. TED stores this to (a) send it to the
+        // fix module via /webhooks/ted/full-scan/fix and (b) pause/resume/cancel.
+        qaRunId: createdRunId,
+      },
+    })
+  } catch (error) {
+    console.error("❌ Error processing full-scan TED webhook:", error)
+    if (webhookEventId) {
+      await supabase
+        .from("ted_webhook_events")
+        .update({ error: String((error as Error)?.message || error) })
+        .eq("id", webhookEventId)
+        .then(undefined, () => {})
+    }
+    return res.status(400).json({ error: "Invalid payload format" })
+  }
+})
+
+// ============================================================================
+// TED Webhook Receiver: FULL SCAN — FIX ("send it to the fix module")
+// ----------------------------------------------------------------------------
+// The second half of the Test/Fix split. Takes a completed full-scan run and runs
+// the existing GitOps fix pass over its findings. The fix pass posts its own
+// combined report to the same release.qa_post parent task and, as its LAST step,
+// runs the video recording (proof the final state is fixed) — see aiFixRunJob's
+// full_scan branch. Requires AI_FIX_MODULE_ENABLED=true in the worker env.
+//
+//   POST /webhooks/ted/full-scan/fix   { runId }
+//
+// Auth: X-TED-Webhook-Secret.
+// ============================================================================
+webhookRouter.post("/ted/full-scan/fix", async (req: Request, res: Response) => {
+  console.log("\n--- INCOMING TED WEBHOOK (FULL SCAN: FIX) ---")
+
+  const payload = parseTedWebhookBody(req.body)
+  if (!payload) {
+    return res.status(400).json({ error: "Failed: No body received." })
+  }
+
+  // Auth — same secret check as every other receiver.
+  const secretFromHeader =
+    req.headers["x-ted-webhook-secret"] || req.headers["x-webhook-secret"]
+  const secretFromBody = payload?.headers?.["X-TED-Webhook-Secret"]
+  const secret = secretFromHeader || secretFromBody
+  const expectedSecret = process.env.TED_WEBHOOK_SECRET
+  if (!expectedSecret) {
+    return res.status(500).json({ error: "Server misconfigured" })
+  }
+  if (secret !== expectedSecret) {
+    return res.status(401).json({ error: "Unauthorized: Invalid secret" })
+  }
+
+  if (payload.event === "PING_TEST") {
+    return res.status(200).json({
+      status: 200,
+      statusText: "OK",
+      message: "pong: QACC full-scan fix endpoint is alive",
+      timestamp: new Date().toISOString(),
+      data: { acknowledged: true, event: "PING_TEST" },
+    })
+  }
+
+  const runId =
+    payload.runId ||
+    payload.qaRunId ||
+    payload.data?.runId ||
+    payload.data?.qaRunId ||
+    payload.trigger?.runId ||
+    null
+  if (!runId) {
+    return res.status(400).json({
+      error: "Missing runId. Provide the qaRunId returned by /webhooks/ted/full-scan.",
+    })
+  }
+
+  // The run must exist, be a full_scan, and have a report task to post the fix
+  // results back to.
+  const { data: run } = await supabase
+    .from("qa_runs")
+    .select("id, run_type, status, ted_task_id")
+    .eq("id", String(runId))
+    .single()
+  if (!run) {
+    return res.status(404).json({ error: `No run found with id ${runId}.` })
+  }
+  if (run.run_type !== "full_scan") {
+    return res.status(409).json({
+      error: "This endpoint only fixes full_scan runs.",
+    })
+  }
+  if (!run.ted_task_id) {
+    return res.status(409).json({
+      error: "This run has no TED report task to post fix results to.",
+    })
+  }
+
+  try {
+    const { qaQueue } = require("../lib/queue")
+    await qaQueue.add(
+      "ai_fix_run",
+      { runId: String(runId), tedTaskId: String(run.ted_task_id) },
+      { attempts: 3, backoff: { type: "exponential", delay: 5000 } },
+    )
+  } catch (queueErr) {
+    console.error("❌ Failed to enqueue full-scan fix:", queueErr)
+    return res.status(500).json({ error: "Failed to queue the fix." })
+  }
+
+  // A comment so the operator sees the fix was accepted (no status change).
+  if (process.env.TED_API_TOKEN) {
+    await postTedComment(
+      String(run.ted_task_id),
+      `<p>🛠️ <strong>Fix module started</strong> for this full scan. The fix results — and the final video recording — will be posted here when it finishes.</p>`,
+      `ext:qacc-fullscan-fix-queued-${runId}`,
+      String(runId),
+    ).catch(() => {})
+  }
+
+  console.log(`✅ Full-scan fix queued for run ${runId}.`)
+  return res.status(200).json({
+    status: 200,
+    statusText: "OK",
+    message: "Full-scan fix queued successfully",
+    timestamp: new Date().toISOString(),
+    data: { acknowledged: true, runId, action: "fix" },
+  })
+})
