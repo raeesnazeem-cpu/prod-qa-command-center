@@ -537,6 +537,18 @@ export async function markAllTedTasksCompleted(
       .eq("id", runId)
       .single()
 
+    // Full scans are ad-hoc and must NEVER change the report task's status. Their
+    // flow is report-only (scan) then the fix pass + deferred video barrier; there
+    // is no "mark Completed" step. The run slot was already released above, so
+    // simply stop here without touching any TED status.
+    if (run?.run_type === "full_scan") {
+      logger.info(
+        { runId },
+        "full_scan run — skipping TED status completion (a full scan never changes task status).",
+      )
+      return
+    }
+
     const parent = parentTaskId || (run?.ted_task_id as string | undefined)
 
     // Post-release only: close the human-owned checklist subtasks (email/backup/
@@ -1737,7 +1749,9 @@ const runKind = (runType?: string | null): string =>
     ? "Post-Release"
     : runType === "internal_qa"
       ? "Internal"
-      : "Pre-Release"
+      : runType === "full_scan"
+        ? "Full Scan"
+        : "Pre-Release"
 
 // Scan-time screenshot preparation (Task 12). For every finding whose media the
 // report will inline — vision-verdict passes (their screenshot) and image_quality
@@ -1924,8 +1938,15 @@ export async function postSectionedReport(opts: {
   }
 
   const kind = runKind(runMeta?.run_type)
+  // Full scans are ad-hoc and may run many times a day, so stamp each report with
+  // the date/time to make every run individually identifiable.
+  const fullScanStamp =
+    runMeta?.run_type === "full_scan"
+      ? `Generated: ${new Date().toISOString()}<br>`
+      : ""
   const titleHtml =
     `<strong>${kind} QA — Report</strong><br>` +
+    fullScanStamp +
     (runMeta?.site_url ? `Site: ${esc(runMeta.site_url)}<br>` : "")
   // High-level test-case roll-up: one line per check (subtask) → Passed/Failed,
   // failed first (sections are already sorted failed→passed). Deliberately icon-
@@ -2344,8 +2365,12 @@ export async function postFinalReportToTED(
     // once it has both the findings and the applied fixes. Posting an
     // issues-only report here would only duplicate it, so we DEFER — but still
     // tell the caller there are issues so it queues the fix job.
+    // Full scan splits Test and Fix: the scan ALWAYS publishes its own report and
+    // never defers to a fix pass (the fix is a separate, on-demand action that
+    // posts its own report later). So skip the defer branch for full_scan.
+    const isFullScan = runMeta?.run_type === "full_scan"
     const moduleOn = process.env.AI_FIX_MODULE_ENABLED === "true"
-    if (shown.length > 0 && moduleOn) {
+    if (shown.length > 0 && moduleOn && !isFullScan) {
       logger.info(
         { runId, issues: shown.length },
         "Issues found + AI-fix on; deferring the section-wise report to the fix pass.",

@@ -1,6 +1,7 @@
 import { Job } from "bullmq"
 import { Finding } from "@qacc/shared"
 import { supabase } from "../lib/supabase"
+import { qaQueue } from "../lib/queue"
 import { completeText, describeImage } from "../lib/aiFallback"
 import { resolveBetaSiteRepo, getReviewsWidgetId } from "../lib/tedClient"
 import { provisionReviewsPage, reviewsEmbedSnippet } from "../lib/reviewsWidgetFix"
@@ -2400,6 +2401,29 @@ export async function processAiFixRunJob(job: Job) {
 
   // AI-fix step timings → extra table in the worker log (analytics only).
   saveAiFixTimingReport(runId, Date.now() - aiFixJobStart)
+
+  // Full scan: the fix module has finished, so run video recording as its LAST
+  // step — proof the site's final (post-fix) state is fixed, irrespective of any
+  // subtasks. A full scan never changes the report task's status, so we do NOT
+  // call markAllTedTasksCompleted; instead we enqueue the video barrier directly
+  // in full_scan mode (it posts the recording proof to the parent task without
+  // flipping its status).
+  if (run?.run_type === "full_scan") {
+    await qaQueue
+      .add(
+        "video_recording_check",
+        { runId, tedTaskId, fullScan: true },
+        { removeOnComplete: true, attempts: 5 },
+      )
+      .catch((e: any) =>
+        logger.error(
+          { runId, error: e?.message },
+          "full_scan: failed to enqueue video_recording_check after fix.",
+        ),
+      )
+    logger.info({ runId }, "full_scan: fix report posted; video recording enqueued as the final step.")
+    return
+  }
 
   // The fix pass is done — close out every TED
   // task and subtask for this run as Completed so nothing is left pending and the
