@@ -3729,3 +3729,109 @@ webhookRouter.post("/ted/full-scan/fix", async (req: Request, res: Response) => 
     data: { acknowledged: true, runId, action: "fix" },
   })
 })
+
+// ============================================================================
+// TED Webhook Receiver: FULL SCAN — PROGRESS (polling)
+// ----------------------------------------------------------------------------
+// TED polls this every ~5s (using the qaRunId returned by /webhooks/ted/full-scan)
+// to drive a live progress bar while a scan runs. Read-only: it never changes the
+// run or posts to TED.
+//
+// The response is PHASE-SCOPED so the Scan and Fix bars never blend into one:
+// `data.percent` (0-100) is always relative to the CURRENT phase, and `data.phase`
+// says which bar it belongs to. Today only the "scan" phase is tracked — Fix
+// progress needs new persistence (ai_fix_status/ai_fix_total/ai_fix_done on
+// qa_runs) that isn't built yet; see the FIX PHASE note below for where it plugs
+// in. Until then, once the scan finishes the run sits at scan/100 completed.
+//
+//   GET /webhooks/ted/full-scan/:runId/progress
+//
+// Auth: X-TED-Webhook-Secret (header), identical to the other receivers.
+// ============================================================================
+webhookRouter.get(
+  "/ted/full-scan/:runId/progress",
+  async (req: Request, res: Response) => {
+    // Auth — same secret check as every other receiver (header only for a GET).
+    const secret =
+      req.headers["x-ted-webhook-secret"] || req.headers["x-webhook-secret"]
+    const expectedSecret = process.env.TED_WEBHOOK_SECRET
+    if (!expectedSecret) {
+      return res.status(500).json({ error: "Server misconfigured" })
+    }
+    if (secret !== expectedSecret) {
+      return res.status(401).json({ error: "Unauthorized: Invalid secret" })
+    }
+
+    const runId = req.params.runId
+    if (!runId) {
+      return res.status(400).json({ error: "Missing runId in the path." })
+    }
+
+    const { data: run } = await supabase
+      .from("qa_runs")
+      .select(
+        "id, run_type, status, pages_processed, pages_total, started_at, completed_at",
+      )
+      .eq("id", String(runId))
+      .single()
+    if (!run) {
+      return res.status(404).json({ error: `No run found with id ${runId}.` })
+    }
+    if (run.run_type !== "full_scan") {
+      return res
+        .status(409)
+        .json({ error: "This endpoint only reports on full_scan runs." })
+    }
+
+    // Issues found so far — "open" findings are the actionable defects (the same
+    // set the fix module later pulls). Grows as the scan discovers problems.
+    const { count: issuesFound } = await supabase
+      .from("findings")
+      .select("id", { count: "exact", head: true })
+      .eq("run_id", String(runId))
+      .eq("status", "open")
+
+    const pagesTotal = run.pages_total ?? 0
+    const pagesProcessed = run.pages_processed ?? 0
+
+    // ---- SCAN PHASE (the only tracked phase today) --------------------------
+    // Percent is pages-based; force 100 once the run reaches a terminal state so
+    // a rounding gap can't leave the bar stuck at 99.
+    const terminal = ["completed", "failed", "timed_out", "cancelled"].includes(
+      run.status,
+    )
+    let percent =
+      pagesTotal > 0
+        ? Math.round((pagesProcessed / pagesTotal) * 100)
+        : run.status === "running"
+          ? 0
+          : 100
+    if (run.status === "completed") percent = 100
+    percent = Math.max(0, Math.min(100, percent))
+
+    // ---- FIX PHASE (not tracked yet) ----------------------------------------
+    // When fix progress is added: if ai_fix_status is queued/running/done, set
+    //   phase = "fix"; percent = round(ai_fix_done / ai_fix_total * 100)
+    // and return that instead, so the Fix bar is its own 0-100 and the leftover
+    // scan 100% on this shared row never bleeds into it.
+    const phase = "scan"
+
+    return res.status(200).json({
+      status: 200,
+      statusText: "OK",
+      timestamp: new Date().toISOString(),
+      data: {
+        runId: run.id,
+        phase, // "scan" | (future) "fix" — which bar `percent` belongs to
+        runStatus: run.status, // TED stops polling on a terminal status
+        done: terminal,
+        percent, // 0-100, scoped to `phase`
+        pagesProcessed,
+        pagesTotal,
+        issuesFound: issuesFound ?? 0,
+        startedAt: run.started_at ?? null,
+        completedAt: run.completed_at ?? null,
+      },
+    })
+  },
+)
