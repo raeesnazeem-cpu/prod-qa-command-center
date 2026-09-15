@@ -1750,31 +1750,34 @@ const INTERNAL_QA_SECTIONS: { matchers: string[]; checks: string[] }[] = [
 ]
 
 // =====================================================================
-// FULL SCAN (run_type = 'full_scan') — the complete check universe.
+// FULL SCAN (run_type = 'full_scan') — the curated standalone check suite.
 // ---------------------------------------------------------------------
-// A full scan runs EVERY check QACC knows about against one URL (a superset of
-// pre/internal/post). These are the DISPATCH GATE KEYS the worker actually
-// switches on — apps/worker/src/jobs/crawlPageJob.ts (`enabledChecks.includes`),
-// the standalone API checks (project_plan, paid_media), plus the run-level
-// cross_browser pass. Keep this list in sync with those gates.
+// A full scan runs this suite against one URL. These are DISPATCH GATE KEYS the
+// worker switches on — apps/worker/src/jobs/crawlPageJob.ts
+// (`enabledChecks.includes`) plus the standalone API checks (project_plan,
+// paid_media). This list drives ONLY full_scan runs; pre/internal/post build
+// their own enabled_checks and are unaffected.
 //
-// Checks that need inputs a URL-only scan may lack (backend_check → WP password,
-// url_tab_compare → a live URL, woocommerce → the is_woocommerce flag) are kept
-// in on purpose: each self-lapses cleanly ("could not complete — missing input")
-// rather than failing the run, so a full scan stays honest about what it could
-// not verify.
+// Deliberately EXCLUDED (see the TED full-scan spec):
+//   • accessibility (the dummy+spelling+forms+meta_tags composite) — the real
+//     accessibility check is accessibility_check (UserWay pro/basic detection),
+//     which is the one kept. spelling stays via its OWN standalone gate below, so
+//     dropping the composite does not affect spelling.
+//   • performance — redundant with page_speed (PageSpeed analytics), kept below.
+//   • url_tab_compare, verify_plugin_updates, backend_check, live_site_link,
+//     woocommerce — out of scope for a standalone URL scan.
+//   • meta — dead (no dispatch gate) and its accessibility-composite variant
+//     (meta_tags) is removed with the composite above.
+//   • cross_browser — and anything else that drives LambdaTest — excluded.
 //
-// video_recording is deliberately ABSENT: it is not a scan check but the proof
-// step that runs as the LAST action of the Fix module (see aiFixRunJob) — a full
-// scan on its own never records video.
+// video_recording is ABSENT too: it is not a scan check but the proof step that
+// runs as the LAST action of the Fix module (see aiFixRunJob).
 const FULL_SCAN_CHECKS = [
   // Standalone API checks (enqueued directly by startRunJob).
   "project_plan",
   "paid_media",
   // All-pages / composite page checks.
   "visual_regression",
-  "accessibility",
-  "performance",
   "spelling",
   "console_errors",
   "seo",
@@ -1782,12 +1785,12 @@ const FULL_SCAN_CHECKS = [
   "dead_links",
   "learn_more_buttons",
   "url_matching",
-  "url_tab_compare",
   "contact_form",
   "false_breakpoint",
   "functionality_check",
   "image_quality",
   "grammar",
+  // The real accessibility check — UserWay (pro/basic) installation detection.
   "accessibility_check",
   // Homepage-scoped checks.
   "privacy_policy",
@@ -1799,24 +1802,16 @@ const FULL_SCAN_CHECKS = [
   "favicon",
   "chatbot_consultation",
   "text_share",
-  "verify_plugin_updates",
   "social_share_heading",
   "logo_chatbot",
   "gsr_check",
-  "backend_check",
   "review_reputation_check",
   "gbp_check",
   "blog_verification",
   "hamburger_menu",
   // Live/released-site checks.
-  "live_site_link",
   "plugin_number",
   "page_speed",
-  "meta",
-  // WooCommerce (only fires when the run's is_woocommerce flag is set).
-  "woocommerce",
-  // Run-level (once, at closeout).
-  "cross_browser",
 ]
 
 const normalizeTitle = (s: unknown): string =>
