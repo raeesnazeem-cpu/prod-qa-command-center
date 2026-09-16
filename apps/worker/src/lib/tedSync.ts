@@ -870,7 +870,7 @@ async function renderImageGrid(
 // <p>/<strong>/<ul>/<li> cleanly (the format the TED team itself uses). So we
 // use plain grouped lists, one heading per check.
 
-const FRIENDLY: Record<string, string> = {
+export const FRIENDLY: Record<string, string> = {
   dead_links: "Dead Links & Broken Anchors",
   broken_links: "Broken Links",
   external_links: "External Links",

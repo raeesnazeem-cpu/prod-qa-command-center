@@ -232,6 +232,14 @@ export function recordAiFixTiming(
 }
 
 /**
+ * Read the AI-fix step timings buffered for a run (before it is cleared by
+ * saveAiFixTimingReport). Used to persist per-check fix durations to the DB.
+ */
+export function getAiFixTimings(runId: string): CheckTiming[] {
+  return aiFixTimings.get(runId) || []
+}
+
+/**
  * Log the AI-fix step-timing table to the worker log and clear the buffer.
  * `totalWallMs` is the whole ai_fix_run job's wall-clock (steps are largely
  * serial here, so it should roughly equal the sum). Analytics only.

@@ -35,6 +35,7 @@ import {
   saveAiFixTimingReport,
   logScanTimingRecap,
 } from "../lib/timingCollector"
+import { persistFixCheckResults } from "../lib/runResults"
 import {
   seedPrivacyPolicyPage,
   seedPrivacyPolicyPageClassic,
@@ -553,8 +554,42 @@ export async function processAiFixRunJob(job: Job) {
     }
   }
 
+  // ---- Fix progress (polled by TED via the /progress endpoint) --------------
+  // The scan and fix share ONE qa_runs row whose own status stays "completed"
+  // from the scan, so these ai_fix_* columns are the ONLY signal that a fix is
+  // running and how far along it is. total = failed checks this fix works on;
+  // ai_fix_done = findings decided so far (drives the % bar); ai_fix_fixed =
+  // edits actually applied (committed). Every write is best-effort — a failure
+  // must never block the fix.
+  const fixTotal = Math.min(findings?.length || 0, MAX_FINDINGS)
+  const writeFixProgress = (final: boolean) =>
+    supabase
+      .from("qa_runs")
+      .update({
+        ai_fix_status: final ? "done" : "running",
+        ai_fix_total: fixTotal,
+        ai_fix_done: final ? fixTotal : Math.min(analysis.length, fixTotal),
+        ai_fix_fixed: committed,
+        ...(final ? { ai_fix_completed_at: new Date().toISOString() } : {}),
+      })
+      .eq("id", runId)
+      .then(undefined, () => {})
+  await supabase
+    .from("qa_runs")
+    .update({
+      ai_fix_status: "running",
+      ai_fix_total: fixTotal,
+      ai_fix_done: 0,
+      ai_fix_fixed: 0,
+      ai_fix_started_at: new Date().toISOString(),
+      ai_fix_completed_at: null,
+    })
+    .eq("id", runId)
+    .then(undefined, () => {})
+
   for (const f of (findings || []).slice(0, MAX_FINDINGS)) {
     flushIterTiming()
+    void writeFixProgress(false)
     _iterStart = Date.now()
     _iterFactor = f.check_factor || "unknown"
     const pageUrl = pageUrlById.get(f.page_id) || ""
@@ -1950,6 +1985,7 @@ export async function processAiFixRunJob(job: Job) {
   // one finding at a time — never concurrently, or git corrupts. Each triage
   // result carries everything the apply step needs from Phase A.
   for (const t of triaged) {
+    void writeFixProgress(false)
     const { f, pageUrl, repoCtx } = t
     let category = t.category
     let fix = t.fix
@@ -2398,6 +2434,15 @@ export async function processAiFixRunJob(job: Job) {
   )
 
   if (workDir) await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {})
+
+  // Fix progress → done, with the final tally (ai_fix_fixed = committed). TED's
+  // poll now returns phase:"fix", percent:100, fixed/notFixed.
+  await writeFixProgress(true)
+
+  // Persist the per-check fix results (fixed/not_fixed + duration) for the TED
+  // Site Audit history — MUST run before saveAiFixTimingReport clears the
+  // in-memory ai-fix timings. Best-effort.
+  await persistFixCheckResults(runId, analysis)
 
   // AI-fix step timings → extra table in the worker log (analytics only).
   saveAiFixTimingReport(runId, Date.now() - aiFixJobStart)

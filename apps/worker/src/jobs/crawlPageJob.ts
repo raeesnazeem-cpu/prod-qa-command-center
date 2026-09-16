@@ -61,6 +61,7 @@ import {
   recordTiming,
   saveTimingReport,
 } from "../lib/timingCollector"
+import { persistScanCheckResults } from "../lib/runResults"
 import type { ThemeType } from "../lib/themeType"
 import pLimit from "p-limit"
 import pino from "pino"
@@ -1280,6 +1281,11 @@ export async function processCrawlPageJob(job: Job) {
           )
           recordTiming(runId, "cross_browser", run.site_url, Date.now() - cbStart)
 
+          // Persist the per-check result snapshot (pass/fail + duration) for the
+          // TED Site Audit history — MUST run before saveTimingReport clears the
+          // in-memory timings. Best-effort.
+          await persistScanCheckResults(runId)
+
           // Analytics only: log + persist per-check timings. Never posted to TED.
           await saveTimingReport(runId)
 
@@ -1314,6 +1320,11 @@ export async function processCrawlPageJob(job: Job) {
           logger.error("Cross-browser check failed:", e),
         )
         recordTiming(runId, "cross_browser", run.site_url, Date.now() - cbStart)
+
+        // Persist the per-check result snapshot (pass/fail + duration) for the
+        // TED Site Audit history — MUST run before saveTimingReport clears the
+        // in-memory timings. Best-effort.
+        await persistScanCheckResults(runId)
 
         // Analytics only: log + persist per-check timings. Never posted to TED.
         await saveTimingReport(runId)
