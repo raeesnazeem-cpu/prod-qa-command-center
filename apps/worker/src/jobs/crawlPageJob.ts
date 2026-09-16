@@ -1309,6 +1309,16 @@ export async function processCrawlPageJob(job: Job) {
             // were real issues. All-passed → say so and skip the fix.
             await maybeTriggerAiFix(runId, runCheck.ted_task_id, report)
           }
+
+          // Full scans have no task dependency: one triggered without a
+          // ted_task_id never enters the block above, so maybeTriggerAiFix —
+          // the ONLY place a full_scan releases the global run slot — is never
+          // reached and the slot leaks until the staleness steal, blocking the
+          // next scan. Release it here too. Idempotent: a no-op if it was
+          // already freed (ted_task_id path) or is held by another run.
+          if (run.run_type === "full_scan") {
+            await releaseRunSlot(runId).catch(() => {})
+          }
         }
       } else if (isComplete) {
         logger.info({ runId }, "Run marked as completed")
@@ -1353,6 +1363,16 @@ export async function processCrawlPageJob(job: Job) {
           // Only trigger the AI fix when the report actually posted AND there
           // were real issues. All-passed → say so and skip the fix.
           await maybeTriggerAiFix(runId, finalRun.ted_task_id, report)
+        }
+
+        // Full scans have no task dependency: one triggered without a
+        // ted_task_id never enters the block above, so maybeTriggerAiFix — the
+        // ONLY place a full_scan releases the global run slot — is never reached
+        // and the slot leaks until the staleness steal, blocking the next scan.
+        // Release it here too. Idempotent: a no-op if it was already freed
+        // (ted_task_id path) or is held by another run.
+        if (run.run_type === "full_scan") {
+          await releaseRunSlot(runId).catch(() => {})
         }
       }
 
