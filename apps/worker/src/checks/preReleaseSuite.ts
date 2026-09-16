@@ -49,6 +49,146 @@ const logger = pino({
 // Memory lock to prevent multiple pages from taking screenshots at the exact same time
 const contactFormScreenshotLocks = new Set<string>()
 
+// ===========================================================================
+// Shared page-load hardening for the visual checks (call-now, sticky header,
+// privacy policy footer/page).
+//
+// These checks used to navigate with `domcontentloaded` and screenshot almost
+// immediately. On real sites that is too early: the header/nav, the floating
+// call button, and the footer are frequently injected by JS AFTER the initial
+// HTML, and cookie/newsletter/chat popups slide in over the top. Screenshotting
+// then produced FALSE negatives ("No header", "No Call Now button", "Privacy
+// Policy not found") against pages that actually have those elements.
+//
+// `gotoStable` fixes both causes: it kills popups (before AND as they appear),
+// waits for the page to actually finish loading (load + network idle), and lets
+// late layout settle before the caller reads the DOM / takes the screenshot.
+// ===========================================================================
+
+// Overlay selectors to hide (cookie banners, newsletter/exit popups, chat
+// widgets, generic modal backdrops). Mirrors the Puppeteer injectPopupKiller in
+// lib/puppeteerBrowser.ts so both capture paths behave the same.
+const POPUP_HIDE_SELECTORS = [
+  "#cookie-consent", ".cookie-banner", ".cc-banner", ".cc-window",
+  '[class*="cookie-notice"]', '[class*="cookie-consent"]', '[id*="cookie"]',
+  ".gdpr-banner", "#gdpr", "#gdpr-consent", ".cookie-notice",
+  "#CybotCookiebotDialog", "#onetrust-consent-sdk", ".qc-cmp2-container",
+  '[id*="cookiebot"]', '[class*="cookiebot"]',
+  ".popup-overlay", ".modal-overlay", '[class*="newsletter-popup"]',
+  '[class*="exit-intent"]', '[class*="email-popup"]',
+  "#intercom-container", "#intercom-frame",
+  ".tawk-widget", "#tawk-tooltip", '[class*="tawk"]',
+  "#drift-widget", "#drift-frame-controller",
+  ".crisp-client", "#crisp-chatbox",
+  '[class*="livechat"]', '[id*="livechat"]',
+  '[class*="modal-backdrop"]', '[class*="overlay"][class*="popup"]',
+]
+
+// "Accept" / "Close" / "Dismiss" controls we actively click to dismiss consent
+// and promo popups.
+const POPUP_ACCEPT_SELECTORS = [
+  '[class*="accept"]', '[id*="accept"]',
+  'button[class*="agree"]', ".cc-accept", ".cc-btn",
+  '[class*="cookie"] button', '[class*="consent"] button',
+  "#onetrust-accept-btn-handler",
+  "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+  'button[class*="dismiss"]', '[class*="close-popup"]',
+]
+
+/**
+ * Install the popup killer. MUST be called before `page.goto()` so the init
+ * script runs before the page's own scripts. Hides known popup selectors,
+ * clicks accept/close buttons, restores body scroll, and re-runs via a
+ * MutationObserver plus timed sweeps for popups that appear after a delay.
+ */
+async function installPopupKiller(page: PlaywrightPage): Promise<void> {
+  await page
+    .addInitScript(
+      (sel: { hide: string[]; accept: string[] }) => {
+        const killPopups = () => {
+          try {
+            let style = document.getElementById(
+              "qa-popup-killer",
+            ) as HTMLStyleElement | null
+            if (!style) {
+              style = document.createElement("style")
+              style.id = "qa-popup-killer"
+              style.textContent =
+                sel.hide.join(",\n") +
+                " { display:none !important; visibility:hidden !important; opacity:0 !important; pointer-events:none !important; z-index:-9999 !important; }"
+              const target = document.head || document.documentElement
+              if (target) target.appendChild(style)
+            }
+            sel.accept.forEach((s) => {
+              document.querySelectorAll(s).forEach((btn) => {
+                try {
+                  ;(btn as HTMLElement).click()
+                } catch {}
+              })
+            })
+            if (document.body) document.body.style.overflow = ""
+            if (document.documentElement)
+              document.documentElement.style.overflow = ""
+          } catch {}
+        }
+        if (document.readyState !== "loading") killPopups()
+        document.addEventListener("DOMContentLoaded", killPopups)
+        window.addEventListener("load", () => {
+          killPopups()
+          setTimeout(killPopups, 1500)
+          setTimeout(killPopups, 3500)
+        })
+        const observer = new MutationObserver(killPopups)
+        const startObserving = () => {
+          const target = document.body || document.documentElement
+          if (target) observer.observe(target, { childList: true, subtree: true })
+        }
+        if (document.body) startObserving()
+        else document.addEventListener("DOMContentLoaded", startObserving)
+      },
+      { hide: POPUP_HIDE_SELECTORS, accept: POPUP_ACCEPT_SELECTORS },
+    )
+    .catch(() => {})
+}
+
+/**
+ * Navigate to `url` with popups pre-killed, then wait for the page to actually
+ * finish loading before the caller reads the DOM or screenshots. Swallows
+ * navigation errors (returns null) and never throws, matching the best-effort
+ * `.goto(...).catch(() => {})` these checks previously used. Returns the goto
+ * response so callers can still inspect the HTTP status.
+ */
+async function gotoStable(
+  page: PlaywrightPage,
+  url: string,
+  opts: {
+    waitUntil?: "load" | "domcontentloaded" | "networkidle" | "commit"
+    timeout?: number
+    networkIdleTimeout?: number
+    settleMs?: number
+  } = {},
+): Promise<any> {
+  await installPopupKiller(page)
+  const resp = await page
+    .goto(url, {
+      waitUntil: opts.waitUntil ?? "load",
+      timeout: opts.timeout ?? 30000,
+    })
+    .catch(() => null)
+  // Let in-flight requests settle so late-injected nav/footer/call buttons and
+  // hero media are present. Many sites never fully idle (analytics polling), so
+  // this is capped and best-effort.
+  await page
+    .waitForLoadState("networkidle", {
+      timeout: opts.networkIdleTimeout ?? 8000,
+    })
+    .catch(() => {})
+  // Final stabilization for timer-delayed popups the observer just dismissed and
+  // any layout shift they leave behind.
+  await page.waitForTimeout(opts.settleMs ?? 1200).catch(() => {})
+  return resp
+}
+
 /**
  * =========================================================================
  * 2️⃣ CHECK 2: Privacy Policy Page Check
@@ -92,9 +232,8 @@ export async function checkPrivacyPolicy(
       try {
         const page = await context.newPage()
         await page.setViewportSize({ width: 1920, height: 1080 })
-        await page
-          .goto(url, { waitUntil: "networkidle", timeout: 25000 })
-          .catch(() => {})
+        // Kill popups + wait for the footer to actually render before reading it.
+        await gotoStable(page, url, { waitUntil: "networkidle", timeout: 25000 })
 
         let footerHasLink = false
         let screenshotUrl = ""
@@ -171,7 +310,7 @@ export async function checkPrivacyPolicy(
         const checkoutUrl = url.endsWith("/")
           ? `${url}checkout`
           : `${url}/checkout`
-        const resp = await page.goto(checkoutUrl, {
+        const resp = await gotoStable(page, checkoutUrl, {
           waitUntil: "networkidle",
           timeout: 15000,
         })
@@ -221,7 +360,7 @@ export async function checkPrivacyPolicy(
         const policyUrl = url.endsWith("/")
           ? `${url}privacy-policy`
           : `${url}/privacy-policy`
-      await page.goto(policyUrl, { waitUntil: "networkidle", timeout: 15000 })
+      await gotoStable(page, policyUrl, { waitUntil: "networkidle", timeout: 15000 })
       let policyText = await page.evaluate(() => document.body.innerText)
 
       const startMatch = policyText.match(/Privacy Policy/i)
@@ -975,14 +1114,16 @@ export async function checkTopBarAndStickyHeader(
     if (onProgress)
       await onProgress(10, "Navigating to homepage to check top bar...")
 
-    await newPage
-      .goto(url, { waitUntil: "domcontentloaded", timeout: 30000 })
-      .catch(() => {})
+    // Kill popups + wait for the page to fully load. A cookie/newsletter overlay
+    // or a JS-hydrated header used to make this screenshot before the real
+    // header existed, producing a false "no header found".
+    await gotoStable(newPage, url, { waitUntil: "load", timeout: 30000 })
 
-    // Wait for the header itself rather than a blind 5 s — it's what we
-    // screenshot and measure. Capped so a headerless page fails fast.
+    // Wait for the header itself — it's what we screenshot and measure. Give
+    // late-hydrated headers room to attach; capped so a headerless page still
+    // fails fast.
     await newPage
-      .waitForSelector(headerSelector, { timeout: 5000, state: "attached" })
+      .waitForSelector(headerSelector, { timeout: 8000, state: "attached" })
       .catch(() => {})
     if (onProgress) await onProgress(40, "Taking screenshot of the header...")
 
@@ -2193,8 +2334,11 @@ export async function checkCallnowLinks(
     page = await context.newPage()
 
     if (onProgress) await onProgress(20, "Loading the page to look for a Call Now button...")
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {})
-    await page.waitForTimeout(800)
+    // Kill popups + wait for full load. Floating Call Now buttons are commonly
+    // injected by JS after the initial HTML, so the old domcontentloaded + 800ms
+    // wait screenshotted (and scanned) before the button existed → false "no
+    // Call Now button".
+    await gotoStable(page, url, { waitUntil: "load", timeout: 45000 })
 
     // Collect every tel: link on the page (case-insensitive), with its number.
     const tels: { href: string; number: string }[] = await page
