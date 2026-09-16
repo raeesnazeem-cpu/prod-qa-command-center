@@ -957,76 +957,26 @@ const titleCase = (s: string) =>
 const esc = (s: any) =>
   String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
-// A "tool lapse" is a QACC-internal failure/skip (an errored or skipped check,
-// missing credentials, timeouts, AI errors) — NOT a real site defect. These are
-// kept OUT of every TED report so QACC's own hiccups never appear unprofessional.
-// Matches only phrases QACC itself emits; real site findings (e.g. "Hero video
-// failed to load") are left untouched.
-export function isToolLapseFinding(f: any): boolean {
-  const t = String(f?.title || "").toLowerCase()
-  const d = String(f?.description || "").toLowerCase()
-  const s = `${t} ${d}`
-  return (
-    /check (failed|error)\b/.test(t) ||
-    /failed or timed out/.test(t) ||
-    /(check )?skipped/.test(t) ||
-    /not configured|no password|was not provided/.test(s) ||
-    /process aborted gracefully/.test(d) ||
-    /encountered an (unexpected )?error/.test(d) ||
-    /encountered a timeout/.test(d) ||
-    /request failed with status code/.test(d) ||
-    /google_places_api_key/.test(s) ||
-    /could not obtain|ai triage failed/.test(s)
-  )
-}
+// Finding classification (tool lapse / clean pass / informational / real
+// defect) now lives in @qacc/shared, so the report renderer here and the
+// TED-facing progress endpoint in apps/api judge a run by exactly the same
+// rules. Re-exported because callers across the worker import these from this
+// module.
+import {
+  isToolLapseFinding,
+  isCleanPassFinding,
+  isInformationalFinding,
+  isRealDefect,
+  VISION_VERDICT_CHECKS,
+} from "@qacc/shared"
 
-// A "clean pass" sentinel is a finding some checks insert to record that they
-// ran and found nothing (e.g. "No accessibility issues found", "No grammar
-// issues found"). It is NOT a real defect, so it must not be counted as an
-// issue when deciding whether a check passed. Kept separate from tool lapses,
-// which are QACC-internal errors rather than clean passes.
-export function isCleanPassFinding(f: any): boolean {
-  const t = String(f?.title || "").toLowerCase()
-  const d = String(f?.description || "").toLowerCase()
-  const s = `${t} ${d}`
-  const NOUN = "issue|issues|problem|problems|error|errors|break|breaks|violation|violations|mismatch|mismatches|difference|differences|defect|defects"
-  const VERB = "found|detected|triggered|present|identified|were|was"
-  return (
-    // "no <noun> ... <verb>" — e.g. "no issues found", "no ... errors ... were triggered"
-    new RegExp(`\\bno\\b[^.!?]{0,80}\\b(${NOUN})\\b[^.!?]{0,40}\\b(${VERB})\\b`).test(s) ||
-    /\bno common\b[^.!?]{0,80}\b(detected|found)\b/.test(s) ||
-    /\bnone (found|detected)\b/.test(s) ||
-    // pass-style TITLES stating absence without a trailing verb, e.g.
-    // "Functionality: no interaction errors or breaks"
-    new RegExp(`\\bno\\b[^.!?]{0,40}\\b(${NOUN})\\b(\\s+or\\s+\\w+)?\\s*$`).test(t)
-  )
-}
-
-// Some checks emit a purely INFORMATIONAL finding every run (e.g. plugin_number
-// reports the detected plugin count for a human to eyeball). It is not a defect
-// and not a "no issues found" sentinel — treat it as a pass that surfaces the
-// fact (the count), never as an issue.
-// Vision-verdict checks decide pass/fail from an AI-vision read of a screenshot.
-// For these a PASS must carry its evidence (the screenshot + the vision reason),
-// and a check that produced NO finding must never be reported as a silent pass —
-// there is nothing verified to pass on.
-const VISION_VERDICT_CHECKS = new Set(["logo_chatbot", "footer_logo"])
-
-const INFORMATIONAL_CHECKS = new Set(["plugin_number", "video_recording"])
-export function isInformationalFinding(f: any): boolean {
-  return INFORMATIONAL_CHECKS.has(f?.check_factor) && !isToolLapseFinding(f)
-}
-
-// A finding counts as a real site defect only if it is not a QACC tool lapse, a
-// clean-pass sentinel, or a purely informational finding. Used for accurate
-// per-check pass/fail (and by the video_recording barrier to decide whether all
-// other checks passed).
-export function isRealDefect(f: any): boolean {
-  return (
-    !isToolLapseFinding(f) &&
-    !isCleanPassFinding(f) &&
-    !isInformationalFinding(f)
-  )
+// Re-exported (not just imported) because callers across the worker have always
+// imported these from this module.
+export {
+  isToolLapseFinding,
+  isCleanPassFinding,
+  isInformationalFinding,
+  isRealDefect,
 }
 
 // Dead-links descriptions are a JSON array, a markdown table, or bullets.

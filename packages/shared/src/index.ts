@@ -5,3 +5,4 @@ export { CreateRunSchema } from './schemas/run.schema';
 export * from './schemas/task.schema';
 export { CreateTaskSchema } from './schemas/task.schema';
 export * from './schemas/finding.schema';
+export * from './findingVerdict';

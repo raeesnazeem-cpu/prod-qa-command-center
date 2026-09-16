@@ -6,6 +6,7 @@ import { randomUUID } from "crypto"
 import { execFile } from "child_process"
 import { promisify } from "util"
 import { transitionRunStatus } from "../lib/runControl"
+import { getCheckBreakdown } from "../lib/runCheckBreakdown"
 
 const execFileAsync = promisify(execFile)
 
@@ -3770,7 +3771,7 @@ webhookRouter.get(
     const { data: run } = await supabase
       .from("qa_runs")
       .select(
-        "id, run_type, status, pages_processed, pages_total, started_at, completed_at",
+        "id, run_type, status, pages_processed, pages_total, started_at, completed_at, enabled_checks",
       )
       .eq("id", String(runId))
       .single()
@@ -3816,6 +3817,28 @@ webhookRouter.get(
     // scan 100% on this shared row never bleeds into it.
     const phase = "scan"
 
+    // ---- PER-CHECK PASS/FAIL ------------------------------------------------
+    // "45% done" says how far along the scan is but nothing about how the site
+    // is doing, and a raw issue count says nothing about WHICH checks failed —
+    // so TED cannot tell a site with seven spelling mistakes from one with a
+    // broken contact form. This board answers that, and fills in live as checks
+    // finish.
+    //
+    // Classified by the same shared rules the end-of-run report uses, so the
+    // live counts and the final report never disagree about one run. `lapsed`
+    // is its own bucket, counted as neither passed nor failed: a check QACC
+    // could not complete established nothing about the site either way, and
+    // folding it into "failed" would blame the client for our own outage.
+    //
+    // Cached against pages_processed — see lib/runCheckBreakdown.ts for why a 5s
+    // poll must not re-read every finding.
+    const breakdown = await getCheckBreakdown(
+      String(runId),
+      (run.enabled_checks as string[]) || [],
+      pagesProcessed,
+      terminal,
+    ).catch(() => null)
+
     return res.status(200).json({
       status: 200,
       statusText: "OK",
@@ -3829,6 +3852,11 @@ webhookRouter.get(
         pagesProcessed,
         pagesTotal,
         issuesFound: issuesFound ?? 0,
+        // Omitted (rather than zeroed) when the findings could not be read — a
+        // board of zeros would read as "everything passed, nothing found".
+        ...(breakdown
+          ? { checks: breakdown.summary, checkList: breakdown.list }
+          : {}),
         startedAt: run.started_at ?? null,
         completedAt: run.completed_at ?? null,
       },
