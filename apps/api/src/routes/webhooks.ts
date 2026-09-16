@@ -1769,6 +1769,8 @@ const INTERNAL_QA_SECTIONS: { matchers: string[]; checks: string[] }[] = [
 //   • meta — dead (no dispatch gate) and its accessibility-composite variant
 //     (meta_tags) is removed with the composite above.
 //   • cross_browser — and anything else that drives LambdaTest — excluded.
+//   • visual_regression — baseline visual-diff comparison is not wanted in a
+//     standalone full-scan suite.
 //
 // video_recording is ABSENT too: it is not a scan check but the proof step that
 // runs as the LAST action of the Fix module (see aiFixRunJob).
@@ -1777,7 +1779,8 @@ const FULL_SCAN_CHECKS = [
   "project_plan",
   "paid_media",
   // All-pages / composite page checks.
-  "visual_regression",
+  // visual_regression intentionally EXCLUDED from full scan — we do not want
+  // baseline visual-diff comparisons running in the standalone full-scan suite.
   "spelling",
   "console_errors",
   "seo",
