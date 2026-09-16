@@ -3705,6 +3705,18 @@ webhookRouter.post("/ted/full-scan/fix", async (req: Request, res: Response) => 
       { runId: String(runId), tedTaskId: String(run.ted_task_id) },
       { attempts: 3, backoff: { type: "exponential", delay: 5000 } },
     )
+    // Mark the fix as queued so the progress poll flips to phase:"fix" right
+    // away (the worker sets "running" when the job starts). Best-effort.
+    await supabase
+      .from("qa_runs")
+      .update({
+        ai_fix_status: "queued",
+        ai_fix_done: 0,
+        ai_fix_fixed: 0,
+        ai_fix_completed_at: null,
+      })
+      .eq("id", String(runId))
+      .then(undefined, () => {})
   } catch (queueErr) {
     console.error("❌ Failed to enqueue full-scan fix:", queueErr)
     return res.status(500).json({ error: "Failed to queue the fix." })
@@ -3739,10 +3751,10 @@ webhookRouter.post("/ted/full-scan/fix", async (req: Request, res: Response) => 
 //
 // The response is PHASE-SCOPED so the Scan and Fix bars never blend into one:
 // `data.percent` (0-100) is always relative to the CURRENT phase, and `data.phase`
-// says which bar it belongs to. Today only the "scan" phase is tracked — Fix
-// progress needs new persistence (ai_fix_status/ai_fix_total/ai_fix_done on
-// qa_runs) that isn't built yet; see the FIX PHASE note below for where it plugs
-// in. Until then, once the scan finishes the run sits at scan/100 completed.
+// says which bar it belongs to. While a fix is queued/running/done the ai_fix_*
+// columns drive a phase:"fix" response (its own 0-100 + fixed/notFixed tally);
+// otherwise it reports the scan phase (pages-based percent). For the full stored
+// per-check history, see the /result endpoint below.
 //
 //   GET /webhooks/ted/full-scan/:runId/progress
 //
@@ -3770,7 +3782,7 @@ webhookRouter.get(
     const { data: run } = await supabase
       .from("qa_runs")
       .select(
-        "id, run_type, status, pages_processed, pages_total, started_at, completed_at",
+        "id, run_type, status, pages_processed, pages_total, started_at, completed_at, ai_fix_status, ai_fix_total, ai_fix_done, ai_fix_fixed, ai_fix_started_at, ai_fix_completed_at",
       )
       .eq("id", String(runId))
       .single()
@@ -3781,6 +3793,41 @@ webhookRouter.get(
       return res
         .status(409)
         .json({ error: "This endpoint only reports on full_scan runs." })
+    }
+
+    // ---- FIX PHASE ----------------------------------------------------------
+    // The scan and fix share ONE run row; once a fix is queued/running/done the
+    // ai_fix_* columns carry its OWN progress, so we report phase:"fix" with its
+    // own 0-100 percent — the leftover scan 100% on this row never bleeds in.
+    if (["queued", "running", "done"].includes(run.ai_fix_status as string)) {
+      const total = run.ai_fix_total ?? 0
+      const processed = run.ai_fix_done ?? 0
+      const fixed = run.ai_fix_fixed ?? 0
+      const fixDone = run.ai_fix_status === "done"
+      let fixPercent = fixDone
+        ? 100
+        : total > 0
+          ? Math.round((processed / total) * 100)
+          : 0
+      fixPercent = Math.max(0, Math.min(100, fixPercent))
+      return res.status(200).json({
+        status: 200,
+        statusText: "OK",
+        timestamp: new Date().toISOString(),
+        data: {
+          runId: run.id,
+          phase: "fix",
+          runStatus: run.ai_fix_status, // "queued" | "running" | "done"
+          done: fixDone,
+          percent: fixPercent,
+          total, // failed checks this fix works on
+          processed, // decided so far
+          fixed, // applied so far / final
+          notFixed: Math.max(0, total - fixed),
+          startedAt: run.ai_fix_started_at ?? null,
+          completedAt: run.ai_fix_completed_at ?? null,
+        },
+      })
     }
 
     // Issues found so far — "open" findings are the actionable defects (the same
@@ -3794,7 +3841,7 @@ webhookRouter.get(
     const pagesTotal = run.pages_total ?? 0
     const pagesProcessed = run.pages_processed ?? 0
 
-    // ---- SCAN PHASE (the only tracked phase today) --------------------------
+    // ---- SCAN PHASE ---------------------------------------------------------
     // Percent is pages-based; force 100 once the run reaches a terminal state so
     // a rounding gap can't leave the bar stuck at 99.
     const terminal = ["completed", "failed", "timed_out", "cancelled"].includes(
@@ -3809,20 +3856,13 @@ webhookRouter.get(
     if (run.status === "completed") percent = 100
     percent = Math.max(0, Math.min(100, percent))
 
-    // ---- FIX PHASE (not tracked yet) ----------------------------------------
-    // When fix progress is added: if ai_fix_status is queued/running/done, set
-    //   phase = "fix"; percent = round(ai_fix_done / ai_fix_total * 100)
-    // and return that instead, so the Fix bar is its own 0-100 and the leftover
-    // scan 100% on this shared row never bleeds into it.
-    const phase = "scan"
-
     return res.status(200).json({
       status: 200,
       statusText: "OK",
       timestamp: new Date().toISOString(),
       data: {
         runId: run.id,
-        phase, // "scan" | (future) "fix" — which bar `percent` belongs to
+        phase: "scan", // which bar `percent` belongs to
         runStatus: run.status, // TED stops polling on a terminal status
         done: terminal,
         percent, // 0-100, scoped to `phase`
@@ -3831,6 +3871,158 @@ webhookRouter.get(
         issuesFound: issuesFound ?? 0,
         startedAt: run.started_at ?? null,
         completedAt: run.completed_at ?? null,
+      },
+    })
+  },
+)
+
+// ============================================================================
+// TED Webhook Receiver: FULL SCAN — RESULT (per-run history record)
+// ----------------------------------------------------------------------------
+// The full structured result of a run — overall status, per-check pass/fail with
+// message + screenshot URL + duration, counts, viewport, trigger, and run
+// duration — for BOTH the scan and (if it ran) the fix. TED calls this once the
+// run/fix is done (see /progress `done`) and STORES it per client, to render the
+// Site Audit history. Read-only.
+//
+//   GET /webhooks/ted/full-scan/:runId/result
+//
+// Auth: X-TED-Webhook-Secret (header), identical to the other receivers.
+// ============================================================================
+webhookRouter.get(
+  "/ted/full-scan/:runId/result",
+  async (req: Request, res: Response) => {
+    const secret =
+      req.headers["x-ted-webhook-secret"] || req.headers["x-webhook-secret"]
+    const expectedSecret = process.env.TED_WEBHOOK_SECRET
+    if (!expectedSecret) {
+      return res.status(500).json({ error: "Server misconfigured" })
+    }
+    if (secret !== expectedSecret) {
+      return res.status(401).json({ error: "Unauthorized: Invalid secret" })
+    }
+
+    const runId = req.params.runId
+    if (!runId) {
+      return res.status(400).json({ error: "Missing runId in the path." })
+    }
+
+    const { data: run } = await supabase
+      .from("qa_runs")
+      .select(
+        "id, run_type, status, site_url, device_matrix, created_by, created_at, started_at, completed_at, ted_client_id, ai_fix_status, ai_fix_total, ai_fix_fixed, ai_fix_started_at, ai_fix_completed_at",
+      )
+      .eq("id", String(runId))
+      .single()
+    if (!run) {
+      return res.status(404).json({ error: `No run found with id ${runId}.` })
+    }
+    if (run.run_type !== "full_scan") {
+      return res
+        .status(409)
+        .json({ error: "This endpoint only reports on full_scan runs." })
+    }
+
+    // Per-check result rows persisted by the worker at completion.
+    const { data: rows } = await supabase
+      .from("run_check_results")
+      .select(
+        "phase, check_factor, label, status, duration_ms, message, page_url, screenshot_url, severity",
+      )
+      .eq("run_id", String(runId))
+
+    const toCheck = (r: any) => ({
+      checkFactor: r.check_factor,
+      label: r.label || r.check_factor,
+      status: r.status,
+      durationMs: r.duration_ms ?? null,
+      message: r.message ?? null,
+      pageUrl: r.page_url ?? null,
+      screenshotUrl: r.screenshot_url ?? null,
+      severity: r.severity ?? null,
+    })
+
+    const scanRows = (rows || []).filter((r: any) => r.phase === "scan").map(toCheck)
+    const fixRows = (rows || []).filter((r: any) => r.phase === "fix").map(toCheck)
+
+    // Trigger — a full scan is always operator-initiated (on-demand). Resolve the
+    // creator's display name best-effort; never fail the request over it.
+    let triggeredBy: string | null = null
+    if (run.created_by) {
+      const { data: u } = await supabase
+        .from("users")
+        .select("*")
+        .eq("id", run.created_by)
+        .single()
+      triggeredBy =
+        (u as any)?.name ||
+        (u as any)?.full_name ||
+        (u as any)?.display_name ||
+        (u as any)?.email ||
+        null
+    }
+
+    const runDurationMs =
+      run.started_at && run.completed_at
+        ? new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()
+        : null
+
+    const scanPassed = scanRows.filter((c) => c.status === "passed").length
+    const scanFailed = scanRows.filter((c) => c.status === "failed").length
+    const scanErrored = scanRows.filter((c) => c.status === "errored").length
+    const scanStatus =
+      run.status !== "completed"
+        ? "error"
+        : scanFailed > 0
+          ? "failed"
+          : "passed"
+
+    const fixRan = ["queued", "running", "done"].includes(
+      run.ai_fix_status as string,
+    )
+    const fixFixed = run.ai_fix_fixed ?? fixRows.filter((c) => c.status === "fixed").length
+    const fixTotal = run.ai_fix_total ?? fixRows.length
+    const fixDurationMs =
+      run.ai_fix_started_at && run.ai_fix_completed_at
+        ? new Date(run.ai_fix_completed_at).getTime() -
+          new Date(run.ai_fix_started_at).getTime()
+        : null
+
+    return res.status(200).json({
+      status: 200,
+      statusText: "OK",
+      timestamp: new Date().toISOString(),
+      data: {
+        runId: run.id,
+        clientId: run.ted_client_id ?? null,
+        siteUrl: run.site_url ?? null,
+        overallStatus: scanStatus, // "passed" | "failed" | "error"
+        trigger: "manual",
+        triggeredBy, // display name or null
+        viewport: run.device_matrix ?? [],
+        startedAt: run.started_at ?? null,
+        completedAt: run.completed_at ?? null,
+        durationMs: runDurationMs,
+        scan: {
+          status: scanStatus,
+          totalChecks: scanRows.length,
+          passed: scanPassed,
+          failed: scanFailed,
+          errored: scanErrored,
+          checks: scanRows,
+        },
+        fix: fixRan
+          ? {
+              status: run.ai_fix_status, // "queued" | "running" | "done"
+              total: fixTotal,
+              fixed: fixFixed,
+              notFixed: Math.max(0, fixTotal - fixFixed),
+              startedAt: run.ai_fix_started_at ?? null,
+              completedAt: run.ai_fix_completed_at ?? null,
+              durationMs: fixDurationMs,
+              checks: fixRows,
+            }
+          : null,
       },
     })
   },
