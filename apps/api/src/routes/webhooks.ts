@@ -6,6 +6,7 @@ import { randomUUID } from "crypto"
 import { execFile } from "child_process"
 import { promisify } from "util"
 import { transitionRunStatus } from "../lib/runControl"
+import { isRealDefect } from "@qacc/shared"
 
 const execFileAsync = promisify(execFile)
 
@@ -3833,13 +3834,25 @@ webhookRouter.get(
       })
     }
 
-    // Issues found so far — "open" findings are the actionable defects (the same
-    // set the fix module later pulls). Grows as the scan discovers problems.
-    const { count: issuesFound } = await supabase
+    // Issues found so far, counted at CHECK granularity and ONLY for checks that
+    // explicitly FAILED. A check is the unit of pass/fail, so "external_links has
+    // problems" is ONE issue no matter how many links (or DOM repeats of the same
+    // link) tripped it. Crucially, having a finding row does NOT mean the check
+    // failed: findings also include tool lapses (QACC couldn't run the check),
+    // clean-pass sentinels ("no issues found"), and purely informational rows.
+    // A check counts as an issue only when it has a real defect — isRealDefect,
+    // the SAME judgement the final report uses (see @qacc/shared/findingVerdict),
+    // so the live count and the posted report can never disagree. issuesFound =
+    // distinct check_factors with >=1 real defect; findingsTotal = those defect
+    // rows for the fix module / drill-down.
+    const { data: openFindings } = await supabase
       .from("findings")
-      .select("id", { count: "exact", head: true })
+      .select("check_factor, title, description")
       .eq("run_id", String(runId))
       .eq("status", "open")
+    const defects = (openFindings ?? []).filter(isRealDefect)
+    const findingsTotal = defects.length
+    const issuesFound = new Set(defects.map((f) => f.check_factor)).size
 
     const pagesTotal = run.pages_total ?? 0
     const pagesProcessed = run.pages_processed ?? 0
@@ -3871,7 +3884,8 @@ webhookRouter.get(
         percent, // 0-100, scoped to `phase`
         pagesProcessed,
         pagesTotal,
-        issuesFound: issuesFound ?? 0,
+        issuesFound: issuesFound ?? 0, // distinct failed checks (the headline count)
+        findingsTotal, // raw open-finding rows (drill-down / fix-module scope)
         startedAt: run.started_at ?? null,
         completedAt: run.completed_at ?? null,
       },
