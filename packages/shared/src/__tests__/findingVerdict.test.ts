@@ -1,76 +1,98 @@
-import { resultForCheck, rollupChecks } from "../findingVerdict"
+import {
+  isCleanPassFinding,
+  isInformationalFinding,
+  isRealDefect,
+  isToolLapseFinding,
+} from "../findingVerdict"
 
-const f = (check_factor: string, title: string, description = "") => ({
+/**
+ * These four decide, for every check on every run, whether QACC tells the client
+ * their site has a problem. They are regex over free text a check happened to
+ * write, and three callers depend on them agreeing — the TED report renderer,
+ * the per-check results the worker persists, and the video-recording barrier.
+ * A wrong verdict here either reports a defect that isn't there or hides one
+ * that is, so the phrasings that must keep working are pinned.
+ */
+
+const f = (title: string, description = "", check_factor = "spelling") => ({
   check_factor,
   title,
   description,
 })
 
-describe("resultForCheck", () => {
-  it("is notRun while the scan is still going and the check has produced nothing", () => {
-    expect(resultForCheck("spelling", [], false)).toBe("notRun")
+describe("isToolLapseFinding", () => {
+  it.each([
+    ["an errored check", f("Spelling check failed")],
+    ["a timeout", f("Grammar check error", "the check encountered a timeout")],
+    ["a skipped check", f("Backend check skipped")],
+    ["a missing credential", f("Backend", "no password was provided for the WP admin")],
+    ["an unconfigured API key", f("GBP", "GOOGLE_PLACES_API_KEY is not configured")],
+    ["an upstream HTTP failure", f("Page speed", "request failed with status code 500")],
+  ])("reads %s as a QACC-side lapse", (_label, finding) => {
+    expect(isToolLapseFinding(finding)).toBe(true)
+    // A lapse establishes nothing about the site, so it must never be a defect.
+    expect(isRealDefect(finding)).toBe(false)
   })
 
-  it("is a pass once the run has ended with nothing found", () => {
-    expect(resultForCheck("spelling", [], true)).toBe("pass")
-  })
-
-  it("never calls an empty vision check a pass — it verified nothing", () => {
-    expect(resultForCheck("footer_logo", [], true)).toBe("lapsed")
-  })
-
-  it("fails when a real defect is present, even alongside a lapse", () => {
-    const findings = [
-      f("spelling", "Misspelling: 'recieve'"),
-      f("spelling", "Check failed", "encountered a timeout"),
-    ]
-    expect(resultForCheck("spelling", findings, true)).toBe("fail")
-  })
-
-  it("is lapsed when every finding is a lapse — a check that could not run is not a pass", () => {
-    const findings = [f("gbp_check", "GBP check failed", "encountered an error")]
-    expect(resultForCheck("gbp_check", findings, true)).toBe("lapsed")
+  it("does not claim a genuine site failure as its own lapse", () => {
+    // "failed to load" is about the page, not about QACC.
+    const finding = f("Hero video failed to load on mobile")
+    expect(isToolLapseFinding(finding)).toBe(false)
+    expect(isRealDefect(finding)).toBe(true)
   })
 })
 
-describe("rollupChecks", () => {
-  it("counts every enabled check, including ones that have produced nothing yet", () => {
-    const { summary, list } = rollupChecks(
-      ["spelling", "favicon", "grammar"],
-      [f("spelling", "Misspelling: 'recieve'")],
-      false,
-    )
-    expect(summary).toEqual({ total: 3, passed: 0, failed: 1, lapsed: 0, notRun: 2 })
-    expect(list).toHaveLength(3)
+describe("isCleanPassFinding", () => {
+  it.each([
+    ["no issues found", f("No accessibility issues found")],
+    ["none detected", f("Dead links", "None found across 42 links")],
+    ["a verb-trailing phrasing", f("Console", "No console errors were triggered")],
+    ["a title stating absence", f("Functionality: no interaction errors or breaks")],
+  ])("reads %s as a clean pass", (_label, finding) => {
+    expect(isCleanPassFinding(finding)).toBe(true)
+    expect(isRealDefect(finding)).toBe(false)
   })
 
-  it("counts only real defects as issues, not sentinels or lapses", () => {
-    const { list } = rollupChecks(
-      ["spelling"],
-      [
-        f("spelling", "Misspelling: 'recieve'"),
-        f("spelling", "Misspelling: 'seperate'"),
-        f("spelling", "Check skipped"),
-      ],
-      true,
-    )
-    expect(list[0]).toEqual({ check: "spelling", result: "fail", issues: 2 })
+  it("does not swallow a real defect that merely mentions a count", () => {
+    const finding = f("3 spelling issues found on the homepage")
+    expect(isCleanPassFinding(finding)).toBe(false)
+    expect(isRealDefect(finding)).toBe(true)
+  })
+})
+
+describe("isInformationalFinding", () => {
+  it("treats an always-reported row as informational, not a defect", () => {
+    const finding = f("Detected 24 plugins", "", "plugin_number")
+    expect(isInformationalFinding(finding)).toBe(true)
+    expect(isRealDefect(finding)).toBe(false)
   })
 
-  it("keeps findings whose check is not in enabled_checks rather than dropping results", () => {
-    const { summary, list } = rollupChecks(
-      ["spelling"],
-      [f("hamburger_menu", "Menu does not open on tablet")],
-      true,
-    )
-    expect(summary.total).toBe(2)
-    expect(list.map((c) => c.check).sort()).toEqual(["hamburger_menu", "spelling"])
+  it("is scoped to the checks that always report — the same words elsewhere are a defect", () => {
+    const finding = f("Detected 24 plugins", "", "backend_check")
+    expect(isInformationalFinding(finding)).toBe(false)
+    expect(isRealDefect(finding)).toBe(true)
   })
 
-  it("holds the total steady as a scan progresses, so the board does not grow under the reader", () => {
-    const enabled = ["spelling", "favicon", "grammar"]
-    const early = rollupChecks(enabled, [], false)
-    const later = rollupChecks(enabled, [f("spelling", "Misspelling: 'recieve'")], false)
-    expect(early.summary.total).toBe(later.summary.total)
+  it("does not call a failed informational check informational", () => {
+    const finding = f("Plugin count check failed", "encountered an error", "plugin_number")
+    expect(isInformationalFinding(finding)).toBe(false)
+    expect(isToolLapseFinding(finding)).toBe(true)
+  })
+})
+
+describe("isRealDefect", () => {
+  it("is what the fix pass and the report both act on", () => {
+    expect(isRealDefect(f("Misspelling: 'recieve' in the hero heading"))).toBe(true)
+  })
+
+  it("is false for every non-defect kind", () => {
+    expect(isRealDefect(f("No grammar issues found"))).toBe(false)
+    expect(isRealDefect(f("Check skipped"))).toBe(false)
+    expect(isRealDefect(f("Detected 24 plugins", "", "plugin_number"))).toBe(false)
+  })
+
+  it("survives findings with no description at all", () => {
+    expect(isRealDefect({ check_factor: "favicon", title: "Favicon missing" })).toBe(true)
+    expect(isRealDefect({})).toBe(true)
   })
 })

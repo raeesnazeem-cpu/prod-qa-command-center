@@ -870,7 +870,7 @@ async function renderImageGrid(
 // <p>/<strong>/<ul>/<li> cleanly (the format the TED team itself uses). So we
 // use plain grouped lists, one heading per check.
 
-const FRIENDLY: Record<string, string> = {
+export const FRIENDLY: Record<string, string> = {
   dead_links: "Dead Links & Broken Anchors",
   broken_links: "Broken Links",
   external_links: "External Links",
@@ -958,10 +958,11 @@ const esc = (s: any) =>
   String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
 // Finding classification (tool lapse / clean pass / informational / real
-// defect) now lives in @qacc/shared, so the report renderer here and the
-// TED-facing progress endpoint in apps/api judge a run by exactly the same
-// rules. Re-exported because callers across the worker import these from this
-// module.
+// defect) lives in @qacc/shared. Three places judge a finding by these rules
+// now — this report renderer, lib/runResults.ts when it persists per-check
+// results, and the video-recording barrier — so a second copy would eventually
+// disagree with the report about the same run. Re-exported because callers
+// across the worker import them from this module.
 import {
   isToolLapseFinding,
   isCleanPassFinding,
