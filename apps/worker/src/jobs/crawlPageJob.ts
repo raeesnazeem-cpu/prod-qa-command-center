@@ -1409,6 +1409,43 @@ export async function processCrawlPageJob(job: Job) {
  * - everything passed → post a short "AI Fix skipped, no issues" comment and do
  *   NOT queue the fix.
  */
+/**
+ * Build the "AI hit a 429" note for the full-scan TED comment, or "" if no AI
+ * check lapsed on a rate limit this run. Reads the persisted lapse findings so
+ * it catches BOTH the text chain (grammar) and vision 429s, regardless of the
+ * in-memory circuit-breaker state. Returns which checks were affected so the
+ * client knows exactly what "could not complete" for an AI-quota reason.
+ */
+async function buildAi429Note(runId: string): Promise<string> {
+  try {
+    const { data: hits } = await supabase
+      .from("findings")
+      .select("check_factor,description")
+      .eq("run_id", runId)
+      .ilike("description", "%429%")
+    const affected = new Set<string>()
+    for (const f of hits || []) {
+      const d = String((f as any).description || "")
+      // Require 429 in an AI-quota context so a literal "429" in page copy (a
+      // price, a phone fragment) never trips this.
+      if (
+        /\b429\b/.test(d) &&
+        /(quota|resource_exhausted|circuit open|rate.?limit|ai (error|unavailable))/i.test(d)
+      )
+        affected.add(String((f as any).check_factor || "").trim() || "an AI check")
+    }
+    if (affected.size === 0) return ""
+    const list = [...affected].join(", ")
+    return (
+      `<p>⚠️ <strong>AI rate limit (HTTP 429):</strong> the AI model hit its quota during this scan, ` +
+      `so the following AI-backed check(s) could not be fully verified: <code>${list}</code>. ` +
+      `Re-run once the quota resets, or configure a higher-tier AI key.</p>`
+    )
+  } catch {
+    return ""
+  }
+}
+
 async function maybeTriggerAiFix(
   runId: string,
   tedTaskId: string,
@@ -1429,9 +1466,16 @@ async function maybeTriggerAiFix(
     .single()
   if (fsRun?.run_type === "full_scan") {
     await releaseRunSlot(runId).catch(() => {})
+    // If any AI-backed check lapsed because the model hit a 429 (quota / rate
+    // limit), say so explicitly. Otherwise those checks render as a bare "could
+    // not complete" with no hint it was an AI quota problem the client can wait
+    // out or fix by upgrading the key. Read from the persisted lapse findings
+    // (authoritative) — the in-memory circuit breaker is already cleared by the
+    // releaseRunSlot above and never tracked vision 429s anyway.
+    const ai429Note = await buildAi429Note(runId)
     await postTedComment(
       tedTaskId,
-      `<p>✅ <strong>Full scan complete.</strong> Review the results above. To apply automated (GitOps) fixes, use <em>Send to Fix</em>.</p>`,
+      `<p>✅ <strong>Full scan complete.</strong> Review the results above. To apply automated (GitOps) fixes, use <em>Send to Fix</em>.</p>${ai429Note}`,
       `ext:qacc-fullscan-scandone-${runId}`,
       { runId },
     ).catch(() => {})
