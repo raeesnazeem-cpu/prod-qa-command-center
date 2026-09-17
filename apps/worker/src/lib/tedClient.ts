@@ -225,6 +225,104 @@ export async function getClientDomain(
   )
 }
 
+// ---------------------------------------------------------------------------
+// TED client "main page" fields.
+//
+// The TED client dashboard (ted.growth99.com/dashboard/clients/{id}) surfaces a
+// handful of structured fields that GET /api/clients returns directly on the
+// client record — no timeline/task drilling required:
+//   • client.plan                    → PLAN
+//   • client.clientDetails.betaUrl   → BETA SITE URL
+//   • client.clientDetails.website   → WEBSITE URL (live/production)
+//   • client.paidMediaStrategist     → paid-media strategist
+// These are the canonical, staff-visible values, so checks/resolvers should read
+// them FIRST and only fall back to the older heuristics (notes regex, task
+// payload/comments) when a record field is blank. The one exception is the repo
+// (GitHub Site URL): the API does NOT expose it on the client record, so it
+// still resolves from the beta_site.env task — see resolveBetaSiteRepo below.
+// ---------------------------------------------------------------------------
+
+/** Trim a URL to a clean, scheme-normalized value ("" → null). */
+export function cleanSiteUrl(u: string | null | undefined): string | null {
+  if (!u) return null
+  let v = String(u)
+    .split(/["'<>\s]/)[0]
+    .replace(/[.,;)]+$/, "")
+    .replace(/\/+$/, "")
+    .trim()
+  if (!v) return null
+  if (!/^https?:\/\//i.test(v)) v = `https://${v}`
+  return /\.[a-z]{2,}/i.test(v) ? v : null
+}
+
+/** Normalize a URL/host to a bare, comparable host (lowercase, no scheme/www). */
+export function normalizeHost(u: string | null | undefined): string {
+  if (!u) return ""
+  return String(u)
+    .replace(/^https?:\/\//i, "")
+    .replace(/^www\./i, "")
+    .replace(/\/.*$/, "")
+    .replace(/[),.;]+$/, "")
+    .toLowerCase()
+    .trim()
+}
+
+/** The plan straight off the client record's main-page `plan` field. */
+export function getClientPlanField(client: any): string {
+  return (client?.plan || "").toString().trim()
+}
+
+/** The beta site URL from the client record's main-page `betaUrl` field. */
+export async function getClientBetaUrl(
+  clientIdOrName: string | number | null | undefined,
+): Promise<string | null> {
+  const client = await getClient(clientIdOrName)
+  return cleanSiteUrl(client?.clientDetails?.betaUrl)
+}
+
+/** The live/production URL from the client record's main-page `website` field. */
+export async function getClientLiveUrl(
+  clientIdOrName: string | number | null | undefined,
+): Promise<string | null> {
+  const client = await getClient(clientIdOrName)
+  return cleanSiteUrl(client?.clientDetails?.website)
+}
+
+/**
+ * Find the TED client whose main-page beta/website URL matches `siteUrl` (by
+ * host). Lets URL-only runs (e.g. full_scan) recover the client record — and
+ * thus the plan/strategist — even when no clientId/name was supplied.
+ */
+export async function findClientBySiteUrl(
+  siteUrl: string | null | undefined,
+): Promise<any | null> {
+  const host = normalizeHost(siteUrl)
+  if (!host) return null
+  const idx = await getClientIndex()
+  if (!idx) return null
+  return (
+    idx.list.find(
+      (c) =>
+        normalizeHost(c?.clientDetails?.betaUrl) === host ||
+        normalizeHost(c?.clientDetails?.website) === host,
+    ) || null
+  )
+}
+
+/**
+ * Resolve a TED client from the best available handle: the real ted_client_id
+ * (preferred), else the project/client name, else — for URL-only runs — a host
+ * match against the client record's beta/website URL.
+ */
+export async function resolveClient(
+  clientIdOrName: string | number | null | undefined,
+  siteUrl?: string | null,
+): Promise<any | null> {
+  const byIdOrName = await getClient(clientIdOrName)
+  if (byIdOrName) return byIdOrName
+  return findClientBySiteUrl(siteUrl)
+}
+
 async function tedGetJson(pathAndQuery: string): Promise<any | null> {
   const token = process.env.TED_API_TOKEN
   if (!token) return null

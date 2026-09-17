@@ -27,7 +27,7 @@ export async function processCheckPaidMediaJob(job: Job) {
 
   const { data: runConfig } = await supabase
     .from("qa_runs")
-    .select("enabled_checks")
+    .select("enabled_checks, ted_client_id, site_url")
     .eq("id", runId)
     .single()
   const isApiOnly = !runConfig?.enabled_checks?.some((c: string) =>
@@ -75,7 +75,13 @@ export async function processCheckPaidMediaJob(job: Job) {
   let findings: any[] = []
   try {
     if (isApiOnly) await updateProgress(40, "Querying TED timeline...")
-    findings = await checkPaidMedia(clientName)
+    // Prefer the real ted_client_id (project.name is synthetic for full scans);
+    // pass site_url so a URL-only run can still match its TED client record.
+    findings = await checkPaidMedia(
+      clientName,
+      runConfig?.ted_client_id ?? null,
+      runConfig?.site_url ?? null,
+    )
   } catch (error: any) {
     logger.error({ error: error.message }, "Error in paid media check")
     findings = [

@@ -1,8 +1,9 @@
 import { Finding } from "@qacc/shared"
 import {
-  getClient,
   getClientTimeline,
   getClientDomain,
+  getClientPlanField,
+  resolveClient,
   tasksByDepartment,
   parsePlan,
   TedTask,
@@ -34,31 +35,42 @@ const f = (
  *
  * Paid media details = a paid-media plan/engagement for this client. Signals
  * (any one -> details found):
- *   - plan contains "Lead Generation" (HubSpot growth99_plan preferred, else TED)
+ *   - plan contains "Lead Generation" (TED client-page plan preferred, else HubSpot)
  *   - HubSpot select_if_deal_has_lead_generation = true
- *   - HubSpot paid_search_strategist / TED client.paidMediaStrategist set
+ *   - TED client.paidMediaStrategist (main page) / HubSpot paid_search_strategist set
  *   - Paid-Media-Team ads campaign task(s) in the TED timeline
+ *
+ * Client resolution: prefer the real ted_client_id (project.name is synthetic
+ * for full scans), else the name, else a host match against the client record's
+ * beta/website URL — so the plan/strategist come off the TED client page.
  *
  * Decision:
  *   details found     -> PASS, post the details (plan / strategist / campaigns)
  *   no details found  -> FAIL, "no details found — no fix possible, add manually"
  */
-export async function checkPaidMedia(clientName: string): Promise<Finding[]> {
+export async function checkPaidMedia(
+  clientName: string,
+  tedClientId?: string | number | null,
+  siteUrl?: string | null,
+): Promise<Finding[]> {
   let client: any
   let tasks: TedTask[]
   let hs: Awaited<ReturnType<typeof resolveHubspotClientData>> = null
+  // The handle used for every TED read: prefer the real ted_client_id, else name.
+  const clientKey =
+    tedClientId != null && String(tedClientId).trim()
+      ? String(tedClientId).trim()
+      : clientName
   try {
-    // getClient, getClientTimeline and getClientDomain are independent TED reads
-    // with no ordering dependency, so run them concurrently instead of serially.
-    // Only resolveHubspotClientData genuinely depends on the resolved domain, so
-    // it stays chained after. Error behavior is preserved: getClient /
-    // getClientTimeline rejections still reject the Promise.all and fall into the
-    // same outer catch → "could not reach TED" (getClientDomain keeps its own
-    // .catch, exactly as before).
+    // resolveClient, getClientTimeline and getClientDomain are independent TED
+    // reads with no ordering dependency, so run them concurrently. Only
+    // resolveHubspotClientData depends on the resolved domain, so it stays
+    // chained after. resolveClient falls back to a site-URL host match so
+    // URL-only full scans still land on the right client record.
     const [clientResult, timeline, domain] = await Promise.all([
-      getClient(clientName),
-      getClientTimeline(clientName),
-      getClientDomain(clientName).catch(() => null),
+      resolveClient(clientKey, siteUrl),
+      getClientTimeline(clientKey),
+      getClientDomain(clientKey).catch(() => null),
     ])
     client = clientResult
     tasks = timeline
@@ -73,12 +85,15 @@ export async function checkPaidMedia(clientName: string): Promise<Finding[]> {
     ]
   }
 
-  // Plan: HubSpot growth99_plan is the source of truth; fall back to TED.
-  const plan = parsePlan(hs?.plan || client?.plan)
+  // Plan: the TED client-page `plan` field is the source of truth; fall back to
+  // HubSpot growth99_plan.
+  const planField = getClientPlanField(client)
+  const plan = parsePlan(planField || hs?.plan)
+  const planFromTed = !!planField
   const strategist =
-    hs?.paidSearchStrategist ||
     client?.paidMediaStrategist?.name ||
     client?.paidMediaStrategist ||
+    hs?.paidSearchStrategist ||
     null
   const hasLeadGen = !!plan?.hasLeadGen || !!hs?.hasLeadGenFlag
 
@@ -90,11 +105,11 @@ export async function checkPaidMedia(clientName: string): Promise<Finding[]> {
 
   const found = !!client && (hasLeadGen || !!strategist || campaigns.length > 0)
 
-  const context = `Client: ${clientName}; plan: ${plan?.raw || "none"} (${
-    hs?.plan ? "HubSpot" : "TED"
-  }); strategist: ${strategist || "none"}; leadGenFlag: ${
-    hs ? hs.hasLeadGenFlag : "n/a"
-  }; campaigns: ${campaigns.length}`
+  const context = `Client: ${clientName} (id: ${clientKey}); plan: ${
+    plan?.raw || "none"
+  } (${planFromTed ? "TED client page" : hs?.plan ? "HubSpot" : "none"}); strategist: ${
+    strategist || "none"
+  }; leadGenFlag: ${hs ? hs.hasLeadGenFlag : "n/a"}; campaigns: ${campaigns.length}`
 
   // No paid media details -> FAIL. No fix possible (API-only, no repo lever).
   if (!found) {

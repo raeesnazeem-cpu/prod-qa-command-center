@@ -231,6 +231,54 @@ function parseBetaSiteUrl(text: string): string | null {
   return nonGithub ? clean(nonGithub) : null
 }
 
+// Clean a raw URL to a scheme-normalized value (no trailing slash/punctuation).
+// Mirrors apps/web/src/lib/siteUrl.ts / worker tedClient.cleanSiteUrl.
+function cleanRecordUrl(u: string | null | undefined): string | null {
+  if (!u) return null
+  let v = String(u)
+    .split(/["'<>\s]/)[0]
+    .replace(/[.,;)]+$/, "")
+    .replace(/\/+$/, "")
+    .trim()
+  if (!v) return null
+  if (!/^https?:\/\//i.test(v)) v = `https://${v}`
+  return /\.[a-z]{2,}/i.test(v) ? v : null
+}
+
+// Fetch a single TED client record from GET /api/clients by id (the list is the
+// only working endpoint — GET /api/clients/{id} returns 405). Returns the raw
+// client object, or null. Used to read the "main page" fields (plan, betaUrl,
+// website) that the TED client dashboard surfaces directly.
+async function fetchTedClientRecord(
+  clientId?: string | number | null,
+): Promise<any | null> {
+  const apiToken = process.env.TED_API_TOKEN
+  if (!apiToken || clientId == null) return null
+  try {
+    const r = await fetch("https://ted.growth99.com/api/clients", {
+      headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
+    })
+    const ct = r.headers.get("content-type") || ""
+    if (!r.ok || !ct.includes("application/json")) return null
+    const body: any = await r.json().catch(() => null)
+    const list: any[] = Array.isArray(body)
+      ? body
+      : body?.clients || body?.data || body?.items || []
+    const want = String(clientId)
+    return list.find((c) => String(c?.id) === want) || null
+  } catch {
+    return null
+  }
+}
+
+// The beta site URL straight off the client record's main-page `betaUrl` field.
+async function betaUrlFromClientRecord(
+  clientId?: string | number | null,
+): Promise<string | null> {
+  const client = await fetchTedClientRecord(clientId)
+  return cleanRecordUrl(client?.clientDetails?.betaUrl)
+}
+
 async function resolveBetaSiteUrlFromTED(
   clientId?: string | number | null,
 ): Promise<{ url: string; source: string } | null> {
@@ -259,6 +307,18 @@ async function resolveBetaSiteUrlFromTED(
   }
 
   try {
+    // 0. TED client record `clientDetails.betaUrl` — the "main page" beta site URL
+    //    shown on the TED client dashboard. This is the canonical, structured value
+    //    and needs no timeline/task drilling, so try it first. Only fall through to
+    //    the beta_site.env task lookup when the record field is blank.
+    const recordBeta = await betaUrlFromClientRecord(clientId)
+    if (recordBeta) {
+      console.log(
+        `✅ Resolved beta site URL from TED client record (main page): ${recordBeta}`,
+      )
+      return { url: recordBeta, source: "TED client page (betaUrl field)" }
+    }
+
     const tl = await getJson(
       `https://ted.growth99.com/api/clients/${clientId}/timeline`,
     )
@@ -462,6 +522,17 @@ async function resolveClientNotesSiteUrlFromTED(
         `⚠️ Client (id="${wantId}", name="${clientName}") not found among the ${clients.length} clients TED returned. Live site URL not resolved.`,
       )
       return null
+    }
+
+    // 0. TED client record `clientDetails.website` — the "main page" WEBSITE URL
+    //    on the TED client dashboard. Canonical and structured, so prefer it over
+    //    parsing the free-text notes below.
+    const recordWebsite = cleanRecordUrl(client?.clientDetails?.website)
+    if (recordWebsite) {
+      console.log(
+        `✅ Resolved client live site URL from TED client record (main page): ${recordWebsite}`,
+      )
+      return recordWebsite
     }
 
     const notes: string = client?.clientDetails?.notes || ""
