@@ -15,6 +15,7 @@ import {
 } from "./jobs/videoRecordingJob"
 import { qaQueue, connection } from "./lib/queue"
 import { processCaptureMultiviewScreenshotsJob } from "./jobs/captureMultiviewScreenshotsJob"
+import { startStuckRunSweeper } from "./lib/stuckRunSweeper"
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -119,6 +120,11 @@ worker.on("completed", (job) => {
 })
 
 logger.info(`Worker started, consuming queue: ${queueName}`)
+
+// Periodic safety net: complete runs whose page counter drifted below the real
+// finished-page count so they can never hang at ~99% forever. See
+// lib/stuckRunSweeper.ts (root cause in migration 20260917000000).
+startStuckRunSweeper()
 
 import http from "http"
 
