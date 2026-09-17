@@ -1881,7 +1881,6 @@ const FULL_SCAN_CHECKS = [
   "logo_chatbot",
   "gsr_check",
   "review_reputation_check",
-  "gbp_check",
   "blog_verification",
   "hamburger_menu",
   // Live/released-site checks.
