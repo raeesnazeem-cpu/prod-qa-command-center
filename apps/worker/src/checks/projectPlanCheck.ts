@@ -4,9 +4,10 @@ import { describeImage } from "../lib/aiFallback"
 import sharp from "sharp"
 import { uploadScreenshot } from "../lib/supabaseStorage"
 import {
-  getClient,
   getClientNotesText,
   getClientDomain,
+  getClientPlanField,
+  resolveClient,
   parsePlan,
 } from "../lib/tedClient"
 import { resolveHubspotClientData } from "../lib/hubspotClient"
@@ -34,11 +35,14 @@ function isAcceleratorPlan(plan: string): boolean {
 /**
  * Project Plan check.
  *
- * Plan resolution precedence (unchanged):
- *   1. HubSpot company `growth99_plan` (joined by domain)
- *   2. TED client.plan
+ * Plan resolution precedence:
+ *   1. TED client record `plan` field — the "main page" value shown on the TED
+ *      client dashboard (ted.growth99.com/dashboard/clients/{id}). Resolved by
+ *      the real ted_client_id when available, else the client name, else a host
+ *      match against the record's beta/website URL (so URL-only full scans work).
+ *   2. HubSpot company `growth99_plan` (joined by domain)
  *   3. "Growth99 Plan: <plan>" line in TED notes
- *   4. None -> FAIL ("plan not available in notes to check"), no fix possible.
+ *   4. None -> FAIL ("plan not available to check"), no fix possible.
  *
  * Then, keyed on the plan:
  *   • ACCELERATOR plan → the site must have a /reviews page with the reviews
@@ -64,6 +68,10 @@ export async function checkProjectPlan(
     themeType?: string
   },
   onProgress?: (progress: number, message: string) => Promise<void>,
+  // OPTIONAL: the real TED client id stored on the run (qa_runs.ted_client_id).
+  // The project name is synthetic for full scans ("Full Scan — <url>") and never
+  // matches a TED client, so the id is the reliable handle to the client record.
+  tedClientId?: string | number | null,
   // OPTIONAL trailing param: when the caller already owns a warm chromium it can
   // pass it in to skip the ~1-2s cold launch per Accelerator run. Callers that
   // omit it (the existing 3-arg call site) get the old self-launch behavior.
@@ -74,23 +82,31 @@ export async function checkProjectPlan(
   let planRaw = ""
   let planSource = ""
   let hs: Awaited<ReturnType<typeof resolveHubspotClientData>> = null
+  // The handle used for every TED read: prefer the real ted_client_id, fall back
+  // to the (possibly synthetic) project/client name.
+  const clientKey =
+    tedClientId != null && String(tedClientId).trim()
+      ? String(tedClientId).trim()
+      : clientName
   try {
-    // 1. HubSpot (joined by domain from the TED client record).
-    const domain = await getClientDomain(clientName).catch(() => null)
+    // 1. TED client record `plan` — the main-page value on the client dashboard.
+    //    Resolve the client by id/name, else by a host match against the record's
+    //    beta/website URL (covers URL-only full scans where the name is synthetic).
+    const client = await resolveClient(clientKey, pageRecord?.siteUrl)
+    planRaw = getClientPlanField(client)
+    if (planRaw) planSource = "TED client page"
+
+    // 2. HubSpot (joined by domain from the TED client record).
+    const domain = await getClientDomain(clientKey).catch(() => null)
     hs = await resolveHubspotClientData(domain, clientName).catch(() => null)
-    if (hs?.plan) {
+    if (!planRaw && hs?.plan) {
       planRaw = hs.plan
       planSource = "HubSpot"
     }
 
-    // 2-3. TED plan, then the notes line.
+    // 3. The "Growth99 Plan:" line in TED notes.
     if (!planRaw) {
-      const client = await getClient(clientName)
-      planRaw = (client?.plan || "").trim()
-      if (planRaw) planSource = "TED"
-    }
-    if (!planRaw) {
-      const notes = await getClientNotesText(clientName)
+      const notes = await getClientNotesText(clientKey)
       const m = notes.match(/Growth99\s+Plan:\s*([^\n\r<]+)/i)
       if (m && m[1]) {
         planRaw = m[1].trim()
@@ -117,8 +133,8 @@ export async function checkProjectPlan(
         check_factor: "project_plan",
         title: "Project Plan not set",
         description:
-          "No record for the project plan was found. NO fix possible — plan not available in notes to check. Please add the plan to the client notes.",
-        context_text: `Client: ${clientName} — checked HubSpot growth99_plan (by domain), TED client.plan, and the "Growth99 Plan:" line in client notes.`,
+          "No record for the project plan was found. NO fix possible — plan not available to check. Please set the plan on the TED client page.",
+        context_text: `Client: ${clientName} (id: ${clientKey}) — checked the TED client page \`plan\` field, HubSpot growth99_plan (by domain), and the "Growth99 Plan:" line in client notes.`,
         status: "open",
         ai_generated: false,
       } as Finding,

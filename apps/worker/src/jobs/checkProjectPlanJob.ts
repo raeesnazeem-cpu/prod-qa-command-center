@@ -109,22 +109,28 @@ export async function processCheckProjectPlanJob(job: Job) {
   // Step 3: Call the general check functions
   let findings: any[] = []
   try {
-    // Fetch run to get site_url, enabled_checks and the resolved theme type
+    // Fetch run to get site_url, enabled_checks, theme type and the real TED
+    // client id (the reliable handle to the client record — project.name is
+    // synthetic for full scans and never matches a TED client).
     const { data: run } = await supabase
       .from("qa_runs")
-      .select("site_url, enabled_checks, theme_type")
+      .select("site_url, enabled_checks, theme_type, ted_client_id")
       .eq("id", runId)
       .single()
 
     const enabledChecks = run?.enabled_checks || []
 
-    // 1. Run Project Plan Check if enabled (reads plan from TED)
+    // 1. Run Project Plan Check if enabled (reads the plan from the TED client page)
     if (enabledChecks.includes("project_plan")) {
-      logger.info({ clientName }, "Calling checkProjectPlan (TED)")
+      logger.info(
+        { clientName, tedClientId: run?.ted_client_id },
+        "Calling checkProjectPlan (TED)",
+      )
       const planFindings = await checkProjectPlan(
         clientName,
         { id: pageId, siteUrl: run?.site_url, themeType: run?.theme_type },
         updateProgress,
+        run?.ted_client_id ?? null,
       )
       findings = [...findings, ...planFindings]
     }
