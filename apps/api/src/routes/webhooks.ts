@@ -128,6 +128,121 @@ async function createAbortedRun(opts: {
   return run.id
 }
 
+// Resolve a QACC project from a TED webhook, ID-FIRST.
+//
+// TED client names and QACC project names drift apart (typos, punctuation,
+// re-brands), so matching on the name alone (the old behaviour) was fragile.
+// We now match on the STABLE `ted_client_id` first, and only fall back to a
+// case-insensitive name match. When we DO match by name and the project has no
+// ted_client_id yet, we backfill it so every later trigger for that client
+// resolves by id — the name only ever has to work once.
+//
+// Returns the project row, or null when neither id nor name resolves one.
+// Never auto-creates (callers decide whether a miss should create a project).
+async function findProjectByTedClient(
+  clientId: string | number | null | undefined,
+  clientName: string | null | undefined,
+): Promise<any | null> {
+  const idStr =
+    clientId != null && String(clientId).trim() !== ""
+      ? String(clientId).trim()
+      : null
+
+  // 1. ID-first: the stable key. Survives any name mismatch between TED & QACC.
+  if (idStr) {
+    const { data: byId } = await supabase
+      .from("projects")
+      .select("*")
+      .eq("ted_client_id", idStr)
+      .limit(1)
+      .maybeSingle()
+    if (byId) return byId
+  }
+
+  // 2. Name fallback (legacy behaviour). Backfill ted_client_id on a hit so the
+  //    next trigger for this client matches by id in step 1.
+  const nameStr = clientName ? clientName.trim() : ""
+  if (nameStr) {
+    const { data: byName } = await supabase
+      .from("projects")
+      .select("*")
+      .ilike("name", nameStr)
+      .limit(1)
+      .maybeSingle()
+    if (byName) {
+      if (idStr && !byName.ted_client_id) {
+        const { data: upd, error: updErr } = await supabase
+          .from("projects")
+          .update({ ted_client_id: idStr })
+          .eq("id", byName.id)
+          .select("*")
+          .single()
+        if (updErr) {
+          console.error(
+            `⚠️ Failed to backfill ted_client_id on project ${byName.id}:`,
+            updErr,
+          )
+          return byName
+        }
+        console.log(
+          `🔗 Linked project "${byName.name}" (${byName.id}) to TED client id ${idStr}.`,
+        )
+        return upd || byName
+      }
+      return byName
+    }
+  }
+
+  return null
+}
+
+// Resolve the QACC user id to attribute a TED-triggered run to. Mirrors the
+// inline logic the parent flows use: match the TED assignee by name, else
+// auto-create a "ghost" user so their name shows on the run, else fall back to
+// any user in the org. Extracted so the single-subtask handler reuses it.
+async function resolveRunCreatorId(
+  assigneeName: string,
+  orgId: string,
+): Promise<string | null> {
+  const { data: existingUser } = await supabase
+    .from("users")
+    .select("id")
+    .ilike("full_name", assigneeName)
+    .eq("org_id", orgId)
+    .limit(1)
+    .maybeSingle()
+  if (existingUser?.id) return existingUser.id
+
+  console.log(
+    `👤 Assignee "${assigneeName}" not found in QACC. Auto-creating a ghost user...`,
+  )
+  const safeEmail = `${assigneeName.replace(/[^a-zA-Z0-9]/g, "").toLowerCase() || "ted"}-${Date.now()}@ted.internal`
+  const { data: newUser, error: createError } = await supabase
+    .from("users")
+    .insert({
+      id: randomUUID(),
+      clerk_user_id: `ghost_${Date.now()}`,
+      clerk_id: `ghost_${Date.now()}`,
+      full_name: assigneeName,
+      email: safeEmail,
+      org_id: orgId,
+      role: "qa_engineer",
+    })
+    .select("id")
+    .single()
+  if (!createError && newUser?.id) return newUser.id
+  if (createError)
+    console.error("❌ Ghost user creation failed in Supabase:", createError)
+
+  const { data: adminUser } = await supabase
+    .from("users")
+    .select("id")
+    .eq("org_id", orgId)
+    .limit(1)
+    .maybeSingle()
+  return adminUser?.id || null
+}
+
 // ===========================================================================
 // TED-FIRST SCAN-URL RESOLUTION (LIVE, no fallback).
 //
@@ -1231,6 +1346,12 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
       })
     }
 
+    // Single-subtask "play" button → run just this one subtask's check and
+    // report back to that subtask (not the whole pre-release checklist).
+    if (eventType === "AGENT_RUN_REQUESTED") {
+      return await handleAgentRunRequested(payload, "pre_release", res)
+    }
+
     console.log(
       `📥 Received TED Event: ${eventType} | Task: ${task.title || "?"} (#${task.id}) | TemplateKey: ${task.templateKey || "?"} | Status: ${task.previousStatus || "?"} -> ${task.status} | Target: #${targetTask?.id || "none"}`,
     )
@@ -1366,12 +1487,9 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             )
           }
 
-          // 1. Look for a project in QACC where the name exactly matches the TED clientName
-          let { data: project } = await supabase
-            .from("projects")
-            .select("*")
-            .ilike("name", clientName) // Case-insensitive match
-            .single()
+          // 1. Resolve the QACC project — ID-first (ted_client_id), name
+          //    fallback with backfill. See findProjectByTedClient.
+          let project = await findProjectByTedClient(task.clientId, clientName)
 
           if (!project) {
             console.log(
@@ -1395,6 +1513,9 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
               const insertPayload: any = {
                 name: clientName,
                 client_name: clientName,
+                // Stable TED client id → future triggers resolve by id, not name.
+                ted_client_id:
+                  task.clientId != null ? String(task.clientId) : null,
                 org_id: orgData.org_id,
                 status: "active",
                 // No fallback URL: store the resolved beta URL, or empty when
@@ -2086,6 +2207,267 @@ async function setTedTaskStatus(
   }
 }
 
+// ===========================================================================
+// SINGLE-SUBTASK TRIGGER  (event: "AGENT_RUN_REQUESTED")
+// ---------------------------------------------------------------------------
+// TED renders a "play" button next to each QA subtask. Clicking it fires a
+// webhook (event = AGENT_RUN_REQUESTED) to the SAME per-flow endpoint the
+// parent task already uses (/webhooks/ted, /ted/internal-qa, /ted/post-release).
+// Unlike the parent trigger — which runs the whole checklist — this runs ONLY
+// the one subtask's check and reports the result back to that one subtask.
+//
+// Contract (all inside `trigger`): clientId (stable key, primary), subtaskId,
+// title, parentTemplateKey. clientName is optional (name fallback only).
+// ===========================================================================
+
+// Titles that map to no parent SECTION list but are still automatable. The
+// parent flows add cross_browser as an "always-on" check, so it has no section
+// matcher — consulted only when the section map yields nothing.
+const SINGLE_SUBTASK_FALLBACK: { matchers: string[]; checks: string[] }[] = [
+  {
+    matchers: ["crossbrowser", "browserrendering", "renderingcheck"],
+    checks: ["cross_browser"],
+  },
+]
+
+type SingleSubtaskFlow = "pre_release" | "internal_qa" | "post_release"
+
+// Map a parentTemplateKey (or, when it's unrecognized, the endpoint the event
+// arrived on) to the flow's run_type + section matchers.
+function resolveSingleSubtaskFlow(
+  parentTemplateKey: string,
+  endpointFlow: SingleSubtaskFlow,
+): { runType: SingleSubtaskFlow; sections: { matchers: string[]; checks: string[] }[] } {
+  const key = String(parentTemplateKey || "").toLowerCase()
+  if (key === PRE_RELEASE_TARGET_TEMPLATE_KEY)
+    return { runType: "pre_release", sections: PRE_RELEASE_SECTIONS }
+  if (key === POST_RELEASE_TARGET_TEMPLATE_KEY)
+    return { runType: "post_release", sections: POST_RELEASE_SECTIONS }
+  if (key === INTERNAL_QA_TARGET_TEMPLATE_KEY)
+    return { runType: "internal_qa", sections: INTERNAL_QA_SECTIONS }
+  const byEndpoint: Record<SingleSubtaskFlow, { matchers: string[]; checks: string[] }[]> = {
+    pre_release: PRE_RELEASE_SECTIONS,
+    internal_qa: INTERNAL_QA_SECTIONS,
+    post_release: POST_RELEASE_SECTIONS,
+  }
+  console.log(
+    `ℹ️ Single-subtask: unrecognized parentTemplateKey "${parentTemplateKey}" — falling back to endpoint flow "${endpointFlow}".`,
+  )
+  return { runType: endpointFlow, sections: byEndpoint[endpointFlow] }
+}
+
+// Handle one AGENT_RUN_REQUESTED event. The caller (each per-flow endpoint) has
+// already validated the shared secret before delegating here.
+async function handleAgentRunRequested(
+  payload: any,
+  endpointFlow: SingleSubtaskFlow,
+  res: Response,
+): Promise<Response> {
+  const trigger = payload.trigger || payload.data || {}
+  const clientId = trigger.clientId ?? trigger.client_id ?? null
+  const clientName =
+    trigger.clientName ||
+    trigger.client_name ||
+    trigger.client?.name ||
+    payload.clientName ||
+    null
+  const subtaskId =
+    trigger.subtaskId != null
+      ? String(trigger.subtaskId)
+      : trigger.id != null
+        ? String(trigger.id)
+        : null
+  const subtaskTitle = String(trigger.title || trigger.name || "")
+  const parentTemplateKey = String(
+    trigger.parentTemplateKey || trigger.parent_template_key || "",
+  )
+  const assigneeName = String(trigger.assignee || trigger.requestedBy || "TED System")
+  const apiToken = process.env.TED_API_TOKEN
+
+  console.log(
+    `▶️ AGENT_RUN_REQUESTED | subtask #${subtaskId} "${subtaskTitle}" | client ${clientName || "?"} (#${clientId ?? "?"}) | parentTemplateKey=${parentTemplateKey || "?"} | endpoint=${endpointFlow}`,
+  )
+
+  // Contract guardrails.
+  if (!subtaskId || !subtaskTitle) {
+    console.log("❌ AGENT_RUN_REQUESTED missing subtaskId/title — ignoring.")
+    return res.status(400).json({ error: "Missing subtaskId or title" })
+  }
+  if (clientId == null && !clientName) {
+    console.log(
+      "❌ AGENT_RUN_REQUESTED missing both clientId and clientName — cannot resolve project.",
+    )
+    return res.status(400).json({ error: "Missing clientId/clientName" })
+  }
+
+  const { runType, sections } = resolveSingleSubtaskFlow(parentTemplateKey, endpointFlow)
+
+  // Map the ONE subtask → its check(s). Reuse the parent section matchers, then
+  // the always-on fallback (cross_browser has no section matcher).
+  const oneSubtask = [{ id: subtaskId, title: subtaskTitle }]
+  let { map: subtaskMap, matchedChecks } = mapSubtasksToChecks(oneSubtask, sections)
+  if (!matchedChecks.length) {
+    const fb = mapSubtasksToChecks(oneSubtask, SINGLE_SUBTASK_FALLBACK)
+    subtaskMap = fb.map
+    matchedChecks = fb.matchedChecks
+  }
+  if (!matchedChecks.length) {
+    const msg = `QACC has no automated check mapped to the subtask "${subtaskTitle}", so it can't run this one automatically yet.`
+    console.log(`ℹ️ ${msg}`)
+    if (apiToken)
+      await postTedComment(subtaskId, msg, `ext:qacc-single-unmapped-${subtaskId}`)
+    return res
+      .status(200)
+      .json({ status: "no_check_mapped", subtaskId, title: subtaskTitle })
+  }
+
+  // Resolve the project (ID-first). Single-subtask never auto-creates: a play
+  // button implies the project already went through its parent flow.
+  const project = await findProjectByTedClient(clientId, clientName)
+  if (!project) {
+    const msg = `QACC couldn't find a project for this client (id ${clientId ?? "?"}, name "${clientName ?? "?"}"). Run the parent QA task once first, or check the client id.`
+    console.log(`❌ ${msg}`)
+    if (apiToken)
+      await postTedComment(subtaskId, msg, `ext:qacc-single-noproject-${subtaskId}`)
+    return res.status(200).json({ status: "project_not_found" })
+  }
+
+  // Dedupe repeat clicks for the same subtask within a short window.
+  const dedupeMins = Number(process.env.TED_SINGLE_SUBTASK_DEDUPE_MINUTES || 3)
+  const since = new Date(Date.now() - dedupeMins * 60 * 1000).toISOString()
+  const { data: recent } = await supabase
+    .from("qa_runs")
+    .select("id")
+    .eq("project_id", project.id)
+    .eq("ted_task_id", subtaskId)
+    .gte("created_at", since)
+    .limit(1)
+  if (recent && recent.length) {
+    console.log(
+      `🛑 Duplicate single-subtask trigger for #${subtaskId} within ${dedupeMins}m — suppressed.`,
+    )
+    return res
+      .status(200)
+      .json({ status: "duplicate_suppressed", existingRunId: recent[0].id })
+  }
+
+  // Resolve the site URL exactly as the matching parent flow does.
+  let siteUrl: string | null = null
+  let siteSource = ""
+  let liveSiteUrl: string | null = null
+  let releasedUrl: string | null = null
+  if (runType === "post_release") {
+    const releaseSecId = await resolveTaskIdByTemplateKeyFromTED(
+      clientId,
+      "release.security",
+      /release.*security|security/i,
+    )
+    releasedUrl = await resolveReleasedUrlFromReleaseSecurity(releaseSecId)
+    liveSiteUrl = await resolveClientNotesSiteUrlFromTED(clientId, clientName)
+    siteUrl = releasedUrl || liveSiteUrl
+    siteSource = releasedUrl
+      ? "release.security released URL"
+      : liveSiteUrl
+        ? "client-notes live URL"
+        : ""
+  } else {
+    const beta = await resolveBetaSiteUrlFromTED(clientId)
+    siteUrl = beta?.url || null
+    siteSource = beta?.source || ""
+  }
+
+  const runCreatorId = await resolveRunCreatorId(assigneeName, project.org_id)
+
+  // No site URL → record a visible `failed` run + tell the subtask (same policy
+  // as the parent flows: never silently scan a demo site).
+  if (!siteUrl) {
+    const reason =
+      runType === "post_release"
+        ? "No released/live site URL resolved (release.security + client notes) — single-subtask run cancelled."
+        : NO_BETA_URL_REASON
+    const abortedRunId = await createAbortedRun({
+      projectId: project.id,
+      runType,
+      enabledChecks: matchedChecks,
+      tedSubtaskMap: subtaskMap,
+      tedTaskId: subtaskId,
+      createdBy: runCreatorId,
+      reason,
+      deviceMatrix: ["desktop", "mobile"],
+    })
+    if (apiToken)
+      await postTedComment(
+        subtaskId,
+        reason,
+        `ext:qacc-single-nourl-${subtaskId}`,
+        abortedRunId,
+      )
+    return res.status(200).json({ status: "cancelled_no_url", runId: abortedRunId })
+  }
+
+  // Keep the project's active site_url current (mirrors the parent flows).
+  if ((project.site_url || "").trim() !== siteUrl) {
+    await supabase
+      .from("projects")
+      .update({ site_url: siteUrl })
+      .eq("id", project.id)
+  }
+
+  const insert: any = {
+    project_id: project.id,
+    run_type: runType,
+    site_url: siteUrl,
+    enabled_checks: matchedChecks,
+    // { check_factor: [subtaskId] } → the worker posts each check's result back
+    // to this one subtask.
+    ted_subtask_map: subtaskMap,
+    device_matrix: ["desktop", "mobile"],
+    status: "running",
+    created_by: runCreatorId,
+    // Correlate to the subtask itself so results + pause/resume land on it.
+    ted_task_id: subtaskId,
+    ted_client_id: clientId != null ? String(clientId) : null,
+  }
+  if (runType === "post_release") {
+    insert.live_site_url = liveSiteUrl
+    insert.released_site_url = releasedUrl
+  }
+  const { data: run, error: runError } = await supabase
+    .from("qa_runs")
+    .insert(insert)
+    .select()
+    .single()
+  if (runError || !run) {
+    console.error("❌ Failed to create single-subtask QA run:", runError)
+    return res.status(500).json({ error: "Failed to create run" })
+  }
+
+  // Mark the subtask In Progress + post a scan-start note, then enqueue.
+  if (apiToken) {
+    await setTedTaskStatus(subtaskId, "In Progress", apiToken, run.id).catch(
+      () => {},
+    )
+    await postTedComment(
+      subtaskId,
+      `QACC started an automated check for this subtask — scanning ${siteUrl}${siteSource ? ` (from ${siteSource})` : ""}. The result will post here shortly.`,
+      `ext:qacc-single-start-${run.id}`,
+      run.id,
+    )
+  }
+  try {
+    const { addRunJob } = require("../lib/queue")
+    await addRunJob(run.id)
+  } catch (queueErr) {
+    console.error("❌ Failed to enqueue single-subtask run:", queueErr)
+  }
+  console.log(
+    `🚀 Single-subtask run ${run.id} started: [${matchedChecks.join(", ")}] → subtask #${subtaskId}.`,
+  )
+  return res
+    .status(200)
+    .json({ status: "started", runId: run.id, checks: matchedChecks, subtaskId })
+}
+
 webhookRouter.post(
   "/ted/internal-qa",
   async (req: Request, res: Response) => {
@@ -2172,6 +2554,11 @@ webhookRouter.post(
           timestamp: new Date().toISOString(),
           data: { acknowledged: true, event: "PING_TEST" },
         })
+      }
+
+      // Single-subtask "play" button → run just this one subtask's check.
+      if (eventType === "AGENT_RUN_REQUESTED") {
+        return await handleAgentRunRequested(payload, "internal_qa", res)
       }
 
       console.log(
@@ -2303,12 +2690,9 @@ webhookRouter.post(
             internalQaChecks = [...internalQaChecks, "cross_browser"]
           }
 
-          // 1. Find the QACC project by TED clientName (case-insensitive).
-          let { data: project } = await supabase
-            .from("projects")
-            .select("*")
-            .ilike("name", clientName)
-            .single()
+          // 1. Resolve the QACC project — ID-first (ted_client_id), name
+          //    fallback with backfill. See findProjectByTedClient.
+          let project = await findProjectByTedClient(task.clientId, clientName)
 
           if (!project) {
             console.log(
@@ -2330,6 +2714,9 @@ webhookRouter.post(
               const insertPayload: any = {
                 name: clientName,
                 client_name: clientName,
+                // Stable TED client id → future triggers resolve by id, not name.
+                ted_client_id:
+                  task.clientId != null ? String(task.clientId) : null,
                 org_id: orgData.org_id,
                 status: "active",
                 // No fallback URL: store the resolved beta URL, or empty when
@@ -2765,6 +3152,11 @@ webhookRouter.post(
         })
       }
 
+      // Single-subtask "play" button → run just this one subtask's check.
+      if (eventType === "AGENT_RUN_REQUESTED") {
+        return await handleAgentRunRequested(payload, "post_release", res)
+      }
+
       console.log(
         `📥 Post-release event: ${eventType} | Task: ${task.title || "?"} (#${task.id}) | TemplateKey: ${task.templateKey || "?"} | Status: ${task.previousStatus || "?"} -> ${task.status} | Target: #${targetTask?.id || "none"}`,
       )
@@ -2881,11 +3273,8 @@ webhookRouter.post(
           }
 
           // The project must already exist in QACC (per requirement).
-          const { data: project } = await supabase
-            .from("projects")
-            .select("*")
-            .ilike("name", clientName)
-            .single()
+          // Resolve ID-first (ted_client_id), name fallback with backfill.
+          const project = await findProjectByTedClient(task.clientId, clientName)
 
           if (!project) {
             console.log(
