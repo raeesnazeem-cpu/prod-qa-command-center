@@ -2447,26 +2447,33 @@ export async function processAiFixRunJob(job: Job) {
   // AI-fix step timings → extra table in the worker log (analytics only).
   saveAiFixTimingReport(runId, Date.now() - aiFixJobStart)
 
-  // Full scan: the fix module has finished, so run video recording as its LAST
-  // step — proof the site's final (post-fix) state is fixed, irrespective of any
-  // subtasks. A full scan never changes the report task's status, so we do NOT
-  // call markAllTedTasksCompleted; instead we enqueue the video barrier directly
-  // in full_scan mode (it posts the recording proof to the parent task without
-  // flipping its status).
+  // Full scan: the fix module has finished. Video recording is being moved to a
+  // separate, manually triggered TED task, so it is NO LONGER fired by any TED
+  // trigger by default. The post-fix enqueue below is retained (the barrier logic
+  // stays fully intact) but gated OFF — flip TED_VIDEO_RECORDING_ENABLED=true only
+  // once the standalone manual task is wired up. A full scan never changes the
+  // report task's status, so we still skip markAllTedTasksCompleted and return.
   if (run?.run_type === "full_scan") {
-    await qaQueue
-      .add(
-        "video_recording_check",
-        { runId, tedTaskId, fullScan: true },
-        { removeOnComplete: true, attempts: 5 },
-      )
-      .catch((e: any) =>
-        logger.error(
-          { runId, error: e?.message },
-          "full_scan: failed to enqueue video_recording_check after fix.",
-        ),
-      )
-    logger.info({ runId }, "full_scan: fix report posted; video recording enqueued as the final step.")
+    if (process.env.TED_VIDEO_RECORDING_ENABLED === "true") {
+      // As its LAST step, enqueue the video barrier as proof the site's final
+      // (post-fix) state is fixed. It posts the recording proof to the parent
+      // task without flipping its status.
+      await qaQueue
+        .add(
+          "video_recording_check",
+          { runId, tedTaskId, fullScan: true },
+          { removeOnComplete: true, attempts: 5 },
+        )
+        .catch((e: any) =>
+          logger.error(
+            { runId, error: e?.message },
+            "full_scan: failed to enqueue video_recording_check after fix.",
+          ),
+        )
+      logger.info({ runId }, "full_scan: fix report posted; video recording enqueued as the final step.")
+    } else {
+      logger.info({ runId }, "full_scan: fix report posted; video recording NOT triggered (moved to a separate manual TED task).")
+    }
     return
   }
 

@@ -1112,7 +1112,11 @@ const PRE_RELEASE_DEFAULT_CHECKS = [
   "gbp_check",
   "image_quality",
   "blog_verification",
-  "video_recording",
+  // video_recording intentionally removed from TED-triggered pre-release scans.
+  // Video recording is being moved to a separate, manually triggered TED task,
+  // so no TED trigger fires it for now. The barrier logic (videoRecordingJob /
+  // recordingTrigger / the tedSync barrier) is left fully intact for that future
+  // manual wiring — only the wiring into this trigger's check list is removed.
   "cross_browser",
 ]
 
@@ -1167,9 +1171,11 @@ const PRE_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   { matchers: ["privacypolicy"], checks: ["privacy_policy"] },
   // "Blog" subtask → blog_verification (beta blogs vs the client's live blogs).
   { matchers: ["blogverification", "blog"], checks: ["blog_verification"] },
-  // "Desktop/Tablet/Mobile video recording" subtask → video_recording, a
-  // hardcoded manual-reminder pass (no automation).
-  { matchers: ["videorecording", "video", "recording"], checks: ["video_recording"] },
+  // video_recording subtask mapping intentionally removed — video recording is no
+  // longer triggered via TED pre-release. Any "Desktop/Tablet/Mobile video
+  // recording" subtask now maps to nothing (goes unmatched) instead of enabling
+  // the video_recording barrier. It will become a separate, manually triggered
+  // TED task; the barrier logic is left intact for that future wiring.
   { matchers: ["herosection", "fallbackimage"], checks: ["hero_media"] },
 ]
 
@@ -1225,15 +1231,11 @@ const POST_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   // "G99 Contact form, ChatBot and VC" → chatbot/VC detection AND the live
   // contact-form flow (find → fill → submit → thank-you) — see header note.
   { matchers: ["chatbot"], checks: ["chatbot_consultation", "contact_form"] },
-  // "Desktop & Mobile View Video" (or any video-recording subtask) → the
-  // video_recording post-verification barrier. Recording is fired only after
-  // every other post-release check passes; the barrier owns this subtask's
-  // status. Distinctive tokens ("video"/"recording" don't appear in any other
-  // post-release subtask title above), so first-match-wins is safe.
-  {
-    matchers: ["videorecording", "desktopmobileview", "video", "recording"],
-    checks: ["video_recording"],
-  },
+  // video_recording subtask mapping intentionally removed — video recording is no
+  // longer triggered via TED post-release. Any "Desktop & Mobile View Video"
+  // subtask now goes unmatched (a human already owns it) instead of enabling the
+  // video_recording barrier. It will become a separate, manually triggered TED
+  // task; the barrier logic is left intact for that future wiring.
 ]
 
 // --- TED Webhook Receiver ---
