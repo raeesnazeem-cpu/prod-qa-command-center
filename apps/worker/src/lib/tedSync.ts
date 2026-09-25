@@ -922,6 +922,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   dead_links: "Mention to check dead links one by one and fix according to context",
   learn_more_buttons: "Mention to check learn more buttons one by one and fix according to context",
   paid_media: "Mention to add Paid Media details in project details/notes",
+  dummy_content: "No fix possible. Review and replace content accordingly",
   privacy_policy: "Mention to add a Privacy Policy page and link it in the footer",
   footer_logo: "Mention to add the approved Growth99 footer logo with no tagline across all views",
   single_script: "Mention to install the Growth99 single-script embed (G99+ code from Basecamp) site-wide",

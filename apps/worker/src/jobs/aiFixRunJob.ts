@@ -640,6 +640,26 @@ export async function processAiFixRunJob(job: Job) {
       continue
     }
 
+    // --- dummy_content: no fix possible -----------------------------------
+    // Which real content replaces a placeholder is an editorial call, so it is
+    // never auto-edited or sent to AI triage — always one manual hand-off.
+    if (f.check_factor === "dummy_content") {
+      analysis.push({
+        findingId: f.id ? String(f.id) : null,
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+        category: "manual",
+        fix: "No fix possible. Review and replace content accordingly.",
+        applied: false,
+        proposed: false,
+        lapse: false,
+        filesOffered: [],
+        filesChanged: [],
+      })
+      continue
+    }
+
     // --- learn_more_buttons: ALWAYS a manual, editorial hand-off ----------
     // Rewording a generic "Learn More" CTA is a judgement call about where the
     // link goes, so it is NEVER auto-applied and NEVER a "proposal" the report
