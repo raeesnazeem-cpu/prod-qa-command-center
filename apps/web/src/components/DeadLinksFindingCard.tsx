@@ -86,6 +86,42 @@ const getUrlCount = (contextText: string | null | undefined) => {
   return 0
 }
 
+// Links the target would not let QACC verify (LinkedIn's 999, 429 rate limits,
+// bot blocks, timeouts). The worker stores them in context_text on a marker
+// line (see UNVERIFIED_LINKS_MARKER in the worker's optimizedLinksCheck.ts).
+// They are not broken links — shown here only, never in the TED report.
+const UNVERIFIED_MARKER = "Could not verify (not counted as broken):"
+
+type UnverifiedLink = { url: string; reason: string; text: string; found_on: string[] }
+
+const parseUnverified = (contextText: string | null | undefined): UnverifiedLink[] => {
+  const byUrl = new Map<string, UnverifiedLink>()
+  for (const line of String(contextText || "").split("\n")) {
+    const i = line.indexOf(UNVERIFIED_MARKER)
+    if (i < 0) continue
+    try {
+      const rows = JSON.parse(line.slice(i + UNVERIFIED_MARKER.length).trim())
+      for (const r of Array.isArray(rows) ? rows : []) {
+        if (!r?.url) continue
+        const cur: UnverifiedLink = byUrl.get(r.url) || { url: r.url, reason: r.reason || "", text: r.text || "", found_on: [] }
+        if (r.found_on && !cur.found_on.includes(r.found_on)) cur.found_on.push(r.found_on)
+        byUrl.set(r.url, cur)
+      }
+    } catch {
+      // A malformed line just shows nothing extra.
+    }
+  }
+  return [...byUrl.values()]
+}
+
+/** context_text without the machine-readable unverified lines. */
+const stripUnverified = (contextText: string | null | undefined): string =>
+  String(contextText || "")
+    .split("\n")
+    .filter((l) => !l.includes(UNVERIFIED_MARKER))
+    .join("\n")
+    .trim()
+
 export const DeadLinksFindingCard: React.FC<FindingCardProps> = ({
   finding,
   pageScreenshots,
@@ -134,6 +170,9 @@ export const DeadLinksFindingCard: React.FC<FindingCardProps> = ({
   const isConfirmed = finding.status === "confirmed"
   const isFalsePositive = finding.status === "false_positive"
   const isLocked = hasTask || isAssigned || isPushed
+
+  const unverified = React.useMemo(() => parseUnverified(finding.context_text), [finding.context_text])
+  const visibleContext = React.useMemo(() => stripUnverified(finding.context_text), [finding.context_text])
 
   const links = React.useMemo(() => {
     if (!finding.description) return []
@@ -471,13 +510,51 @@ export const DeadLinksFindingCard: React.FC<FindingCardProps> = ({
               </div>
             )}
 
-            {finding.context_text && (
+            {unverified.length > 0 && (
+              <div className="mb-6">
+                <p className="text-[8px] font-bold text-slate-400 uppercase mb-1.5 tracking-widest">
+                  Could not verify automatically ({unverified.length}) — not counted as broken
+                </p>
+                <div className="overflow-x-auto overflow-y-auto max-h-[140px] border border-slate-200 dark:border-slate-700 rounded-md">
+                  <table className="w-full text-[10px] text-left">
+                    <thead className="bg-slate-50 dark:bg-[#131d22] text-slate-500 dark:text-slate-400 sticky top-0">
+                      <tr>
+                        <th className="px-3 py-2 font-bold uppercase tracking-wider">URL</th>
+                        <th className="px-3 py-2 font-bold uppercase tracking-wider">Why</th>
+                        <th className="px-3 py-2 font-bold uppercase tracking-wider">Found On</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-700 text-slate-600 dark:text-slate-300">
+                      {unverified.map((u) => (
+                        <tr key={u.url}>
+                          <td className="px-3 py-2 align-top break-all text-blue-500 min-w-[150px]">
+                            <a href={u.url} target="_blank" rel="noreferrer" className="hover:underline">
+                              {u.url}
+                            </a>
+                          </td>
+                          <td className="px-3 py-2 align-top">{u.reason}</td>
+                          <td className="px-3 py-2 align-top break-all">
+                            {u.found_on.map((src) => (
+                              <a key={src} href={src} target="_blank" rel="noreferrer" className="block text-blue-500 hover:underline">
+                                {src}
+                              </a>
+                            ))}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {visibleContext && (
               <div className="mb-6">
                 <p className="text-[8px] font-bold text-slate-400 uppercase mb-1.5 tracking-widest">
                   Contextual Data
                 </p>
                 <div className="h-[80px] p-3 bg-slate-900 dark:bg-[#131d22] rounded-[10px] border border-slate-800 font-mono text-[10px] text-slate-300 whitespace-pre-wrap break-words overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:bg-[#93C0B1] [&::-webkit-scrollbar-track]:bg-transparent">
-                  {finding.context_text}
+                  {visibleContext}
                 </div>
               </div>
             )}

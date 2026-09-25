@@ -605,7 +605,10 @@ export const RunDetailPage = () => {
 
     const totalDeadLinksCount = urlMap.size
 
-    let mergedDescription = `The following dead or broken links were detected:\n\n`
+    let mergedDescription =
+      totalDeadLinksCount > 0
+        ? `The following dead or broken links were detected:\n\n`
+        : `No broken links found.`
 
     if (totalDeadLinksCount > 0) {
       mergedDescription += `| Error | URL | Anchor Text | Linked From |\n`
@@ -639,7 +642,10 @@ export const RunDetailPage = () => {
     const consolidatedDeadLinks: QAFinding = {
       id: combinedId,
       check_factor: "dead_links",
-      title: `${totalDeadLinksCount} dead link${totalDeadLinksCount !== 1 ? "s" : ""} found`,
+      title:
+        totalDeadLinksCount > 0
+          ? `${totalDeadLinksCount} dead link${totalDeadLinksCount !== 1 ? "s" : ""} found`
+          : "No dead links found",
       description: mergedDescription,
       context_text: deadLinks
         .map((f) => f.context_text)

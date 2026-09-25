@@ -296,7 +296,115 @@ export function sweepStaleLinkCaches(now = Date.now()): number {
   return dropped
 }
 
-type LinkCheckResult = { status: number; reason: string } | null
+// A probed link is either broken (a real defect), or could not be verified —
+// the target refused to answer an automated check (LinkedIn's 999, a 429 rate
+// limit, a 401/403 bot block, a Cloudflare challenge, a timeout). Unverified
+// links are NOT defects: they are kept for the QACC dashboard only, never the
+// TED report or the fix module. null = healthy.
+type LinkCheckResult =
+  | { status: number; reason: string; kind: "broken" | "unverified" }
+  | null
+
+// Sites that answer every automated request with a block (LinkedIn → 999,
+// the Meta/X family → login walls / 4xx). Probing them only produces noise, so
+// they are recorded as unverified without a request.
+const BOT_BLOCKING_HOSTS =
+  /(^|\.)(linkedin\.com|lnkd\.in|instagram\.com|facebook\.com|fb\.com|x\.com|twitter\.com)$/i
+
+// Resource hints point at a bare host (e.g. fonts.gstatic.com), not a page, so
+// requesting them 404s on healthy sites. Real stylesheets/scripts still count.
+const HINT_RELS = /\b(preconnect|dns-prefetch)\b/i
+
+// Marker line in context_text carrying the unverified links (JSON) for the
+// dashboard. Parsed by apps/web DeadLinksFindingCard; ignored by TED + fixes.
+export const UNVERIFIED_LINKS_MARKER = "Could not verify (not counted as broken):"
+
+const MAX_RETRY_AFTER_MS = 10_000
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** Wait the server's Retry-After (seconds or HTTP date), capped; default 3s. */
+function retryAfterMs(headers: any): number {
+  const raw = headers?.["retry-after"]
+  if (!raw) return 3000
+  const secs = Number(raw)
+  const ms = Number.isFinite(secs) ? secs * 1000 : new Date(String(raw)).getTime() - Date.now()
+  return Math.min(MAX_RETRY_AFTER_MS, Math.max(0, ms || 0))
+}
+
+/** A Cloudflare bot challenge, not a real server error. */
+function isCloudflareChallenge(res: any): boolean {
+  const h = res?.headers || {}
+  return !!h["cf-mitigated"] || (/cloudflare/i.test(String(h.server || "")) && [403, 503].includes(res?.statusCode))
+}
+
+type Probe = { res: any | null; error: any | null }
+
+async function probe(url: string, method: "head" | "get", timeoutMs: number): Promise<Probe> {
+  try {
+    const res = await got(url, {
+      method: method === "head" ? "HEAD" : "GET",
+      headers: BROWSER_HEADERS,
+      timeout: { request: timeoutMs },
+      retry: { limit: 0 },
+      followRedirect: true,
+      throwHttpErrors: false,
+    })
+    return { res, error: null }
+  } catch (error: any) {
+    return { res: null, error }
+  }
+}
+
+const isTimeout = (e: any) =>
+  e?.name === "TimeoutError" || /ETIMEDOUT|ESOCKETTIMEDOUT|timeout/i.test(`${e?.code || ""} ${e?.message || ""}`)
+
+/** Classify one link: healthy (null), broken, or unverified. */
+export async function checkLink(url: string): Promise<LinkCheckResult> {
+  try {
+    if (BOT_BLOCKING_HOSTS.test(new URL(url).hostname))
+      return { status: 0, reason: "Not checked — site blocks automated checks", kind: "unverified" }
+  } catch {
+    return { status: 0, reason: "Malformed URL", kind: "broken" }
+  }
+
+  // HEAD first (cheap). Anything but a clean answer is confirmed with GET —
+  // many servers mishandle HEAD.
+  const head = await probe(url, "head", 10000)
+  if (head.res && head.res.statusCode < 400) return null
+  if (head.res?.statusCode === 429) await sleep(retryAfterMs(head.res.headers))
+
+  let get = await probe(url, "get", 15000)
+  // One more try for the transient cases: rate limit (after Retry-After), 5xx,
+  // and a timeout (with a longer budget).
+  if (get.res?.statusCode === 429) {
+    await sleep(retryAfterMs(get.res.headers))
+    get = await probe(url, "get", 15000)
+  } else if (get.res && get.res.statusCode >= 500 && !isCloudflareChallenge(get.res)) {
+    await sleep(2000)
+    get = await probe(url, "get", 15000)
+  } else if (get.error && isTimeout(get.error)) {
+    get = await probe(url, "get", 25000)
+  }
+
+  if (get.res) {
+    const code = get.res.statusCode
+    if (code < 400) return null
+    if (code === 429) return { status: 429, reason: "Rate limited (429)", kind: "unverified" }
+    if (code === 999) return { status: 999, reason: "Blocked automated check (999)", kind: "unverified" }
+    if (isCloudflareChallenge(get.res))
+      return { status: code, reason: `Cloudflare bot challenge (${code})`, kind: "unverified" }
+    if (code === 401 || code === 403)
+      return { status: code, reason: `Access denied to automated check (${code})`, kind: "unverified" }
+    return { status: code, reason: `Status ${code}`, kind: "broken" }
+  }
+
+  const e = get.error
+  if (isTimeout(e)) return { status: 0, reason: "Timed out", kind: "unverified" }
+  const code = String(e?.code || "")
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN")
+    return { status: 0, reason: "Domain not found", kind: "broken" }
+  return { status: 0, reason: code ? `Connection failed (${code})` : "Connection Failed", kind: "broken" }
+}
 
 const BROWSER_HEADERS = {
   "User-Agent":
@@ -334,6 +442,7 @@ function extractUrlsFromHTML(html: string, baseUrl: string): ExtractedLink[] {
   })
 
   $("[href]:not(a)").each((_, el) => {
+    if (HINT_RELS.test($(el).attr("rel") || "")) return
     const url = $(el).attr("href")
     if (url && !linksMap.has(url)) {
       linksMap.set(url, `[Resource]`)
@@ -454,9 +563,12 @@ export async function checkOptimizedLinks(
     const brokenLinks: {
       url: string
       status: number
+      reason: string
       sourceUrl: string
       text: string
     }[] = []
+    // Links the target would not let us verify — dashboard-only, not defects.
+    const unverifiedLinks: { url: string; reason: string; text: string; found_on: string }[] = []
     
     // Link probes are I/O-bound, but each one still costs a TLS handshake, and
     // production runs qa-api + qa-worker on a single 2 vCPU / 4 GB box with
@@ -490,53 +602,7 @@ export async function checkOptimizedLinks(
         let checkPromise = linkPromises.get(urlToCheck)
 
         if (!checkPromise) {
-          checkPromise = checkLimit(async (): Promise<LinkCheckResult> => {
-            try {
-              const response = await got.head(urlToCheck, {
-                headers: BROWSER_HEADERS,
-                timeout: { request: 10000 },
-                retry: { limit: 1 },
-                followRedirect: true,
-              })
-
-              if (response.statusCode >= 400) {
-                return { status: response.statusCode, reason: `Status ${response.statusCode}` }
-              }
-              return null // Healthy
-            } catch (error: any) {
-              const statusCode = error.response?.statusCode || 0
-
-              // Fallback to GET for servers that reject HEAD requests
-              if (statusCode === 405 || statusCode === 403 || statusCode === 0) {
-                try {
-                  const getResponse = await got.get(urlToCheck, {
-                    headers: BROWSER_HEADERS,
-                    timeout: { request: 15000 },
-                    retry: { limit: 1 },
-                    followRedirect: true,
-                  })
-                  if (getResponse.statusCode >= 400) {
-                    return { status: getResponse.statusCode, reason: `Status ${getResponse.statusCode}` }
-                  }
-                  return null // Healthy on fallback
-                } catch (getFallbackError: any) {
-                  const fallbackStatus = getFallbackError.response?.statusCode || 0
-                  return {
-                    status: fallbackStatus,
-                    reason: fallbackStatus === 0 ? "Connection Failed" : `Status ${fallbackStatus}`
-                  }
-                }
-              }
-
-              if (statusCode >= 400 || statusCode === 0) {
-                return {
-                  status: statusCode,
-                  reason: statusCode === 0 ? "Connection Failed" : `Status ${statusCode}`
-                }
-              }
-              return null
-            }
-          })
+          checkPromise = checkLimit(() => checkLink(urlToCheck))
 
           linkPromises.set(urlToCheck, checkPromise)
         }
@@ -545,10 +611,18 @@ export async function checkOptimizedLinks(
         // created probe above holds one while its network work runs.
         return (async () => {
           const result = await checkPromise
-          if (result) {
+          if (result?.kind === "unverified") {
+            unverifiedLinks.push({
+              url: urlToCheck,
+              reason: result.reason,
+              text: linkText,
+              found_on: pageUrl,
+            })
+          } else if (result) {
             brokenLinks.push({
               url: urlToCheck,
               status: result.status,
+              reason: result.reason,
               sourceUrl: pageUrl,
               text: linkText,
             })
@@ -558,7 +632,27 @@ export async function checkOptimizedLinks(
     )
     await Promise.all(checkPromises)
 
-    if (brokenLinks.length === 0) return []
+    const countLine = `URLs extracted from this page: ${extractedLinks.length} | Total URLs checked in run so far: ${runTotalExtractedLinks.get(runId)}`
+    const unverifiedLine = unverifiedLinks.length
+      ? `\n${UNVERIFIED_LINKS_MARKER} ${JSON.stringify(unverifiedLinks)}`
+      : ""
+
+    if (brokenLinks.length === 0) {
+      if (!unverifiedLinks.length) return []
+      // Clean page, but keep the unverified list for the dashboard. The TED
+      // report only ever shows this sentinel's description (a plain pass).
+      return [
+        {
+          check_factor: "dead_links",
+          title: "No dead link issues found",
+          description: "No broken links found on this page.",
+          status: "open",
+          ai_generated: false,
+          screenshot_url: null,
+          context_text: countLine + unverifiedLine,
+        } as Finding,
+      ]
+    }
     if (onProgress) await onProgress(90, "Finalizing dead link findings...")
     return [
       {
@@ -567,13 +661,13 @@ export async function checkOptimizedLinks(
         description: brokenLinks
           .map(
             (b) =>
-              `- **${b.url}**\n  * Reason: ${b.status || "Failed"}\n  * Link Text: ${b.text}\n  * Found on: ${b.sourceUrl}`,
+              `- **${b.url}**\n  * Reason: ${b.status || b.reason || "Failed"}\n  * Link Text: ${b.text}\n  * Found on: ${b.sourceUrl}`,
           )
           .join("\n"),
         status: "open",
         ai_generated: false,
         screenshot_url: null,
-        context_text: `URLs extracted from this page: ${extractedLinks.length} | Total URLs checked in run so far: ${runTotalExtractedLinks.get(runId)}`,
+        context_text: countLine + unverifiedLine,
       },
     ]
   } catch (error: any) {
