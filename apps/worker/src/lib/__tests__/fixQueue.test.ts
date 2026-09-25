@@ -1,4 +1,4 @@
-import { selectFixQueue } from "../fixQueue"
+import { countFixEligible, selectFixQueue, sortFindingsForFix } from "../fixQueue"
 
 const pass = (factor: string, title: string, description = "") => ({ check_factor: factor, title, description })
 const defect = (i: number) => ({ check_factor: "spelling", title: `Misspelled: word${i}`, description: "Suggestion: x" })
@@ -34,5 +34,31 @@ describe("selectFixQueue", () => {
   it("handles empty / null input", () => {
     expect(selectFixQueue(null, 20)).toEqual([])
     expect(selectFixQueue([defect(1)], 0)).toEqual([])
+  })
+})
+
+describe("cap of 50", () => {
+  it("takes up to 50 defects and counts the rest as eligible", () => {
+    const passes = Array.from({ length: 10 }, () => pass("functionality_check", "Functionality: no interaction errors or breaks"))
+    const defects = Array.from({ length: 70 }, (_, i) => defect(i))
+    const all = [...passes, ...defects]
+    expect(selectFixQueue(all, 50)).toHaveLength(50)
+    expect(countFixEligible(all)).toBe(70)
+    expect(countFixEligible(null)).toBe(0)
+  })
+})
+
+describe("sortFindingsForFix", () => {
+  it("gives the same order whatever order the DB returns", () => {
+    const rows = [
+      { id: "3", check_factor: "spelling", page_id: "b" },
+      { id: "1", check_factor: "alt_text", page_id: "a" },
+      { id: "2", check_factor: "spelling", page_id: "a" },
+    ]
+    const a = sortFindingsForFix(rows).map((r) => r.id)
+    const b = sortFindingsForFix([...rows].reverse()).map((r) => r.id)
+    expect(a).toEqual(["1", "2", "3"])
+    expect(b).toEqual(a)
+    expect(rows[0].id).toBe("3") // input not mutated
   })
 })

@@ -36,7 +36,8 @@ import {
   logScanTimingRecap,
 } from "../lib/timingCollector"
 import { persistFixCheckResults } from "../lib/runResults"
-import { selectFixQueue } from "../lib/fixQueue"
+import { countFixEligible, selectFixQueue, sortFindingsForFix } from "../lib/fixQueue"
+import { FixProgress, throttleTrailing } from "../lib/fixProgress"
 import {
   seedPrivacyPolicyPage,
   seedPrivacyPolicyPageClassic,
@@ -129,7 +130,15 @@ const escHtml = (s: any) =>
   String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
 const VALID = new Set(["fully_ai", "partial_ai", "manual", "not_possible"])
-const MAX_FINDINGS = 20
+// Findings one fix run works on. 50 fits the shared 2 vCPU / 4 GB box because
+// the cost is bounded elsewhere, not by this number: LLM triage stays at
+// AI_FIX_TRIAGE_CONCURRENCY (3) calls in flight, repo context is capped per
+// finding (MAX_TOTAL_CONTEXT_BYTES), and git apply is serial. More findings =
+// a longer run, not more CPU/RAM at once. Override via AI_FIX_MAX_FINDINGS.
+const MAX_FINDINGS = Math.max(1, Number(process.env.AI_FIX_MAX_FINDINGS) || 50)
+// Min gap between ai_fix_* progress writes, so 50 findings don't mean 100+
+// back-to-back DB updates. A trailing write always carries the latest state.
+const FIX_PROGRESS_WRITE_MS = 2000
 const MAX_DIFF_CHARS = 6000
 
 interface Edit {
@@ -569,15 +578,20 @@ export async function processAiFixRunJob(job: Job) {
   // must never block the fix.
   // Pass results and informational rows never enter the loop or use a slot
   // (see selectFixQueue).
-  const fixQueue = selectFixQueue(findings, MAX_FINDINGS)
+  // Sorted first so the SAME findings make the cap on every run of a site.
+  const fixQueue = selectFixQueue(sortFindingsForFix(findings), MAX_FINDINGS)
   const fixTotal = fixQueue.length
+  const fixEligible = countFixEligible(findings)
+  // Every stage (loop 1, Phase A triage, Phase B apply) moves this counter, so
+  // TED's bar never freezes through the slow triage step (see FixProgress).
+  const progress = new FixProgress(fixTotal)
   const writeFixProgress = (final: boolean) =>
     supabase
       .from("qa_runs")
       .update({
         ai_fix_status: final ? "done" : "running",
         ai_fix_total: fixTotal,
-        ai_fix_done: final ? fixTotal : Math.min(analysis.length, fixTotal),
+        ai_fix_done: final ? fixTotal : progress.processed(),
         ai_fix_fixed: committed,
         ...(final ? { ai_fix_completed_at: new Date().toISOString() } : {}),
       })
@@ -595,10 +609,17 @@ export async function processAiFixRunJob(job: Job) {
     })
     .eq("id", runId)
     .then(undefined, () => {})
+  const tickFixProgress = throttleTrailing(
+    () => void writeFixProgress(false),
+    FIX_PROGRESS_WRITE_MS,
+  )
 
   for (const f of fixQueue) {
     flushIterTiming()
-    void writeFixProgress(false)
+    // Everything in `analysis` so far was decided by loop 1 (lapses +
+    // deterministic handlers); LLM findings are counted in Phase A/B instead.
+    progress.setDecided(analysis.length)
+    tickFixProgress()
     _iterStart = Date.now()
     _iterFactor = f.check_factor || "unknown"
     const pageUrl = pageUrlById.get(f.page_id) || ""
@@ -1836,6 +1857,8 @@ export async function processAiFixRunJob(job: Job) {
     llmFindings.push(f)
   }
   flushIterTiming() // record the last finding's deterministic-loop time
+  progress.setDecided(analysis.length)
+  tickFixProgress()
 
   const _phaseAStart = Date.now()
   // ===================== Phase A: triage (concurrent) =====================
@@ -1976,6 +1999,10 @@ export async function processAiFixRunJob(job: Job) {
           // to the finding's own title as the proposal.
         }
 
+        // Triage is the slow stage — move the bar as each batch lands.
+        progress.markTriaged(batch.length)
+        tickFixProgress()
+
         return batch.map((p, i) => ({
           f: p.f,
           pageUrl: p.pageUrl,
@@ -1997,7 +2024,6 @@ export async function processAiFixRunJob(job: Job) {
   // one finding at a time — never concurrently, or git corrupts. Each triage
   // result carries everything the apply step needs from Phase A.
   for (const t of triaged) {
-    void writeFixProgress(false)
     const { f, pageUrl, repoCtx } = t
     let category = t.category
     let fix = t.fix
@@ -2161,6 +2187,8 @@ export async function processAiFixRunJob(job: Job) {
           ? overwriteFailures[0]
           : undefined,
     })
+    progress.markApplied()
+    tickFixProgress()
   }
 
   recordAiFixTiming(runId, "apply_commit(phaseB)", Date.now() - _phaseBStart)
@@ -2348,6 +2376,11 @@ export async function processAiFixRunJob(job: Job) {
     : `<a href="${repoUrl}">${repoUrl}</a>`
   let summaryHeaderHtml = `<p>🤖 <strong>AI Fix</strong> · Repository: ${repoLabel}</p>`
   summaryHeaderHtml += `<p><strong>Fix status:</strong> ${statusLine}</p>`
+  // Say plainly when the cap left findings untouched — never drop them silently.
+  if (fixEligible > fixTotal) {
+    const skipped = fixEligible - fixTotal
+    summaryHeaderHtml += `<p>${skipped} more finding${skipped > 1 ? "s were" : " was"} not attempted this run (cap of ${MAX_FINDINGS} per run).</p>`
+  }
   if (prUrl) summaryHeaderHtml += `<p>Pull request: <a href="${prUrl}">${prUrl}</a></p>`
   // Count-free version of the status, so each subtask banner can prepend its OWN
   // per-check fix count. `statusLine` (run-wide) still heads the parent summary.
@@ -2461,6 +2494,7 @@ export async function processAiFixRunJob(job: Job) {
 
   // Fix progress → done, with the final tally (ai_fix_fixed = committed). TED's
   // poll now returns phase:"fix", percent:100, fixed/notFixed.
+  tickFixProgress.cancel() // a late trailing "running" write must not land after "done"
   await writeFixProgress(true)
 
   // Persist the per-check fix results (fixed/not_fixed + duration) for the TED
