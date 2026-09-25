@@ -36,6 +36,7 @@ import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
 import { checkAccessibility } from "../checks/accessibilityCheck"
+import { checkUrlTabMatching } from "../checks/urlTabMatchingCheck"
 import {
   checkPrivacyPolicy,
   checkFooterLogo,
@@ -461,7 +462,8 @@ export async function processCrawlPageJob(job: Job) {
 
       if (
         enabledChecks.includes("text_share") ||
-        enabledChecks.includes("url_tab_compare")
+        enabledChecks.includes("url_tab_compare") ||
+        enabledChecks.includes("url_matching")
       ) {
         const { data: project } = await supabase
           .from("projects")
@@ -671,6 +673,38 @@ export async function processCrawlPageJob(job: Job) {
           }),
         )
       }
+      // URL slug ↔ tab title must describe the same page. Every page except the
+      // homepage (its slug is empty). Only the title read touches the shared
+      // page; the occasional AI tie-break runs on the concurrent lane so it
+      // never holds up the serial shared-page checks.
+      if (enabledChecks.includes("url_matching")) {
+        const strip = (u: string) =>
+          (u || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "").toLowerCase()
+        if (strip(pageUrl) !== strip(run.site_url)) {
+          schedule("url_matching", () =>
+            (async () => {
+              try {
+                const meta = await sharedPageLane(() =>
+                  page.evaluate(() => ({
+                    title: document.title || "",
+                    siteName:
+                      (document.querySelector('meta[property="og:site_name"]') as HTMLMetaElement)
+                        ?.content || "",
+                  })),
+                )
+                return await checkUrlTabMatching(pageUrl, meta.title, [
+                  meta.siteName,
+                  projectName,
+                ])
+              } catch (e) {
+                logger.error("URL tab matching check failed:", e)
+                return lapse("url_matching")(e)
+              }
+            })(),
+          )
+        }
+      }
+
       // Accessibility = UserWay widget + HubSpot plan check. It is site-wide, so
       // run it ONCE per run (on the homepage only) with the client name for the
       // HubSpot lookup — not once per crawled page.
