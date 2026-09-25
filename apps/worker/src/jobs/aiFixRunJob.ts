@@ -528,6 +528,11 @@ export async function processAiFixRunJob(job: Job) {
     // notes / HubSpot, not the site). Renders a plain "Suggested Fix … — no
     // automated fix possible" line, never "✅ Fixed" and never an AI-Fix banner.
     noAutoFix?: boolean
+    // Set when nothing was changed and there is no fix to suggest — e.g. a
+    // GitOps handler found the setting already in place ("site_icon already
+    // set"), or no repo this run and no known correction. Rendered as a plain
+    // "Not changed: <reason>", never "✅ Fixed".
+    unchangedReason?: string
     suggestedFix?: string
     // Set for assisted-manual fixes that produced the exact code to place plus
     // where to put it (e.g. contact_form's per-client G99+ embed from Basecamp).
@@ -864,8 +869,11 @@ export async function processAiFixRunJob(job: Job) {
           category: g.applied ? "fully_ai" : "manual",
           fix: g.description || g.note,
           applied: g.applied,
-          // Located-but-not-applied (needs review) is a proposal, not a lapse.
-          proposed: !g.applied,
+          // Located-but-not-applied (a described change awaiting review) is a
+          // proposal. A bare miss ("already set", nothing to do) carries no
+          // description and is NOT a proposal — it changed nothing.
+          proposed: !g.applied && !!g.description?.trim(),
+          ...(g.applied || g.description?.trim() ? {} : { unchangedReason: g.note }),
           lapse: false,
           filesOffered: g.files,
           filesChanged: g.applied ? g.files : [],
@@ -2075,12 +2083,15 @@ export async function processAiFixRunJob(job: Job) {
     // or (no repo) the ones we KNOW the correction for from the finding itself.
     let reportEdits: Edit[] = landedEdits
 
-    // --- No repository this run: still report the fix, in the past tense. ------
-    // We know the correction even without a repo to apply it to. For a spelling
-    // finding the exact before→after is in the finding; for other AI-fixable
-    // findings the model's `fix` description is the correction. Marked as done
-    // (proposed=true, which the report renders as "✅ Fixed"); the run-level
-    // status line says nothing was pushed (no repo).
+    // Set when nothing changed AND there is no real correction to suggest.
+    let unchangedReason: string | undefined
+
+    // --- No repository this run: report the correction as a SUGGESTION. -------
+    // We may know the correction even without a repo to apply it to. For a
+    // spelling finding the exact before→after is in the finding; for other
+    // AI-fixable findings the model's `fix` description is the correction.
+    // Marked proposed=true, which the report renders as "Not changed — suggested
+    // fix" (never "✅ Fixed": nothing was edited).
     if (!workDir && !landed) {
       if (f.check_factor === "spelling" && reportEdits.length === 0) {
         const hay = `${f.title || ""}\n${f.description || ""}\n${f.context_text || ""}`
@@ -2097,12 +2108,16 @@ export async function processAiFixRunJob(job: Job) {
       // failing check that needs a fix, so document the correction: the model's
       // `fix` if it gave one, otherwise the finding's own text (its failing
       // condition, per subtask). Only a genuine no-defect finding stays blank.
+      // No edit and no model fix: there is no correction to suggest. Echoing
+      // the finding's own text back as a "fix" ("No suggestions found for X")
+      // is not a fix — say plainly that nothing was changed.
       if (!fix.trim() && reportEdits.length === 0) {
         const derived = (f.description || f.context_text || f.title || "").trim()
         if (derived) fix = derived
+        unchangedReason = "no repository access this run, and no automatic correction is known for this issue."
+      } else {
+        proposed = true
       }
-      const known = reportEdits.length > 0 || !!fix.trim()
-      if (known) proposed = true
     }
 
     // Never let a claim of AI-fixability survive when no edit actually landed
@@ -2128,6 +2143,7 @@ export async function processAiFixRunJob(job: Job) {
       fix,
       applied,
       proposed,
+      ...(unchangedReason ? { unchangedReason } : {}),
       lapse: false,
       filesOffered: repoCtx?.files || [],
       filesChanged,
@@ -2298,7 +2314,9 @@ export async function processAiFixRunJob(job: Job) {
       proposed: a.proposed,
       manual,
       manualKind: manual
-        ? noAutoFix
+        ? a.unchangedReason
+          ? "unchanged"
+          : noAutoFix
           ? "no_auto_fix"
           : placeCode
             ? "place_code"
@@ -2306,7 +2324,9 @@ export async function processAiFixRunJob(job: Job) {
               ? "apply_failed"
               : "rest_api"
         : undefined,
-      manualReason: noAutoFix
+      manualReason: a.unchangedReason
+        ? a.unchangedReason
+        : noAutoFix
         ? a.suggestedFix || a.fix
         : placeCode
           ? a.fix
