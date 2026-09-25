@@ -1,5 +1,5 @@
 import { Page as PlaywrightPage } from "playwright"
-import { Finding } from "@qacc/shared"
+import { Finding, aiFailureReason, AI_REASON_UNREADABLE } from "@qacc/shared"
 import { completeText } from "../lib/aiFallback"
 
 /**
@@ -23,28 +23,47 @@ export async function checkGrammar(
       "You are a meticulous website copy editor. Report only CLEAR grammar, spelling, and punctuation mistakes in the copy. Ignore brand/product names, proper nouns, and stylistic choices."
     const user = `Page: ${pageUrl}\n\nCopy:\n"""${snippet}"""\n\nReturn STRICT JSON only: {"issues":[{"excerpt":"<short quote>","issue":"<what is wrong>","suggestion":"<the fix>"}]}. Empty array if the copy is clean. Max 15 issues.`
 
-    let issues: any[] = []
+    // Read the reply ONLY when it is valid JSON with an `issues` array. Anything
+    // else is unreadable — never an empty list, which would be a false pass.
+    const readIssues = (resp: string): any[] | null => {
+      const m = String(resp || "").match(/\{[\s\S]*\}/)
+      if (!m) return null
+      try {
+        const o = JSON.parse(m[0])
+        return Array.isArray(o?.issues) ? o.issues : null
+      } catch {
+        return null
+      }
+    }
+
+    let issues: any[] | null = null
     let aiError: Error | null = null
     try {
-      const { text: resp } = await completeText(system, user)
-      const m = resp.match(/\{[\s\S]*\}/)
-      if (m) {
-        const o = JSON.parse(m[0])
-        if (Array.isArray(o.issues)) issues = o.issues
-      }
+      issues = readIssues((await completeText(system, user)).text)
+      // One retry with a stricter instruction before giving up on the reply.
+      if (issues === null)
+        issues = readIssues(
+          (
+            await completeText(
+              system,
+              `${user}\n\nIMPORTANT: reply with the JSON object ONLY — no prose, no code fences.`,
+            )
+          ).text,
+        )
     } catch (e: any) {
       aiError = e
     }
 
-    // If the AI call itself failed, DO NOT report a clean pass — that would be a
-    // false "no issues found". Surface it as a tool lapse (excluded from the
-    // TED defect count, but marks the check as "could not complete").
-    if (aiError) {
+    // The AI failed or its reply could not be read: DO NOT report a clean pass —
+    // that would be a false "no issues found". Surface it as a tool lapse with
+    // the honest reason (limit exhausted / unavailable / unreadable).
+    if (aiError || issues === null) {
+      const reason = aiError ? aiFailureReason(aiError.message) : AI_REASON_UNREADABLE
       return [
         {
           check_factor: "grammar",
           title: "Grammar Check Failed",
-          description: `The grammar check could not run (AI error): ${aiError.message}. Process aborted gracefully.`,
+          description: `Could not complete: ${reason}${aiError ? ` (${aiError.message})` : ""}. Process aborted gracefully.`,
           context_text: `URL: ${pageUrl}`,
           screenshot_url: null,
           status: "open",
@@ -58,7 +77,7 @@ export async function checkGrammar(
         {
           check_factor: "grammar",
           title: "No grammar issues found",
-          description: "No clear grammar, spelling, or punctuation issues were detected in this page's copy.",
+          description: `No clear grammar, spelling, or punctuation issues were detected in this page's copy${text.length > snippet.length ? ` (checked the first ${snippet.length} characters)` : ""}.`,
           context_text: `URL: ${pageUrl}`,
           screenshot_url: null,
           status: "open",

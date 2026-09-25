@@ -1360,7 +1360,9 @@ export async function processAiFixRunJob(job: Job) {
     if (f.check_factor === "project_plan") {
       const suggested = /could not reach ted/i.test(f.title || "")
         ? "Retry once TED is reachable, or add the Growth99 plan to the client's TED notes / HubSpot growth99_plan field."
-        : "Add the Growth99 project plan to the client notes, or set the growth99_plan field in HubSpot / the TED client record."
+        : /not rendering/i.test(f.title || "")
+          ? "The reviews widget code is on the /reviews page but the widget does not show. Check the widget id/bid against the Basecamp \"Review and Reputation Code\" and make sure the script is not blocked or deferred."
+          : "Add the Growth99 project plan to the client notes, or set the growth99_plan field in HubSpot / the TED client record."
       analysis.push({
         findingId: f.id ? String(f.id) : null,
         check_factor: f.check_factor,

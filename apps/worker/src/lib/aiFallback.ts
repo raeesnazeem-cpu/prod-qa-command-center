@@ -298,6 +298,9 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 // correctly scoped to the current run; it is cleared at run start and run end
 // (see resetAiBreakers callers).
 const deadVisionProviders = new Set<string>()
+// Why each dead provider died (first error), so the fail-fast message still
+// carries the real cause (e.g. a 429) for honest "could not complete" reasons.
+const deadVisionReasons = new Map<string, string>()
 
 // Per-run TEXT circuit breaker — same rationale and scoping as the vision one
 // above: a 429/500/503 from Gemini won't clear mid-run, so the first one trips
@@ -312,6 +315,7 @@ const textBreaker: { tripped: boolean; code: string | null } = {
  *  Called at run start and run end. */
 export function resetAiBreakers(): void {
   deadVisionProviders.clear()
+  deadVisionReasons.clear()
   textBreaker.tripped = false
   textBreaker.code = null
 }
@@ -582,7 +586,7 @@ export async function describeImageResult(
   // than grinding the chain again on this and every later image.
   const live = providers.filter((p) => !deadVisionProviders.has(p.name))
   if (live.length === 0) {
-    const error = `vision unavailable: all ${providers.length} provider(s) exhausted/unreachable earlier this run (${[...deadVisionProviders].join(", ")}); failing fast without retry`
+    const error = `vision unavailable: all ${providers.length} provider(s) exhausted/unreachable earlier this run (${[...deadVisionProviders].map((n) => `${n}: ${(deadVisionReasons.get(n) || "").slice(0, 160)}`).join(" | ")}); failing fast without retry`
     logger.warn({ dead: [...deadVisionProviders] }, "Vision: all providers dead this run; skipping attempts")
     return { text: "", ok: false, error }
   }
@@ -612,6 +616,7 @@ export async function describeImageResult(
       // transient error just falls through to the next provider.
       if (isExhaustedOrUnreachable(e)) {
         deadVisionProviders.add(p.name)
+        deadVisionReasons.set(p.name, msg)
         logger.warn(
           { provider: p.name },
           `Vision provider ${p.name} exhausted/unreachable — marked dead, skipped for the rest of this run`,

@@ -970,6 +970,8 @@ import {
   isInformationalFinding,
   isRealDefect,
   VISION_VERDICT_CHECKS,
+  aiLapseBlocksPass,
+  aiLapseSummary,
   parseSerps,
   serpBadReason,
 } from "@qacc/shared"
@@ -1397,6 +1399,14 @@ export function renderFixLine(fx?: FixReportInfo, usedAi?: boolean): string {
 
 // Render ONE check as a section. Returns its status so the caller can order
 // sections (failed → errored → passed) and tally the header line.
+// Roll-up wording for a check that did not complete. AI-backed checks name the
+// reason and coverage; everything else keeps the short "Could not run".
+function couldNotRunText(factor: string, group: any[]): string {
+  return aiLapseBlocksPass(factor, group)
+    ? `Could not complete: ${esc(aiLapseSummary(group))}`
+    : "Could not run"
+}
+
 // Per-page AI-fix outcome for image_quality: how many of the page's flagged
 // images were enhanced+verified (kept), out of the total, plus the standalone
 // carousel URL the "View before / after" link opens.
@@ -1622,6 +1632,16 @@ async function renderCheckSectionHtml(
     // if (shots.length)
     //   html += await renderScreenshotsHtml(shots.join(","), imgBudget)
     return { status: "failed", html }
+  }
+
+  // AI-backed checks (grammar, image_quality, project_plan): when the AI could
+  // not read some or all pages, the check did not complete. Shown WITH its
+  // honest reason and coverage (like GSR) instead of being hidden or passed.
+  if (aiLapseBlocksPass(factor, group)) {
+    return {
+      status: "errored",
+      html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete: ${esc(aiLapseSummary(group))}.</p>`,
+    }
   }
 
   if (lapses.length > 0) {
@@ -1919,7 +1939,7 @@ export async function postSectionedReport(opts: {
         const reason = failReason(s.factor)
         return `<li>${label} — Failed${reason ? `: ${esc(reason)}` : ""}</li>`
       }
-      if (s.status === "errored") return `<li>${label} — Could not run</li>`
+      if (s.status === "errored") return `<li>${label} — ${couldNotRunText(s.factor, byCheck.get(s.factor) || [])}</li>`
       return `<li>${label} — Passed</li>`
     })
     .join("")
@@ -2238,7 +2258,7 @@ export async function postDetectionSummary(runId: string, tedTaskId: string): Pr
         const reason = failReason(s.factor)
         return `<li>${label} — Failed${reason ? `: ${esc(reason)}` : ""}</li>`
       }
-      if (s.status === "errored") return `<li>${label} — Could not run</li>`
+      if (s.status === "errored") return `<li>${label} — ${couldNotRunText(s.factor, byCheck.get(s.factor) || [])}</li>`
       return `<li>${label} — Passed</li>`
     })
     .join("")

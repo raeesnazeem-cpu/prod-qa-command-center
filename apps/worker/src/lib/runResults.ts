@@ -13,6 +13,7 @@
 // report — it only degrades the history view.
 import { supabase } from "./supabase"
 import { getRunTimings, getAiFixTimings } from "./timingCollector"
+import { aiLapseBlocksPass, aiLapseSummary } from "@qacc/shared"
 import { FRIENDLY, isRealDefect, isToolLapseFinding } from "./tedSync"
 
 const logger = {
@@ -71,6 +72,8 @@ export async function persistScanCheckResults(runId: string): Promise<void> {
       let status: "failed" | "errored" | "passed"
       if (real.length > 0) status = "failed"
       else if (group.length > 0 && lapses.length === group.length) status = "errored"
+      // AI-backed checks: a page the AI never read blocks a pass.
+      else if (aiLapseBlocksPass(factor, group)) status = "errored"
       else status = "passed"
 
       const first = real[0] || null
@@ -81,7 +84,11 @@ export async function persistScanCheckResults(runId: string): Promise<void> {
         label: FRIENDLY[factor] || factor,
         status,
         duration_ms: durByCheck.get(factor) ?? null,
-        message: first ? first.title || first.description || null : null,
+        message: first
+          ? first.title || first.description || null
+          : status === "errored" && aiLapseBlocksPass(factor, group)
+            ? `Could not complete: ${aiLapseSummary(group)}`
+            : null,
         page_url: first ? urlById.get(first.page_id) || null : null,
         screenshot_url: first ? first.screenshot_url || null : null,
         severity: first ? first.severity || null : null,
