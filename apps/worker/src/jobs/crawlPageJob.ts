@@ -529,12 +529,6 @@ export async function processCrawlPageJob(job: Job) {
             return lapse("meta_tags")(e)
           }),
         )
-        scheduleOnSharedPage("dummy_content", () =>
-          checkDummyContent(page, screenshots).catch((e) => {
-            logger.error("Dummy content check failed:", e)
-            return lapse("dummy_content")(e)
-          }),
-        )
         scheduleOnSharedPage("spelling", () =>
           checkSpelling(page, screenshots).catch((e) => {
             logger.error("Spelling check failed:", e)
@@ -656,6 +650,18 @@ export async function processCrawlPageJob(job: Job) {
           }).catch((e) => {
             logger.error("Functionality check failed:", e)
             return lapse("functionality_check")(e)
+          }),
+        )
+      }
+
+      // Dummy / placeholder content — all-pages, shared-page check. Its own
+      // gate (not the accessibility composite) so full scan and post-release
+      // can run it on every page.
+      if (enabledChecks.includes("dummy_content")) {
+        scheduleOnSharedPage("dummy_content", () =>
+          checkDummyContent(page, screenshots).catch((e) => {
+            logger.error("Dummy content check failed:", e)
+            return lapse("dummy_content")(e)
           }),
         )
       }

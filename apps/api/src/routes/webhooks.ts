@@ -1204,6 +1204,7 @@ const POST_RELEASE_DEFAULT_CHECKS = [
   "verify_plugin_updates",
   "page_speed",
   "contact_form",
+  "dummy_content",
 ]
 
 // The `release.qa_post` SUBTASKS → the QACC check(s) that report into each,
@@ -1216,7 +1217,12 @@ const POST_RELEASE_DEFAULT_CHECKS = [
 // → submit → thank-you) on the contact page, submitting a clearly test-labelled
 // lead. Mirrors PRE_RELEASE_SECTIONS.
 const POST_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
-  { matchers: ["testthelive", "livewebsite"], checks: ["functionality_check"] },
+  // dummy_content reports as an extra section in the same live-website
+  // subtask comment — it has no subtask of its own.
+  {
+    matchers: ["testthelive", "livewebsite"],
+    checks: ["functionality_check", "dummy_content"],
+  },
   { matchers: ["gsr"], checks: ["gsr_check"] },
   { matchers: ["grammarly"], checks: ["grammar", "spelling"] },
   { matchers: ["ada", "accessibility"], checks: ["accessibility_check"] },
@@ -1979,7 +1985,10 @@ const FULL_SCAN_CHECKS = [
   // baseline visual-diff comparisons running in the standalone full-scan suite.
   "spelling",
   "console_errors",
-  "seo",
+  // seo intentionally EXCLUDED — no worker check runs for that key, so it only
+  // ever printed a false "✅ Passed".
+  // Placeholder/dummy text sweep on every page (standalone gate, not the old
+  // accessibility composite). Shared with post-release's live-website subtask.
   "dummy_content",
   "dead_links",
   "learn_more_buttons",
