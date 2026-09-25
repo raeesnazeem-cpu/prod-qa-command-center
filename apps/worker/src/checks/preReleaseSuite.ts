@@ -46,8 +46,153 @@ const logger = pino({
   },
 })
 
-// Memory lock to prevent multiple pages from taking screenshots at the exact same time
-const contactFormScreenshotLocks = new Set<string>()
+// ---------------------------------------------------------------------------
+// Contact-form submit coordinator — ONE test lead per run.
+//
+// The same Growth99 form usually sits on every page, so submitting it on each
+// crawled page would push hundreds of test leads into the client's CRM. Per run:
+//   • the HOMEPAGE gets the first attempt;
+//   • other pages may attempt only after the homepage finished without a
+//     confirmed submission (or when the homepage isn't part of the run);
+//   • at most MAX_CONTACT_FORM_SUBMITS attempts in total (homepage + 2 fallbacks);
+//   • the first confirmed submission (thank-you seen) stops all further ones.
+// A crash counts as a used attempt — it never frees an unlimited retry.
+// State is in-memory (one worker process); the DB guard in the check re-derives
+// it from saved findings so a worker restart can't reset the budget.
+// ---------------------------------------------------------------------------
+const MAX_CONTACT_FORM_SUBMITS = 3
+// Idle state older than this belongs to a finished run — evicted lazily.
+const CONTACT_FORM_STATE_TTL_MS = 12 * 60 * 60 * 1000
+
+interface ContactFormSubmitState {
+  attempts: number
+  succeeded: boolean
+  inFlight: boolean
+  homepageDone: boolean
+  // null = not looked up yet (treated as "in run" → others wait, the safe side).
+  homepageInRun: boolean | null
+  // One-time DB sync per run per process, shared by concurrent pages.
+  synced: Promise<void> | null
+  touchedAt: number
+}
+const contactFormSubmitState = new Map<string, ContactFormSubmitState>()
+
+function contactFormState(runId: string): ContactFormSubmitState {
+  const now = Date.now()
+  let s = contactFormSubmitState.get(runId)
+  if (!s) {
+    // Evict finished runs only when a new run appears: O(active runs), which
+    // is a handful — keeps memory bounded without a timer.
+    for (const [id, st] of contactFormSubmitState)
+      if (now - st.touchedAt > CONTACT_FORM_STATE_TTL_MS) contactFormSubmitState.delete(id)
+    s = {
+      attempts: 0,
+      succeeded: false,
+      inFlight: false,
+      homepageDone: false,
+      homepageInRun: null,
+      synced: null,
+      touchedAt: now,
+    }
+    contactFormSubmitState.set(runId, s)
+  }
+  s.touchedAt = now
+  return s
+}
+
+/**
+ * Cheap in-memory pre-check: could this page possibly get the slot? Lets a
+ * hopeless page (budget spent, success recorded, slot busy, homepage pending)
+ * skip every DB call. Unknown homepageInRun is NOT a blocker here, so a run
+ * without its homepage still gets synced and can proceed.
+ */
+function mayClaimContactFormSubmit(s: ContactFormSubmitState, isHomepage: boolean): boolean {
+  if (s.succeeded || s.inFlight || s.attempts >= MAX_CONTACT_FORM_SUBMITS) return false
+  return isHomepage || s.homepageInRun !== true || s.homepageDone
+}
+
+/** Synchronous claim — safe against concurrent pages (single JS thread). */
+export function claimContactFormSubmit(runId: string, isHomepage: boolean): boolean {
+  const s = contactFormState(runId)
+  if (s.succeeded || s.inFlight || s.attempts >= MAX_CONTACT_FORM_SUBMITS) return false
+  if (!isHomepage && s.homepageInRun !== false && !s.homepageDone) return false
+  s.inFlight = true
+  s.attempts++
+  return true
+}
+
+export function releaseContactFormSubmit(runId: string, succeeded: boolean): void {
+  const s = contactFormState(runId)
+  s.inFlight = false
+  if (succeeded) s.succeeded = true
+}
+
+/** The homepage's check finished (form or not) → fallback pages may attempt. */
+export function markContactFormHomepageDone(runId: string): void {
+  contactFormState(runId).homepageDone = true
+}
+
+/** Test/cleanup hook: drop a run's coordinator state. */
+export function resetContactFormSubmit(runId: string): void {
+  contactFormSubmitState.delete(runId)
+}
+
+const normalizeSiteUrl = (u: string) =>
+  (u || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "").toLowerCase()
+
+/** The 8 spellings a stored homepage URL can take (scheme × www × slash). */
+function homepageUrlVariants(siteUrl: string): string[] {
+  const host = normalizeSiteUrl(siteUrl)
+  const out: string[] = []
+  for (const scheme of ["https://", "http://"])
+    for (const www of ["", "www."])
+      for (const slash of ["", "/"]) out.push(`${scheme}${www}${host}${slash}`)
+  return out
+}
+
+/**
+ * Seed a run's state from the DB ONCE per process: whether the homepage is in
+ * the run, and the submit budget already used (so a worker restart can't reset
+ * it). Both queries are indexed point lookups capped by LIMIT — O(1) rows —
+ * and run in parallel. A DB error clears the memo so the next page retries.
+ */
+async function syncContactFormState(
+  runId: string,
+  siteUrl: string | undefined,
+  supabase: any,
+): Promise<void> {
+  const s = contactFormState(runId)
+  if (!s.synced) {
+    s.synced = (async () => {
+      const [home, prior] = await Promise.all([
+        siteUrl
+          ? supabase
+              .from("pages")
+              .select("id")
+              .eq("run_id", runId)
+              .in("url", homepageUrlVariants(siteUrl))
+              .limit(1)
+          : Promise.resolve({ data: [], error: null }),
+        supabase
+          .from("findings")
+          .select("context_text")
+          .eq("run_id", runId)
+          .eq("check_factor", "contact_form")
+          .ilike("context_text", '%"submitAttempted":true%')
+          .limit(MAX_CONTACT_FORM_SUBMITS),
+      ])
+      if (home.error || prior.error) throw home.error || prior.error
+      s.homepageInRun = (home.data || []).length > 0
+      const rows = (prior.data || []).map((r: any) => String(r.context_text || ""))
+      if (rows.some((t: string) => t.includes('"thankYouSeen":true'))) s.succeeded = true
+      s.attempts = Math.max(s.attempts, rows.length)
+    })().catch((e: any) => {
+      s.synced = null
+      logger.warn({ runId, error: e?.message }, "Contact form: state sync failed; will retry")
+    })
+  }
+  await s.synced
+}
 
 // ===========================================================================
 // Shared page-load hardening for the visual checks (call-now, sticky header,
@@ -1578,6 +1723,9 @@ export async function checkGrowth99ContactForm(
   // (clearly test-labelled) lead. When false the pre-release behaviour is
   // unchanged: pass on mere presence. See POST_RELEASE_SECTIONS in the API.
   isPostRelease: boolean = false,
+  // siteUrl lets the check tell the homepage apart — it gets the run's first
+  // (and usually only) test submission. See the submit coordinator above.
+  opts?: { siteUrl?: string },
 ): Promise<Finding[]> {
   const { chromium } = require("playwright")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
@@ -1595,6 +1743,10 @@ export async function checkGrowth99ContactForm(
   // "Contact Us" pages are where the form is expected to live. Used post-release
   // to avoid flagging "not found" on every non-contact page in a full crawl.
   const isContactPage = /contact/i.test(url)
+  const isHomepage =
+    !!opts?.siteUrl && normalizeSiteUrl(url) === normalizeSiteUrl(opts.siteUrl)
+  // True only while THIS page holds the run's single submit slot.
+  let acquiredSubmit = false
 
   const browser = sharedBrowser || (await chromium.launch({ headless: true }))
   let context: any = null
@@ -1627,27 +1779,21 @@ export async function checkGrowth99ContactForm(
     )
 
     if (hasForm) {
-      // Check if any screenshots were already taken for this run to avoid duplicates
-      const { data: existingFindings } = await supabase
-        .from("findings")
-        .select("screenshot_url")
-        .eq("run_id", runId)
-        .eq("check_factor", "contact_form")
-        .not("screenshot_url", "is", null)
-
-      const alreadyHasScreenshots =
-        existingFindings &&
-        existingFindings.length > 0 &&
-        existingFindings[0].screenshot_url
-
-      // Only give permission to take screenshots if no other page has already locked it
-      let acquiredLock = false
-      if (!contactFormScreenshotLocks.has(runId)) {
-        contactFormScreenshotLocks.add(runId)
-        acquiredLock = true
+      // One test lead per run (see the submit coordinator). The in-memory
+      // pre-check means only a page that could actually win the slot touches
+      // the DB, and that sync happens once per run.
+      const state = contactFormState(runId)
+      if (mayClaimContactFormSubmit(state, isHomepage)) {
+        await syncContactFormState(runId, opts?.siteUrl, supabase)
+        acquiredSubmit = claimContactFormSubmit(runId, isHomepage)
       }
+      if (acquiredSubmit)
+        logger.info(
+          { runId, url, isHomepage, attempt: state.attempts },
+          "Contact form: this page submits the run's test lead",
+        )
 
-      if (!alreadyHasScreenshots && acquiredLock) {
+      if (acquiredSubmit) {
         if (onProgress)
           await onProgress(
             30,
@@ -1790,9 +1936,14 @@ export async function checkGrowth99ContactForm(
     if (onProgress) await onProgress(90, "Finalizing contact form findings...")
   } catch (e: any) {
     console.error("Growth99 contact form check failed:", e)
-    contactFormScreenshotLocks.delete(runId) // release the lock on error
     contactFormCheckError = e?.message || String(e)
   } finally {
+    // Release the submit slot. A crash counts as a used (failed) attempt, so a
+    // flaky site can't turn every page into another test lead.
+    if (acquiredSubmit)
+      releaseContactFormSubmit(runId, fillOk && submitOk && thankYouSeen && !contactFormCheckError)
+    // Homepage finished (form or not) → fallback pages may now attempt.
+    if (isHomepage) markContactFormHomepageDone(runId)
     if (context) await context.close()
     if (!sharedBrowser) await browser.close()
   }

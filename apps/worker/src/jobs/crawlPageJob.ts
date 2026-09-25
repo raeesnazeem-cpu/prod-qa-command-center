@@ -605,6 +605,9 @@ export async function processCrawlPageJob(job: Job) {
                 // test-labelled) lead and gate pass/fail on the full
                 // fill → submit → thank-you flow, scoped to the contact page.
                 run.run_type === "post_release",
+                // Homepage gets the run's single test submission; other pages
+                // are fallbacks only (max 3 submits per run).
+                { siteUrl: run.site_url },
               )
             } catch (e) {
               logger.error("Contact form check failed:", e)
