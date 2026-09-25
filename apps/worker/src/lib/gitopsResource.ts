@@ -8,7 +8,7 @@
  * MU plugin reconciles it into the live site. See
  * docs/25-08-2026-gitops-fix-target-structure.md.
  *
- * The theme-file fix handlers (footerLogoFix, learnMoreFix, …) all resolve a
+ * The theme-file fix handlers (footerLogoFix, singleScriptFix, …) all resolve a
  * theme dir by functions.php/theme.json and write parts/footer.html etc. NONE
  * of those paths exist here, so against a GitOps repo every one of them reports
  * "manual". This module is the replacement target: it reads and mutates the

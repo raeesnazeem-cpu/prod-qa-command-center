@@ -11,10 +11,8 @@ import {
   getSingleScriptCodeFromBasecamp,
 } from "../lib/basecampClient"
 import { injectSingleScriptIntoFooter } from "../lib/singleScriptFix"
-import { removeLearnMoreButtons } from "../lib/learnMoreFix"
 import { deferChatbotScript } from "../lib/chatbotScriptFix"
 import { applyFooterLogoFix } from "../lib/footerLogoFix"
-import { applyStickyHeaderFix } from "../lib/stickyHeaderFix"
 import {
   postTedComment,
   postSectionedReport,
@@ -266,21 +264,17 @@ async function runGitopsFix(
     }
   }
 
+  // grammar, false_breakpoint and learn_more_buttons are not here: the fix loop
+  // handles them before it ever calls this router.
   switch (f.check_factor) {
     case "spelling":
       return guard(() => applySpellingGitops(workDir, f))
-    case "grammar":
-      // Grammar is located, not auto-written: the AI suggestion is editorial, not
-      // a guaranteed verbatim replacement (see applyGrammarGitops).
-      return guard(() => applyGrammarGitops(workDir, f))
     case "backend_check":
       return guard(() => applyBackendGitops(workDir, f))
     case "favicon":
       return guard(() => applyFaviconGitops(workDir))
     case "footer_logo":
       return guard(() => applyFooterLogoGitops(workDir))
-    case "learn_more_buttons":
-      return guard(() => applyLearnMoreGitops(workDir))
     case "meta_tags":
     case "text_share":
     case "social_share_heading":
@@ -294,9 +288,9 @@ async function runGitopsFix(
       return guardAsync(() => applyAccessibilityGitops(workDir, f, { projectName: ctx.company }))
     case "dead_links":
       return guard(() => applyDeadLinksGitops(workDir, f))
-    case "false_breakpoint":
-      return guard(() => applyFalseBreakpointGitops(workDir, f))
     case "top_bar_sticky":
+      // Elementor sticky on the header template. Kept for when the fix loop's
+      // top_bar_sticky skip is lifted — today the loop skips it before here.
       return guard(() => applyStickyHeaderGitops(workDir, f))
     case "hero_media":
       return guard(() => applyHeroMediaGitops(workDir, f))
@@ -1382,92 +1376,6 @@ export async function processAiFixRunJob(job: Job) {
       continue
     }
 
-    // --- Deterministic Learn More buttons fix ----------------------------
-    // The check flags generic CTA buttons ("Learn More"/"Read More"/…). The fix
-    // is to REMOVE them. We strip matching Gutenberg button blocks + plain
-    // anchors/buttons from the theme repo; when the button is DB/page content
-    // (not in the repo) nothing matches and we report a manual removal.
-    const learnMoreDefect =
-      f.check_factor === "learn_more_buttons" &&
-      /\d+\s+generic CTA button/i.test(f.title || "")
-    if (learnMoreDefect) {
-      const res = workDir
-        ? await removeLearnMoreButtons(workDir, repoThemeType).catch(
-            (e: any) => ({ changed: false, files: [] as string[], removed: 0, description: "", note: `remove threw: ${e?.message}` }),
-          )
-        : { changed: false, files: [] as string[], removed: 0, description: "", note: "no repo cloned" }
-
-      if (res.changed) {
-        let landed = false
-        let diff = ""
-        try {
-          const { stdout } = await git(["diff", "--unified=3", "--", ...res.files])
-          diff = stdout.slice(0, MAX_DIFF_CHARS)
-        } catch {}
-        try {
-          // Edit is in the working tree; all fixes are committed once, together,
-          // right before push (Task 6 — one commit per run, not per finding).
-          committed++
-          landed = true
-        } catch (e: any) {
-          logger.warn({ runId, error: e.message }, "AI Fix: learn-more removal commit failed.")
-        }
-        analysis.push({
-          findingId: f.id ? String(f.id) : null,
-          check_factor: f.check_factor,
-          title: f.title || f.check_factor,
-          pageUrl,
-          category: landed ? "fully_ai" : "manual",
-          fix: res.description,
-          // Applied = the edit landed and was committed locally (past tense).
-          // Whether it was pushed is a separate fact stated in the push
-          // disclaimer; a committed-but-unpushed fix is still an applied fix.
-          applied: landed,
-          proposed: false,
-          lapse: false,
-          filesOffered: res.files,
-          filesChanged: landed ? res.files : [],
-          editNotes: [res.note],
-          edits: [],
-          diff,
-        })
-        continue
-      }
-
-      // No repo access → still document the determined correction (not applied).
-      if (noRepoAccess) {
-        analysis.push({
-          findingId: f.id ? String(f.id) : null,
-          check_factor: f.check_factor,
-          title: f.title || f.check_factor,
-          pageUrl,
-          category: "fully_ai",
-          fix: `Removed the generic "Learn More"-style CTA button(s).`,
-          applied: false,
-          proposed: true,
-          lapse: false,
-          filesOffered: [],
-          filesChanged: [],
-        })
-        continue
-      }
-      // Not in the repo (DB/page content) → honest manual removal.
-      analysis.push({
-        findingId: f.id ? String(f.id) : null,
-        check_factor: f.check_factor,
-        title: f.title || f.check_factor,
-        pageUrl,
-        category: "manual",
-        fix: `Remove the generic "Learn More"-style CTA button(s) — ${res.note}.`,
-        applied: false,
-        proposed: false,
-        lapse: false,
-        filesOffered: [],
-        filesChanged: [],
-      })
-      continue
-    }
-
     // --- Deterministic Footer Logo fix -----------------------------------
     // Add a "Developed & maintained by <Growth99 logo>" credit into the footer.
     // AI determines the variant: it reads the footer background from the evidence
@@ -1564,95 +1472,6 @@ export async function processAiFixRunJob(job: Job) {
         pageUrl,
         category: "manual",
         fix: `Add the "Developed & maintained by Growth99" footer credit (${variantLabel} logo) manually — ${res.note}.`,
-        applied: false,
-        proposed: false,
-        lapse: false,
-        filesOffered: [],
-        filesChanged: [],
-      })
-      continue
-    }
-
-    // --- Deterministic Sticky Header fix ---------------------------------
-    // The top_bar_sticky check passes a header that stays pinned after scroll OR
-    // declares computed position:sticky. When neither holds (reported inline as
-    // "did NOT stay pinned"), the fix is to make it sticky: inject a CSS rule
-    // that sets position:sticky;top:0 (+ z-index) on the header element into the
-    // theme's header template. Block → parts/header.html; classic → header.php.
-    const stickyDefect =
-      f.check_factor === "top_bar_sticky" &&
-      !/check failed/i.test(f.title || "") &&
-      /did not stay pinned|not pinned/i.test(
-        `${f.title || ""} ${f.description || ""} ${(f as any).context_text || ""}`,
-      )
-    if (stickyDefect) {
-      const res = workDir
-        ? await applyStickyHeaderFix(workDir, repoThemeType).catch((e: any) => ({
-            changed: false,
-            files: [] as string[],
-            note: `sticky header fix threw: ${e?.message}`,
-          }))
-        : { changed: false, files: [] as string[], note: "no repo cloned" }
-
-      if (res.changed) {
-        let landed = false
-        let diff = ""
-        try {
-          const { stdout } = await git(["diff", "--unified=3", "--", ...res.files])
-          diff = stdout.slice(0, MAX_DIFF_CHARS)
-        } catch {}
-        try {
-          // Edit is in the working tree; all fixes are committed once, together,
-          // right before push (Task 6 — one commit per run, not per finding).
-          committed++
-          landed = true
-        } catch (e: any) {
-          logger.warn({ runId, error: e.message }, "AI Fix: sticky header commit failed.")
-        }
-        analysis.push({
-          findingId: f.id ? String(f.id) : null,
-          check_factor: f.check_factor,
-          title: f.title || f.check_factor,
-          pageUrl,
-          category: landed ? "fully_ai" : "manual",
-          fix: `Made the header sticky — added position:sticky;top:0 to the header element in the theme's header template.`,
-          applied: landed,
-          proposed: false,
-          lapse: false,
-          filesOffered: res.files,
-          filesChanged: landed ? res.files : [],
-          editNotes: [res.note],
-          edits: [],
-          diff,
-        })
-        continue
-      }
-
-      // No repo access → document the determined correction (not applied).
-      if (noRepoAccess) {
-        analysis.push({
-          findingId: f.id ? String(f.id) : null,
-          check_factor: f.check_factor,
-          title: f.title || f.check_factor,
-          pageUrl,
-          category: "fully_ai",
-          fix: `Make the header sticky — add position:sticky;top:0 to the header element in the theme's header template.`,
-          applied: false,
-          proposed: true,
-          lapse: false,
-          filesOffered: [],
-          filesChanged: [],
-        })
-        continue
-      }
-      // Repo present but no header template to edit → honest manual report.
-      analysis.push({
-        findingId: f.id ? String(f.id) : null,
-        check_factor: f.check_factor,
-        title: f.title || f.check_factor,
-        pageUrl,
-        category: "manual",
-        fix: `Make the header sticky (position:sticky;top:0) manually — ${res.note}.`,
         applied: false,
         proposed: false,
         lapse: false,
