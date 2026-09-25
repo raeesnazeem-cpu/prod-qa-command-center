@@ -3,7 +3,7 @@ import { Queue, Worker, Job } from "bullmq"
 import pino from "pino"
 import { processTestJob } from "./jobs/testJob"
 import { processStartRunJob } from "./jobs/startRunJob"
-import { processCrawlPageJob } from "./jobs/crawlPageJob"
+import { processCrawlPageJob, finalizeRun } from "./jobs/crawlPageJob"
 import { processCaptureScreenshotJob } from "./jobs/captureScreenshotJob"
 import { processCrawlBatchJob } from "./jobs/crawlBatchJob"
 import { processCheckProjectPlanJob } from "./jobs/checkProjectPlanJob"
@@ -16,6 +16,7 @@ import {
 import { qaQueue, connection } from "./lib/queue"
 import { processCaptureMultiviewScreenshotsJob } from "./jobs/captureMultiviewScreenshotsJob"
 import { startStuckRunSweeper } from "./lib/stuckRunSweeper"
+import { releaseReportGate } from "./lib/reportGate"
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -28,6 +29,36 @@ const logger = pino({
 })
 
 const queueName = "qa-jobs"
+
+// Run a standalone API check, then release its part of the run's report gate.
+// Released on success or on the LAST failed attempt (a failed check must not
+// block the report forever); earlier failures retry first. If this check was
+// the last part still running, it finalizes the run (TED report, AI fix).
+async function runApiCheck(
+  job: Job,
+  check: string,
+  processor: (job: Job) => Promise<void>,
+) {
+  const release = async () => {
+    if (job.data.isRetry) return
+    if ((await releaseReportGate(job.data.runId, check)) !== "open") return
+    // Never let a finalize error fail (and re-run) the check itself.
+    await finalizeRun(job.data.runId).catch((e) =>
+      logger.error(
+        { runId: job.data.runId, error: e?.message },
+        "finalizeRun after API check failed",
+      ),
+    )
+  }
+  try {
+    await processor(job)
+  } catch (err) {
+    // attemptsMade = failed attempts BEFORE this one.
+    if (job.attemptsMade + 1 >= (job.opts.attempts ?? 1)) await release()
+    throw err
+  }
+  await release()
+}
 
 // 2. Create the Worker
 const worker = new Worker(
@@ -52,10 +83,10 @@ const worker = new Worker(
           await processCrawlBatchJob(job)
           break
         case "check_project_plan":
-          await processCheckProjectPlanJob(job)
+          await runApiCheck(job, "project_plan", processCheckProjectPlanJob)
           break
         case "check_paid_media":
-          await processCheckPaidMediaJob(job)
+          await runApiCheck(job, "paid_media", processCheckPaidMediaJob)
           break
         case "ai_fix_run":
           await processAiFixRunJob(job)
