@@ -1,5 +1,49 @@
 import { Page as PlaywrightPage } from "playwright"
-import { Finding } from "@qacc/shared"
+import { Finding, serpBadReason } from "@qacc/shared"
+
+const NOT_SITE = "This is not a problem with the website."
+
+/**
+ * Why the Google results could not be read, in plain words, from what the
+ * search service (ScraperAPI) actually returned. Exported for tests.
+ * Returns "" when nothing identifies a failure.
+ */
+export function describeGsrFailure(
+  httpStatus: number | null,
+  bodyText: string,
+  domain: string,
+): string {
+  const body = (bodyText || "").slice(0, 4000)
+  const svc = "The Google search service (ScraperAPI)"
+  if (/exhausted the api credits|out of credits|credit limit/i.test(body))
+    return `${svc} has used up its monthly request credits, so Google could not be searched. Top up the plan or wait for the monthly reset, then rerun. ${NOT_SITE}`
+  if (httpStatus === 401 || /invalid api key|api key.*(invalid|missing|required)|unauthori[sz]ed/i.test(body))
+    return `${svc} rejected the API key, so Google could not be searched. Check the key, then rerun. ${NOT_SITE}`
+  if (httpStatus === 429 || /too many (concurrent )?requests|rate limit/i.test(body))
+    return `${svc} hit its request rate limit, so Google could not be searched. Rerun in a few minutes. ${NOT_SITE}`
+  if (/unusual traffic|\/sorry\/|captcha|not a robot/i.test(body))
+    return `Google blocked the search request with a CAPTCHA / unusual-traffic check. Rerun later. ${NOT_SITE}`
+  if (/did not match any documents|no results found for/i.test(body))
+    return `Google has no indexed results for site:${domain} yet, so there were no search results to check. This is normal for a new or beta site hidden from search engines.`
+  if (httpStatus !== null && httpStatus >= 500)
+    return `${svc} could not fetch Google's results (HTTP ${httpStatus} after its own retries). Rerun later. ${NOT_SITE}`
+  if (httpStatus !== null && httpStatus >= 400)
+    return `${svc} refused the request (HTTP ${httpStatus}${body.trim() ? `: ${body.trim().slice(0, 160)}` : ""}). ${NOT_SITE}`
+  return ""
+}
+
+function couldNotRun(reason: string, detail: string): Finding {
+  return {
+    check_factor: "gsr_check",
+    // "Skipped" marks it as could-not-run in the shared verdict (never a defect).
+    title: "GSR Check Skipped — could not run",
+    description: reason,
+    context_text: detail,
+    screenshot_url: null,
+    status: "open",
+    ai_generated: false,
+  } as Finding
+}
 
 // How many SERP pages to walk. Previously the while-loop said 15 while the
 // pagination guard said 5, so 5 was the real bound and 15 was misleading.
@@ -23,14 +67,51 @@ export async function checkGsr(
       await onProgress(40, `Searching Google for site:${domain}...`)
     // Navigate to google
     const apiKey = process.env.SCRAPER_API_KEY
+    if (!apiKey) {
+      await newPage.close().catch(() => {})
+      return [
+        couldNotRun(
+          `The Google search service (ScraperAPI) has no API key configured, so Google could not be searched. ${NOT_SITE}`,
+          "SCRAPER_API_KEY not set",
+        ),
+      ]
+    }
     const googleUrl = encodeURIComponent(
       `https://www.google.com/search?q=site:${domain}&num=100&filter=0`,
     )
     const scraperUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${googleUrl}&premium=true`
-    await newPage.goto(scraperUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000,
-    })
+    // Keep the first response so a failure can be explained exactly.
+    let firstStatus: number | null = null
+    let firstBody = ""
+    try {
+      const resp = await newPage.goto(scraperUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      })
+      firstStatus = resp ? resp.status() : null
+    } catch (e: any) {
+      await newPage.close().catch(() => {})
+      const timedOut = /timeout/i.test(e?.message || "")
+      return [
+        couldNotRun(
+          timedOut
+            ? `The Google search service (ScraperAPI) did not respond within 60 seconds. Rerun later. ${NOT_SITE}`
+            : `The Google search service (ScraperAPI) could not be reached (${e?.message || e}). Rerun later. ${NOT_SITE}`,
+          `site:${domain}`,
+        ),
+      ]
+    }
+    firstBody = await newPage
+      .evaluate(() => (document.body?.innerText || "").slice(0, 4000))
+      .catch(() => "")
+    const earlyReason =
+      firstStatus !== null && firstStatus >= 400
+        ? describeGsrFailure(firstStatus, firstBody, domain)
+        : ""
+    if (earlyReason) {
+      await newPage.close().catch(() => {})
+      return [couldNotRun(earlyReason, `HTTP ${firstStatus} for site:${domain}`)]
+    }
 
     if (onProgress) await onProgress(70, "Waiting for results to load...")
 
@@ -171,26 +252,24 @@ export async function checkGsr(
     await newPage.close()
 
     if (serps.length === 0) {
-      return [
-        {
-          check_factor: "gsr_check",
-          title: "Google Search Results (Failed)",
-          description:
-            "Failed to fetch Google Search results. The request was either blocked by Google or a CAPTCHA was encountered. Please try again.",
-          context_text: "Scraping failed or returned 0 results.",
-          screenshot_url: null,
-          status: "open",
-          ai_generated: false,
-        },
-      ]
+      const reason =
+        describeGsrFailure(firstStatus, firstBody, domain) ||
+        `Google returned a page with no readable search results for site:${domain}. Rerun later. ${NOT_SITE}`
+      return [couldNotRun(reason, `0 results for site:${domain}`)]
     }
 
+    // Verdict is decided here with the SAME rule the report and the live count
+    // use (@qacc/shared serpBadReason), so the saved title can't contradict it.
+    // The results stay in `description` — the web GSR card reads them there.
+    const bad = serps.reduce((n, s) => (serpBadReason(s) ? n + 1 : n), 0)
     return [
       {
         check_factor: "gsr_check",
-        title: `${serps.length} SERPs found — no issues detected`,
+        title: bad
+          ? `${bad} of ${serps.length} Google search results contain invalid characters`
+          : `${serps.length} Google search results checked — no issues found`,
         description: JSON.stringify(serps),
-        context_text: `Found ${serps.length} SERPs for site:${domain}`,
+        context_text: `Found ${serps.length} search results for site:${domain}`,
         screenshot_url: null,
         status: "open",
         ai_generated: false,
@@ -205,7 +284,7 @@ export async function checkGsr(
         // consumer parsing it would read "[]" as a valid, empty "0 SERPs found"
         // result — a crash masquerading as a clean empty pass. Use a plain
         // human-readable error string instead.
-        description: `The GSR check could not complete: ${error.message}. Process aborted gracefully; QACC will retry on the next run.`,
+        description: `The Google search result check stopped with an error (${error.message}). Rerun to try again.`,
         context_text: `Error: ${error.message}`,
         screenshot_url: null,
         status: "open",
