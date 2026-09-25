@@ -36,6 +36,7 @@ import {
   logScanTimingRecap,
 } from "../lib/timingCollector"
 import { persistFixCheckResults } from "../lib/runResults"
+import { selectFixQueue } from "../lib/fixQueue"
 import {
   seedPrivacyPolicyPage,
   seedPrivacyPolicyPageClassic,
@@ -561,7 +562,10 @@ export async function processAiFixRunJob(job: Job) {
   // ai_fix_done = findings decided so far (drives the % bar); ai_fix_fixed =
   // edits actually applied (committed). Every write is best-effort — a failure
   // must never block the fix.
-  const fixTotal = Math.min(findings?.length || 0, MAX_FINDINGS)
+  // Pass results and informational rows never enter the loop or use a slot
+  // (see selectFixQueue).
+  const fixQueue = selectFixQueue(findings, MAX_FINDINGS)
+  const fixTotal = fixQueue.length
   const writeFixProgress = (final: boolean) =>
     supabase
       .from("qa_runs")
@@ -587,7 +591,7 @@ export async function processAiFixRunJob(job: Job) {
     .eq("id", runId)
     .then(undefined, () => {})
 
-  for (const f of (findings || []).slice(0, MAX_FINDINGS)) {
+  for (const f of fixQueue) {
     flushIterTiming()
     void writeFixProgress(false)
     _iterStart = Date.now()
