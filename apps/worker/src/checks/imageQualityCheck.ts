@@ -1,6 +1,6 @@
 import { Browser } from "playwright"
-import { Finding } from "@qacc/shared"
-import { describeImage } from "../lib/aiFallback"
+import { Finding, aiFailureReason } from "@qacc/shared"
+import { describeImageResult } from "../lib/aiFallback"
 import pLimit from "p-limit"
 
 /**
@@ -141,6 +141,10 @@ export async function checkImageQuality(
 
     let visionUsed = 0
     let checked = 0
+    // How many images the watermark vision actually read, and the last error
+    // when it could not — so a vision outage is never reported as "no watermark".
+    let visionOk = 0
+    let visionError = ""
 
     // Collect ALL offending images, then emit ONE consolidated finding (table).
     const issues: {
@@ -199,13 +203,16 @@ export async function checkImageQuality(
       if (visionUsed < MAX_VISION && issues.length < MAX_ISSUES) {
         visionUsed++
         try {
-          const raw = await describeImage(
+          const vr = await describeImageResult(
             buf,
             'Does this image contain a visible watermark (a stock-photo mark, logo overlay, "sample", or repeating text/logo overlaid across it)? Respond with STRICT JSON only: {"watermark": true|false, "confidence": 0.0-1.0, "note": "<short reason>"}.',
           )
-          const m = raw.match(/\{[\s\S]*\}/)
+          if (!vr.ok) visionError = vr.error || "vision unavailable"
+          const m = vr.ok ? vr.text.match(/\{[\s\S]*\}/) : null
+          if (vr.ok && !m) visionError = visionError || "vision reply could not be read"
           if (m) {
             const o = JSON.parse(m[0])
+            visionOk++
             if (o.watermark === true && Number(o.confidence) >= 0.6) {
               if (!thumbUrl) thumbUrl = await uploadThumb(buf, `${i}`)
               issues.push({
@@ -216,8 +223,9 @@ export async function checkImageQuality(
               })
             }
           }
-        } catch {
-          // vision failure is non-fatal
+        } catch (e: any) {
+          // An unreadable reply: this image's watermark was not verified.
+          visionError = visionError || `vision reply could not be read: ${e?.message || e}`
         }
       }
 
@@ -240,7 +248,7 @@ export async function checkImageQuality(
       findings.push({
         check_factor: CHECK_FACTOR,
         title: `${issues.length} image quality issue${issues.length > 1 ? "s" : ""} found — ${wm} watermark, ${blur} blurry`,
-        description: `Found ${issues.length} problem image(s) on this page. Reference images are attached below.<br>${descLines.join("<br>")}`,
+        description: `Found ${issues.length} problem image(s) on this page. Reference images are attached below.<br>${descLines.join("<br>")}${visionUsed > visionOk ? `<br>Note: watermark not checked on ${visionUsed - visionOk} of ${visionUsed} image(s) (${aiFailureReason(visionError)}).` : ""}`,
         // Structured payload the ImageQualityFindingCard parses into a table.
         context_text: JSON.stringify(issues),
         // Comma-joined thumbnails → Phase 1 base64-embeds each into the TED report.
@@ -271,11 +279,35 @@ export async function checkImageQuality(
         status: "open",
         ai_generated: false,
       } as Finding)
+    } else if (candidates.length === 0) {
+      // Nothing to inspect — a page without content images is not a defect.
+      findings.push({
+        check_factor: CHECK_FACTOR,
+        title: "No image quality issues found",
+        description: "This page has no content images to check (icons, logos and SVGs are skipped).",
+        context_text: `Page: ${pageUrl}\nImages checked: 0`,
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
+    } else if (visionUsed > 0 && visionOk === 0) {
+      // Blur passed, but the watermark half never ran — not a pass.
+      findings.push({
+        check_factor: CHECK_FACTOR,
+        title: "Image Quality Check Failed",
+        description: `Could not complete: ${aiFailureReason(visionError)}. Blur passed on ${checked} image${checked === 1 ? "" : "s"}, but the watermark check could not run. Process aborted gracefully.`,
+        context_text: `Page: ${pageUrl}\nImages checked: ${checked}\nVision error: ${visionError.slice(0, 300)}`,
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
     } else {
+      const partialVision =
+        visionOk < visionUsed ? ` Watermark checked on ${visionOk} of ${visionUsed} images (${aiFailureReason(visionError)} for the rest).` : ""
       findings.push({
         check_factor: CHECK_FACTOR,
         title: "Image quality: no watermark or blur issues",
-        description: `Checked ${checked} content image${checked === 1 ? "" : "s"} on this page (blur on all, watermark vision on up to ${MAX_VISION}). No watermarks or blurry images detected.`,
+        description: `Checked ${checked} content image${checked === 1 ? "" : "s"} on this page (blur on all, watermark vision on up to ${MAX_VISION}). No watermarks or blurry images detected.${partialVision}`,
         context_text: `Page: ${pageUrl}\nImages checked: ${checked}`,
         screenshot_url: null,
         status: "open",

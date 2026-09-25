@@ -31,6 +31,77 @@ export const VISION_VERDICT_CHECKS = new Set(["logo_chatbot", "footer_logo"])
 const INFORMATIONAL_CHECKS = new Set(["plugin_number", "video_recording"])
 
 /**
+ * Checks whose per-page verdict depends on an AI (text or vision) call. For
+ * these, a lapse on ANY page stops the check from passing: pages the AI never
+ * read are not evidence the site is fine, so a mix of clean pages and lapsed
+ * pages is "could not complete", not a pass. A real defect still fails it.
+ */
+export const AI_VERDICT_CHECKS = new Set(["grammar", "image_quality", "project_plan"])
+
+// The honest, specific reasons an AI-backed check could not complete. Checks
+// put one of these in their lapse description so the report can say WHY.
+export const AI_REASON_LIMIT = "AI limit exhausted"
+export const AI_REASON_UNAVAILABLE = "AI service unavailable"
+export const AI_REASON_UNREADABLE = "AI reply could not be read"
+export const AI_REASON_NOT_CONFIGURED = "no AI provider configured"
+const AI_REASONS = [
+  AI_REASON_LIMIT,
+  AI_REASON_UNREADABLE,
+  AI_REASON_NOT_CONFIGURED,
+  AI_REASON_UNAVAILABLE,
+]
+
+/**
+ * Map a raw AI error message to one honest reason. Only a real rate-limit /
+ * quota / credits signal is called "limit exhausted"; timeouts and server
+ * errors are "unavailable", so nobody waits on a limit reset for a missing key.
+ */
+export function aiFailureReason(error: string): string {
+  const e = String(error || "").toLowerCase()
+  if (/no ai providers available|no vision provider configured|no key/.test(e))
+    return AI_REASON_NOT_CONFIGURED
+  if (/\b(429|402)\b|quota|rate.?limit|resource_exhausted|too many requests|credits?\b/.test(e))
+    return AI_REASON_LIMIT
+  if (/could not be read|unreadable/.test(e)) return AI_REASON_UNREADABLE
+  return AI_REASON_UNAVAILABLE
+}
+
+/**
+ * True when an AI-verdict check has no real defect but at least one page
+ * lapsed — so it must be "could not complete", never a pass.
+ */
+export function aiLapseBlocksPass(checkFactor: string, findings: any[]): boolean {
+  return (
+    AI_VERDICT_CHECKS.has(checkFactor) &&
+    (findings || []).some(isToolLapseFinding) &&
+    !(findings || []).some(isRealDefect)
+  )
+}
+
+/**
+ * One line saying why an AI-verdict check could not complete, and how much of
+ * the site it did cover, e.g. "AI limit exhausted (checked 3 of 20 pages)".
+ */
+export function aiLapseSummary(findings: any[]): string {
+  const all = findings || []
+  const lapses = all.filter(isToolLapseFinding)
+  const text = lapses.map((f) => `${f?.title || ""} ${f?.description || ""}`).join(" ")
+  // The most common named reason wins; a lapse that names none is "unavailable".
+  const counts = AI_REASONS.map((r) => ({
+    r,
+    n: text.split(r).length - 1,
+  })).sort((a, b) => b.n - a.n)
+  // No named AI reason: use the check's own "Could not complete: <why>" text.
+  const own = text.match(/could not complete:\s*([^.(]+)/i)?.[1]?.trim()
+  const reason = counts[0].n > 0 ? counts[0].r : own || AI_REASON_UNAVAILABLE
+  const pageKey = (f: any, i: number) => (f?.page_id ? String(f.page_id) : `row-${i}`)
+  const pages = new Set(all.map(pageKey))
+  const lapsed = new Set(all.map((f, i) => (isToolLapseFinding(f) ? pageKey(f, i) : null)).filter(Boolean))
+  const checked = [...pages].filter((p) => !lapsed.has(p)).length
+  return pages.size > 1 ? `${reason} (checked ${checked} of ${pages.size} pages)` : reason
+}
+
+/**
  * A QACC-side failure — the check could not complete (missing credential, API
  * key, timeout, upstream error). Neither a site defect nor a pass: nothing about
  * the site was established either way.
@@ -129,6 +200,8 @@ export function resultForCheck(
   // check that could not run is not evidence that the site is fine. It is
   // counted in neither `passed` nor `failed`.
   if (findings.every(isToolLapseFinding)) return "lapsed"
+  // AI-backed checks: any page the AI never read blocks a pass.
+  if (aiLapseBlocksPass(checkFactor, findings)) return "lapsed"
   return "pass"
 }
 
