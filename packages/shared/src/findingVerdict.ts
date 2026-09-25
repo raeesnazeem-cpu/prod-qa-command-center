@@ -1,3 +1,5 @@
+import { gsrVerdict } from "./gsrVerdict"
+
 /**
  * How a finding, and then a whole check, is judged pass or fail.
  *
@@ -34,6 +36,7 @@ const INFORMATIONAL_CHECKS = new Set(["plugin_number", "video_recording"])
  * the site was established either way.
  */
 export function isToolLapseFinding(f: any): boolean {
+  if (f?.check_factor === "gsr_check") return gsrVerdict(f) === "lapse"
   const t = String(f?.title || "").toLowerCase()
   const d = String(f?.description || "").toLowerCase()
   const s = `${t} ${d}`
@@ -57,6 +60,7 @@ export function isToolLapseFinding(f: any): boolean {
  * QACC failing rather than the site being clean.
  */
 export function isCleanPassFinding(f: any): boolean {
+  if (f?.check_factor === "gsr_check") return gsrVerdict(f) === "pass"
   const t = String(f?.title || "").toLowerCase()
   const d = String(f?.description || "").toLowerCase()
   const s = `${t} ${d}`

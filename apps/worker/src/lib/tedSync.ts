@@ -942,7 +942,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   image_quality: "Mention to replace the flagged blurry and watermarked images with clean, sharp versions",
   blog_verification: "Mention to migrate the missing blog posts from the client's live site to the beta site",
   cross_browser: "Mention to review the SmartUI cross-browser diffs and fix the rendering differences",
-  gsr_check: "Mention to review the site's Google search result titles and descriptions for accuracy and rerun if scraping was blocked",
+  gsr_check: "Review the listed Google search result titles and snippets and correct the invalid characters at the source (page title / meta description)",
   accessibility_check: "Mention to install the correct-tier UserWay accessibility widget matching the HubSpot plan",
   spelling: "Mention to correct the flagged misspelled words using the suggested spellings",
   grammar: "Mention to fix the flagged grammar and punctuation issues in the page copy per the suggestions",
@@ -969,6 +969,8 @@ import {
   isInformationalFinding,
   isRealDefect,
   VISION_VERDICT_CHECKS,
+  parseSerps,
+  serpBadReason,
 } from "@qacc/shared"
 
 // Re-exported (not just imported) because callers across the worker have always
@@ -1034,40 +1036,8 @@ function parseLinks(desc?: string | null): any[] {
   return rows
 }
 
-// gsr_check stores its SERPs as a JSON array in `description`.
-function parseSerps(desc?: string | null): any[] | null {
-  try {
-    const j = JSON.parse(desc || "")
-    return Array.isArray(j) ? j : null
-  } catch {
-    return null
-  }
-}
-
-// Characters that must NOT appear in a clean SERP title/snippet: the Unicode
-// replacement char (mojibake), unrendered HTML entities (&amp; / &#8211;),
-// stray HTML tags, and control chars. Normal punctuation (– — | : etc.) and a
-// bare "&" in text are fine, so they are deliberately not matched.
-const SERP_REPLACEMENT = /\uFFFD/
-const SERP_ENTITY = /&(#\d+|[a-zA-Z]+);/
-const SERP_TAG = /<[^>]{0,60}>/
-const SERP_CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/
-
-// Returns "" when the SERP is clean, else a short reason naming what's wrong.
-function serpBadReason(s: any): string {
-  const fields: [string, string][] = [
-    ["title", String(s?.title || "")],
-    ["snippet", String(s?.description || "")],
-  ]
-  for (const [name, val] of fields) {
-    if (SERP_REPLACEMENT.test(val)) return `invalid/garbled character in ${name}`
-    if (SERP_ENTITY.test(val)) return `unrendered HTML entity in ${name}`
-    if (SERP_TAG.test(val)) return `stray HTML tag in ${name}`
-    if (SERP_CONTROL.test(val)) return `control character in ${name}`
-  }
-  return ""
-}
-
+// gsr_check parsing + the invalid-character rule live in @qacc/shared
+// (gsrVerdict.ts) — the same code decides the verdict everywhere.
 // One SERP as three clearly separated lines (Title / URL / Snippet) — never a
 // table, which TED's comment sanitizer mangles.
 function renderSerpBlock(s: any, badReason?: string): string {
@@ -1620,8 +1590,22 @@ async function renderCheckSectionHtml(
         html += `<p>…and ${serps.length - shown.length} more result(s), all clean.</p>`
       return { status: "passed", html }
     }
-    // No parseable SERPs (fetch blocked / 0 results) → fall through to the
-    // generic handling below (lapse is hidden, a real failure is shown).
+    // No readable results → the check could not run (search service out of
+    // credits, Google blocked the request, site not indexed …). Unlike other
+    // lapses this one is SHOWN with its reason: it is an outside cause the
+    // team can act on (top up the service, rerun), and hiding it left GSR
+    // silently missing from the report.
+    const lapse = group.find(isToolLapseFinding)
+    const reason = clipText(
+      String(lapse?.description || "The search results could not be read.")
+        .replace(/\s+/g, " ")
+        .trim(),
+      300,
+    )
+    return {
+      status: "errored",
+      html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not run. ${esc(reason)}</p>`,
+    }
   }
 
   if (real.length > 0) {
@@ -1889,7 +1873,7 @@ export async function postSectionedReport(opts: {
   // problem is never shown to the client. Only real issues + genuine passes
   // reach the report.
   const sections = allSections.filter((s) => s.html)
-  const rank = (s: string) => (s === "failed" ? 0 : 2)
+  const rank = (s: string) => (s === "failed" ? 0 : s === "errored" ? 1 : 2)
   sections.sort((a, b) => rank(a.status) - rank(b.status))
 
   const tally = {
@@ -1934,11 +1918,14 @@ export async function postSectionedReport(opts: {
         const reason = failReason(s.factor)
         return `<li>${label} — Failed${reason ? `: ${esc(reason)}` : ""}</li>`
       }
+      if (s.status === "errored") return `<li>${label} — Could not run</li>`
       return `<li>${label} — Passed</li>`
     })
     .join("")
+  // Could-not-run checks that carry a visible reason (GSR) are listed too.
+  const shownErrored = sections.filter((s) => s.status === "errored").length
   const overview =
-    `<p><strong>Test cases:</strong> ${tally.failed + tally.passed} total — ${tally.failed} failed, ${tally.passed} passed.</p>` +
+    `<p><strong>Test cases:</strong> ${tally.failed + tally.passed + shownErrored} total — ${tally.failed} failed, ${tally.passed} passed${shownErrored ? `, ${shownErrored} could not run` : ""}.</p>` +
     (rollupItems ? `<ul>${rollupItems}</ul>` : "")
 
   const subtaskMap = runMeta?.ted_subtask_map || {}
@@ -2227,6 +2214,7 @@ export async function postDetectionSummary(runId: string, tedTaskId: string): Pr
 
   const failed = sections.filter((s) => s.status === "failed")
   const passed = sections.filter((s) => s.status === "passed")
+  const couldNotRun = sections.filter((s) => s.status === "errored")
 
   // Nothing failed → the "all passed" fast path already posted the full report
   // immediately, so there is no silence to break and no interim note to add.
@@ -2242,13 +2230,14 @@ export async function postDetectionSummary(runId: string, tedTaskId: string): Pr
     return clipText(raw, 140)
   }
   // Failed first, then passed — same ordering as the fix summary's roll-up.
-  const rollupItems = [...failed, ...passed]
+  const rollupItems = [...failed, ...couldNotRun, ...passed]
     .map((s) => {
       const label = esc(FRIENDLY[s.factor] || titleCase(s.factor))
       if (s.status === "failed") {
         const reason = failReason(s.factor)
         return `<li>${label} — Failed${reason ? `: ${esc(reason)}` : ""}</li>`
       }
+      if (s.status === "errored") return `<li>${label} — Could not run</li>`
       return `<li>${label} — Passed</li>`
     })
     .join("")
@@ -2257,8 +2246,8 @@ export async function postDetectionSummary(runId: string, tedTaskId: string): Pr
   const body =
     `<p><strong>${kind} QA — Issues Detected</strong></p>` +
     (runMeta?.site_url ? `<p>Site: ${esc(runMeta.site_url)}</p>` : "") +
-    `<p><strong>Test cases:</strong> ${failed.length + passed.length} total — ` +
-    `${failed.length} failed, ${passed.length} passed.</p>` +
+    `<p><strong>Test cases:</strong> ${failed.length + passed.length + couldNotRun.length} total — ` +
+    `${failed.length} failed, ${passed.length} passed${couldNotRun.length ? `, ${couldNotRun.length} could not run` : ""}.</p>` +
     (rollupItems ? `<ul>${rollupItems}</ul>` : "")
 
   // Plain parent comment: NO aiAssigned, and it does not mark the task complete.
