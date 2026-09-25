@@ -1226,7 +1226,9 @@ export type FixReportInfo = {
   // "place_code" → an assisted-manual fix that resolved the exact code + where to
   // place it (e.g. contact_form's per-client G99+ embed from Basecamp);
   // `manualReason` carries the instructions + snippet, surfaced verbatim.
-  manualKind?: "rest_api" | "apply_failed" | "no_auto_fix" | "place_code"
+  // "unchanged" → nothing was edited and there is no fix to suggest (e.g. the
+  // setting is already in place); `manualReason` says why.
+  manualKind?: "rest_api" | "apply_failed" | "no_auto_fix" | "place_code" | "unchanged"
   manualReason?: string
   fix?: string
   edits?: { path: string; find: string; replace: string }[]
@@ -1336,6 +1338,9 @@ function renderIssueDetail(
 // is that the text lives in the WordPress database (page/post content or
 // wp_options) and needs REST API write access. No leading <br> — callers wrap.
 function renderNeedsLabel(fx: FixReportInfo): string {
+  // Nothing was edited and there is no correction to offer — say so plainly.
+  if (fx.manualKind === "unchanged")
+    return `🔸 <strong>Not changed:</strong> ${esc(clipText(fx.manualReason || "no change was made.", 240))}`
   // A real defect with no automated fix that could ever exist — the correction
   // lives outside the site (e.g. Project Plan not set in TED/HubSpot). Stated as
   // a suggestion for the human, explicitly flagged as not auto-fixable.
@@ -1378,7 +1383,7 @@ function renderNeedsLabel(fx: FixReportInfo): string {
 // (`ai_generated` finding, e.g. grammar) and plain "Fixed" otherwise (e.g. a
 // deterministic spelling correction). Prefers a literal before → after taken
 // from the applied edits; falls back to the AI's description. Never invents one.
-function renderFixLine(fx?: FixReportInfo, usedAi?: boolean): string {
+export function renderFixLine(fx?: FixReportInfo, usedAi?: boolean): string {
   if (!fx) return ""
   // Triaged but not auto-fixable → say so plainly, never leave it blank or
   // dressed up as a suggestion. Only reachable in the AI-fix path (the plain
@@ -1387,10 +1392,10 @@ function renderFixLine(fx?: FixReportInfo, usedAi?: boolean): string {
     if (fx.manual) return `<br>${renderNeedsLabel(fx)}`
     return ""
   }
-  // The correction is stated in the PAST TENSE as done — whether it was pushed
-  // to a repo or (with no repo this run) simply determined from the finding. The
-  // repo/PR push status is reported ONCE at the run level (status line), not per
-  // finding, so a missing repo never turns a known fix into a mere "proposal".
+  // "✅ Fixed" ONLY when an edit actually landed (applied). A proposal — a
+  // correction worked out but not written (no repo access, or located for
+  // review) — is stated as a suggestion, never as done.
+  const applied = !!fx.applied
   const label = usedAi ? "AI Fix" : "Fixed"
   const pairs: { before: string; after: string }[] = []
   for (const e of fx.edits || []) {
@@ -1403,15 +1408,20 @@ function renderFixLine(fx?: FixReportInfo, usedAi?: boolean): string {
   }
   const detail = pairs.length
     ? pairs
-        .map((p) => `Corrected “${esc(p.before)}” to “${esc(p.after)}”`)
+        .map((p) =>
+          applied
+            ? `Corrected “${esc(p.before)}” to “${esc(p.after)}”`
+            : `change “${esc(p.before)}” to “${esc(p.after)}”`,
+        )
         .join("; ")
     : esc(fx.fix || "")
   const files = (fx.filesChanged || []).length
     ? ` <em>(${esc((fx.filesChanged || []).join(", "))})</em>`
     : ""
-  return detail
+  if (!detail) return ""
+  return applied
     ? `<br>✅ <strong>${label}:</strong> ${detail}${files}`
-    : ""
+    : `<br>🔸 <strong>Not changed — suggested fix:</strong> ${detail}`
 }
 
 // Render ONE check as a section. Returns its status so the caller can order
@@ -1987,10 +1997,14 @@ export async function postSectionedReport(opts: {
       const total = applied + proposed
       let header = ""
       if (opts.perTargetFix && total > 0) {
-        // Fixes are reported as DONE (past tense); the push destination is the
-        // run-level status line, so the per-check banner just states the count.
+        // Only applied edits count as fixes; suggestions are counted apart so
+        // the banner never claims a change that wasn't made.
+        const parts: string[] = []
+        if (applied) parts.push(`${applied} fix${applied > 1 ? "es" : ""} applied`)
+        if (proposed)
+          parts.push(`${proposed} suggested fix${proposed > 1 ? "es" : ""} (not applied)`)
         header =
-          `<p>🤖 <strong>AI Fix</strong> — ${total} fix${total > 1 ? "es" : ""} for this check. ` +
+          `<p>🤖 <strong>AI Fix</strong> — ${parts.join(" · ")} for this check. ` +
           `${opts.perTargetFix.pushClause}</p>`
       }
       // A check that FAILED with no fix APPLIED is "failed and not fixed": leave
