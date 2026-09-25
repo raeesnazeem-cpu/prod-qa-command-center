@@ -13,6 +13,7 @@ import {
   postTedComment,
 } from "../lib/tedSync"
 import { releaseRunSlot } from "../lib/runSlot"
+import { releaseReportGate, PAGES_PART } from "../lib/reportGate"
 import { runCrossBrowserCheck } from "../checks/crossBrowserCheck"
 import { checkExternalLinks } from "../checks/externalLinkCheck"
 import { checkMeta } from "../checks/metaCheck"
@@ -1290,7 +1291,7 @@ export async function processCrawlPageJob(job: Job) {
         // Fallback: check completion separately
         const { data: runCheck } = await supabase
           .from("qa_runs")
-          .select("pages_processed, pages_total, status, ted_task_id")
+          .select("pages_processed, pages_total, status")
           .eq("id", runId)
           .single()
 
@@ -1310,106 +1311,19 @@ export async function processCrawlPageJob(job: Job) {
 
           logger.info({ runId }, "Run marked as completed (fallback)")
 
-          // Run-level cross-browser visual check (no-op unless enabled). Runs
-          // before the TED report so its findings are included in the summary.
-          const cbStart = Date.now()
-          await runCrossBrowserCheck(runId).catch((e) =>
-            logger.error("Cross-browser check failed:", e),
-          )
-          recordTiming(runId, "cross_browser", run.site_url, Date.now() - cbStart)
-
-          // Persist the per-check result snapshot (pass/fail + duration) for the
-          // TED Site Audit history — MUST run before saveTimingReport clears the
-          // in-memory timings. Best-effort.
-          await persistScanCheckResults(runId)
-
-          // Analytics only: log + persist per-check timings. Never posted to TED.
-          await saveTimingReport(runId)
-
-          // Prepare inlined screenshots now (scan time), so the report — whether
-          // posted immediately here or later by the AI-fix pass — is just string
-          // assembly, not network I/O on the critical path. Best-effort.
-          await precomputeFindingMedia(runId).catch((e) =>
-            logger.error("Screenshot precompute failed:", e),
-          )
-
-          // Post the final QA report back to TED (idempotent — see tedSync).
-          if (runCheck.ted_task_id) {
-            const report = await postFinalReportToTED(
-              runId,
-              runCheck.ted_task_id,
-            ).catch((e) => {
-              logger.error("TED Sync failed:", e)
-              return null
-            })
-            // Only trigger the AI fix when the report actually posted AND there
-            // were real issues. All-passed → say so and skip the fix.
-            await maybeTriggerAiFix(runId, runCheck.ted_task_id, report)
-          }
-
-          // Full scans have no task dependency: one triggered without a
-          // ted_task_id never enters the block above, so maybeTriggerAiFix —
-          // the ONLY place a full_scan releases the global run slot — is never
-          // reached and the slot leaks until the staleness steal, blocking the
-          // next scan. Release it here too. Idempotent: a no-op if it was
-          // already freed (ted_task_id path) or is held by another run.
-          if (run.run_type === "full_scan") {
-            await releaseRunSlot(runId).catch(() => {})
+          // Pages done. Finalize now unless an API check is still running —
+          // then that check finalizes when it finishes (see reportGate).
+          if ((await releaseReportGate(runId, PAGES_PART)) !== "wait") {
+            await finalizeRun(runId)
           }
         }
       } else if (isComplete) {
         logger.info({ runId }, "Run marked as completed")
 
-        // Run-level cross-browser visual check (no-op unless enabled). Runs
-        // before the TED report so its findings are included in the summary.
-        const cbStart = Date.now()
-        await runCrossBrowserCheck(runId).catch((e) =>
-          logger.error("Cross-browser check failed:", e),
-        )
-        recordTiming(runId, "cross_browser", run.site_url, Date.now() - cbStart)
-
-        // Persist the per-check result snapshot (pass/fail + duration) for the
-        // TED Site Audit history — MUST run before saveTimingReport clears the
-        // in-memory timings. Best-effort.
-        await persistScanCheckResults(runId)
-
-        // Analytics only: log + persist per-check timings. Never posted to TED.
-        await saveTimingReport(runId)
-
-        // Prepare inlined screenshots now (scan time), so the report — whether
-        // posted immediately here or later by the AI-fix pass — is just string
-        // assembly, not network I/O on the critical path. Best-effort.
-        await precomputeFindingMedia(runId).catch((e) =>
-          logger.error("Screenshot precompute failed:", e),
-        )
-
-        // Post the final QA report back to TED (idempotent — see tedSync).
-        const { data: finalRun } = await supabase
-          .from("qa_runs")
-          .select("ted_task_id")
-          .eq("id", runId)
-          .single()
-        if (finalRun?.ted_task_id) {
-          const report = await postFinalReportToTED(
-            runId,
-            finalRun.ted_task_id,
-          ).catch((e) => {
-            logger.error("TED Sync failed:", e)
-            return null
-          })
-          // Only trigger the AI fix when the report actually posted AND there
-          // were real issues. All-passed → say so and skip the fix.
-          await maybeTriggerAiFix(runId, finalRun.ted_task_id, report)
-        }
-
-        // Full scans have no task dependency: one triggered without a
-        // ted_task_id never enters the block above, so maybeTriggerAiFix — the
-        // ONLY place a full_scan releases the global run slot — is never reached
-        // and the slot leaks until the staleness steal, blocking the next scan.
-        // Release it here too. Idempotent: a no-op if it was already freed
-        // (ted_task_id path) or is held by another run.
-        if (run.run_type === "full_scan") {
-          await releaseRunSlot(runId).catch(() => {})
+        // Pages done. Finalize now unless an API check is still running —
+        // then that check finalizes when it finishes (see reportGate).
+        if ((await releaseReportGate(runId, PAGES_PART)) !== "wait") {
+          await finalizeRun(runId)
         }
       }
 
@@ -1434,6 +1348,67 @@ export async function processCrawlPageJob(job: Job) {
     }
 
     logger.info({ pageId, runId }, "Page crawl lifecycle finished")
+  }
+}
+
+/**
+ * Run-level wrap-up once EVERY part of the run is done (all pages + any
+ * standalone API checks): cross-browser check, result snapshot, timings,
+ * screenshot precompute, then the TED report and AI fix. Called exactly once
+ * per run — by the last page, or by the last API check (see reportGate).
+ */
+export async function finalizeRun(runId: string): Promise<void> {
+  const { data: run } = await supabase
+    .from("qa_runs")
+    .select("site_url, run_type, ted_task_id")
+    .eq("id", runId)
+    .single()
+  if (!run) return
+
+  // Run-level cross-browser visual check (no-op unless enabled). Runs
+  // before the TED report so its findings are included in the summary.
+  const cbStart = Date.now()
+  await runCrossBrowserCheck(runId).catch((e) =>
+    logger.error("Cross-browser check failed:", e),
+  )
+  recordTiming(runId, "cross_browser", run.site_url, Date.now() - cbStart)
+
+  // Persist the per-check result snapshot (pass/fail + duration) for the
+  // TED Site Audit history — MUST run before saveTimingReport clears the
+  // in-memory timings. Best-effort.
+  await persistScanCheckResults(runId)
+
+  // Analytics only: log + persist per-check timings. Never posted to TED.
+  await saveTimingReport(runId)
+
+  // Prepare inlined screenshots now (scan time), so the report — whether
+  // posted immediately here or later by the AI-fix pass — is just string
+  // assembly, not network I/O on the critical path. Best-effort.
+  await precomputeFindingMedia(runId).catch((e) =>
+    logger.error("Screenshot precompute failed:", e),
+  )
+
+  // Post the final QA report back to TED (idempotent — see tedSync).
+  if (run.ted_task_id) {
+    const report = await postFinalReportToTED(runId, run.ted_task_id).catch(
+      (e) => {
+        logger.error("TED Sync failed:", e)
+        return null
+      },
+    )
+    // Only trigger the AI fix when the report actually posted AND there
+    // were real issues. All-passed → say so and skip the fix.
+    await maybeTriggerAiFix(runId, run.ted_task_id, report)
+  }
+
+  // Full scans have no task dependency: one triggered without a
+  // ted_task_id never enters the block above, so maybeTriggerAiFix — the
+  // ONLY place a full_scan releases the global run slot — is never reached
+  // and the slot leaks until the staleness steal, blocking the next scan.
+  // Release it here too. Idempotent: a no-op if it was already freed
+  // (ted_task_id path) or is held by another run.
+  if (run.run_type === "full_scan") {
+    await releaseRunSlot(runId).catch(() => {})
   }
 }
 

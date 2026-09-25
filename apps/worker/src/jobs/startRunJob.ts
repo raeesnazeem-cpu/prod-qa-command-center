@@ -7,6 +7,7 @@ import { wpPasswordCache } from "../lib/credentialsCache"
 import { resolveThemeType } from "../lib/themeType"
 import { postTedComment } from "../lib/tedSync"
 import { acquireRunSlot, releaseRunSlot } from "../lib/runSlot"
+import { armReportGate } from "../lib/reportGate"
 import { resetAiBreakers } from "../lib/aiFallback"
 
 import pino from "pino"
@@ -354,7 +355,17 @@ export async function processStartRunJob(job: Job) {
     }
 
     // Add jobs to queue for each page discovered
+    // Standalone API checks enabled on this run (each is its own job).
+    const API_CHECKS = ["project_plan", "paid_media"]
+    const enabledApiChecks: string[] = (run.enabled_checks || []).filter(
+      (c: string) => API_CHECKS.includes(c),
+    )
+
     if (needsPageScan && insertedPages && insertedPages.length > 0) {
+      // Pages and API checks run in parallel — arm the gate BEFORE enqueuing
+      // either, so the TED report waits for whichever finishes last.
+      await armReportGate(runId, enabledApiChecks)
+
       logger.info({ runId, count: insertedPages.length }, "Enqueuing scan jobs")
 
       const BATCH_SIZE = 10
@@ -409,21 +420,17 @@ export async function processStartRunJob(job: Job) {
     }
 
     // Enqueue standalone API checks if they are enabled
-    const API_CHECKS = ["project_plan", "paid_media"]
-
-    for (const check of run.enabled_checks || []) {
-      if (API_CHECKS.includes(check)) {
-        const jobName = `check_${check}`
-        await qaQueue.add(
-          jobName,
-          { runId, projectId: run.project_id },
-          {
-            attempts: 3,
-            backoff: { type: "exponential", delay: 5000 },
-          },
-        )
-        logger.info({ runId, jobName }, `Enqueued ${jobName} job successfully`)
-      }
+    for (const check of enabledApiChecks) {
+      const jobName = `check_${check}`
+      await qaQueue.add(
+        jobName,
+        { runId, projectId: run.project_id },
+        {
+          attempts: 3,
+          backoff: { type: "exponential", delay: 5000 },
+        },
+      )
+      logger.info({ runId, jobName }, `Enqueued ${jobName} job successfully`)
     }
   } catch (error: any) {
     logger.error({ runId, error: error.message }, "Error during sitemap crawl")
