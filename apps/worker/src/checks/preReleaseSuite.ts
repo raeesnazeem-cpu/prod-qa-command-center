@@ -803,6 +803,25 @@ export async function checkFooterLogo(
               .first()
           }
 
+          // Elementor fallback: pages built without a theme footer template
+          // (e.g. GitOps sites on Hello Elementor) carry the footer as the LAST
+          // top-level section of the page document. Use it only when it looks
+          // like a footer (a block of navigation links), so a closing CTA
+          // section is never mistaken for one.
+          if ((await footer.count()) === 0) {
+            const lastSection = newPage
+              .locator(
+                '[data-elementor-type="wp-page"] > .e-parent:last-child, [data-elementor-type="wp-page"] > .elementor-section:last-child',
+              )
+              .first()
+            if (
+              (await lastSection.count()) > 0 &&
+              (await lastSection.locator("a[href]").count()) >= 5
+            ) {
+              footer = lastSection
+            }
+          }
+
           if ((await footer.count()) > 0) {
             // Scroll the footer into view to trigger lazy loading of images
             await footer.scrollIntoViewIfNeeded().catch(() => {})
@@ -818,6 +837,9 @@ export async function checkFooterLogo(
                     document.querySelector("footer") ||
                     document.querySelector(
                       '[role="contentinfo"], .site-footer, .footer, #footer',
+                    ) ||
+                    document.querySelector(
+                      '[data-elementor-type="wp-page"] > .e-parent:last-child, [data-elementor-type="wp-page"] > .elementor-section:last-child',
                     )
                   if (!f) return true
                   return Array.from(f.querySelectorAll("img")).every(
