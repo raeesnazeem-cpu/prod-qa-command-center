@@ -1,12 +1,12 @@
 /**
  * Minimal worker-side TED client reader.
  *
- * The API app parses client notes in webhooks.ts (resolveClientNotesSiteUrlFromTED),
- * but that is not exported/shared. This lib gives worker-side checks (GBP,
- * Review & Reputation) read access to a TED client + its clientDetails.notes,
- * using the TED_API_TOKEN already present in the worker environment.
+ * Gives worker-side checks read access to a TED client record, its
+ * clientDetails.notes, and the client page's overview panel (beta/live URL,
+ * GitHub repo), using the TED_API_TOKEN already present in the worker
+ * environment.
  *
- * Read-only: only GET /api/clients. No writes.
+ * Read-only: only GET requests. No writes.
  */
 
 const TED_BASE = "https://ted.growth99.com/api"
@@ -26,7 +26,7 @@ export function stripHtml(html: string | null | undefined): string {
 // GET /clients returns EVERY TED client with their notes HTML — a large payload
 // that does not change during a run. It used to be re-downloaded and re-scanned
 // on every getClient() call, and getClientNotesText / getClientDomain /
-// getReviewsWidgetId / getClientTimeline / resolveBetaSiteRepo all call it
+// getReviewsWidgetId / getClientTimeline / getClientInfo all call it
 // internally, so a single run issued roughly 8–15 full-list downloads.
 //
 // One in-flight promise is shared by all callers and memoised for a short TTL,
@@ -190,11 +190,7 @@ export async function getClientPhone(
   return { display: raw, tel }
 }
 
-/**
- * The client's website domain — the join key into HubSpot. Prefers the explicit
- * clientDetails.website, then the "Client Domain/Website URL: …" line in notes,
- * then any bare domain in the notes. Returns a bare host (no scheme/path).
- */
+/** Reduce a URL or labelled text ("Website URL: …") to a bare host (no scheme/path). */
 export function extractDomain(text: string | null | undefined): string | null {
   if (!text) return null
   const s = String(text)
@@ -214,32 +210,32 @@ export function extractDomain(text: string | null | undefined): string | null {
     .toLowerCase() || null
 }
 
+/**
+ * The client's live website domain: the host of the TED client page's
+ * "Website URL" (info.liveSiteUrl). Returns a bare host (no scheme/path).
+ */
 export async function getClientDomain(
   clientIdOrName: string | number | null | undefined,
 ): Promise<string | null> {
-  const client = await getClient(clientIdOrName)
-  if (!client) return null
-  return (
-    extractDomain(client?.clientDetails?.website) ||
-    extractDomain(stripHtml(client?.clientDetails?.notes || ""))
-  )
+  return extractDomain(await getClientLiveUrl(clientIdOrName))
 }
 
 // ---------------------------------------------------------------------------
 // TED client "main page" fields.
 //
-// The TED client dashboard (ted.growth99.com/dashboard/clients/{id}) surfaces a
-// handful of structured fields that GET /api/clients returns directly on the
-// client record — no timeline/task drilling required:
-//   • client.plan                    → PLAN
-//   • client.clientDetails.betaUrl   → BETA SITE URL
-//   • client.clientDetails.website   → WEBSITE URL (live/production)
-//   • client.paidMediaStrategist     → paid-media strategist
-// These are the canonical, staff-visible values, so checks/resolvers should read
-// them FIRST and only fall back to the older heuristics (notes regex, task
-// payload/comments) when a record field is blank. The one exception is the repo
-// (GitHub Site URL): the API does NOT expose it on the client record, so it
-// still resolves from the beta_site.env task — see resolveBetaSiteRepo below.
+// The TED client dashboard (ted.growth99.com/dashboard/clients/{id}) surfaces
+// these structured fields. The right-hand overview panel reads
+// GET /api/clients/{id}/info, which is the single source for:
+//   • info.betaSiteUrl  → Beta site URL
+//   • info.liveSiteUrl  → Website URL (live/production)
+//   • info.githubRepo   → GitHub site URL, stored as the path after github.com
+//                         (e.g. "G99agency/nuvoaestheticsclinic.gogroth.com")
+// and the client record from GET /api/clients supplies:
+//   • client.hubspotId           → HubSpot ID (the HubSpot company id)
+//   • client.plan                → PLAN
+//   • client.paidMediaStrategist → paid-media strategist
+// These are the canonical, staff-visible values; the older heuristics (notes
+// regex, beta_site.env task payload/comments) are no longer used for them.
 // ---------------------------------------------------------------------------
 
 /** Trim a URL to a clean, scheme-normalized value ("" → null). */
@@ -272,20 +268,43 @@ export function getClientPlanField(client: any): string {
   return (client?.plan || "").toString().trim()
 }
 
-/** The beta site URL from the client record's main-page `betaUrl` field. */
+/** The beta site URL from the TED client page (info.betaSiteUrl). */
 export async function getClientBetaUrl(
   clientIdOrName: string | number | null | undefined,
 ): Promise<string | null> {
-  const client = await getClient(clientIdOrName)
-  return cleanSiteUrl(client?.clientDetails?.betaUrl)
+  const info = await getClientInfo(clientIdOrName)
+  return cleanSiteUrl(info?.betaSiteUrl)
 }
 
-/** The live/production URL from the client record's main-page `website` field. */
+/** The live/production URL from the TED client page (info.liveSiteUrl). */
 export async function getClientLiveUrl(
   clientIdOrName: string | number | null | undefined,
 ): Promise<string | null> {
+  const info = await getClientInfo(clientIdOrName)
+  return cleanSiteUrl(info?.liveSiteUrl)
+}
+
+/** The HubSpot ID from the TED client page (the client record's hubspotId). */
+export async function getClientHubspotId(
+  clientIdOrName: string | number | null | undefined,
+): Promise<string | null> {
   const client = await getClient(clientIdOrName)
-  return cleanSiteUrl(client?.clientDetails?.website)
+  const id = String(client?.hubspotId ?? "").trim()
+  return /^\d+$/.test(id) ? id : null
+}
+
+/**
+ * Turn the TED `githubRepo` value into a full GitHub URL. TED stores the path
+ * after github.com ("owner/repo"); a full github.com URL is accepted as-is.
+ * Mirrors how the TED client page builds its "GitHub site URL" link.
+ */
+export function githubRepoUrl(raw: string | null | undefined): string | null {
+  const v = String(raw || "").trim().replace(/\.git$/i, "").replace(/\/+$/, "")
+  if (!v) return null
+  const path = v
+    .replace(/^https?:\/\//i, "")
+    .replace(/^(?:www\.)?github\.com\//i, "")
+  return /^[\w.-]+\/[\w.-]+/.test(path) ? `https://github.com/${path}` : null
 }
 
 /**
@@ -337,10 +356,9 @@ async function tedGetJson(pathAndQuery: string): Promise<any | null> {
   }
 }
 
-// A client's timeline is read by both getClientTimeline() (project_plan,
-// paid_media) and repoFromTedTimeline() (the AI-fix repo lookup) in the same
-// run. Same short-TTL treatment as the client list: share one in-flight fetch,
-// never cache a failure.
+// A client's timeline is read by getClientTimeline() (project_plan,
+// paid_media). Same short-TTL treatment as the client list: share one in-flight
+// fetch, never cache a failure.
 const timelineCache = new Map<string, { at: number; promise: Promise<any | null> }>()
 
 async function tedGetTimeline(clientId: string | number): Promise<any | null> {
@@ -356,100 +374,57 @@ async function tedGetTimeline(clientId: string | number): Promise<any | null> {
   return result
 }
 
+// The client page's overview panel (GET /clients/{id}/info) is read by the
+// beta/live/repo getters, often several times in one run. Same short-TTL,
+// shared in-flight fetch, failures not cached.
+const infoCache = new Map<string, { at: number; promise: Promise<any | null> }>()
+
+async function tedGetInfo(clientId: string | number): Promise<any | null> {
+  const key = String(clientId)
+  const now = Date.now()
+  const hit = infoCache.get(key)
+  if (hit && now - hit.at < CLIENTS_TTL_MS) return hit.promise
+
+  const entry = {
+    at: now,
+    promise: tedGetJson(`/clients/${encodeURIComponent(key)}/info`),
+  }
+  infoCache.set(key, entry)
+  const result = await entry.promise
+  if (result === null && infoCache.get(key) === entry) infoCache.delete(key)
+  return result
+}
+
+/**
+ * The TED client page's overview panel (GET /clients/{id}/info) for a client
+ * id (preferred) or name. Returns the raw info object, or null.
+ */
+export async function getClientInfo(
+  clientIdOrName: string | number | null | undefined,
+): Promise<any | null> {
+  const client = await getClient(clientIdOrName)
+  const clientId = client?.id
+  if (!clientId) return null
+  return tedGetInfo(clientId)
+}
+
 /** Drop all cached TED reads. Call when a run finishes. */
 export function clearTedCaches(): void {
   clearClientCache()
   timelineCache.clear()
+  infoCache.clear()
 }
 
 /**
- * Resolve the beta site's GitHub repo for a client. Mirrors the betaSiteUrl
- * resolution: timeline → beta_site.env task → automation.payload has a
- * `betaSiteRepo=<url>` token right next to `betaSiteUrl=`. Client-agnostic.
- * See [[ted-beta-site-url-resolution]].
+ * Resolve the client's GitHub repo URL from the TED client page's
+ * "GitHub site URL" (info.githubRepo, the path after github.com). Client-agnostic.
+ * There is no local fallback repo.
  */
 export async function resolveBetaSiteRepo(
   clientIdOrName: string | number | null | undefined,
 ): Promise<string | null> {
-  const client = await getClient(clientIdOrName)
-  const clientId = client?.id
-  if (!clientId) return null
-
-  // Repo always comes from the beta_site.env task — its automation.payload
-  // (betaSiteRepo=…) or a "GitHub repo: …" comment on that task. HubSpot is NOT
-  // a repo source (it supplies site URL / plan / GBP / paid-media data — see
-  // hubspotClient.ts). There is no local fallback repo.
-  return await repoFromTedTimeline(clientId)
-}
-
-/**
- * Concatenate a TED task's comment bodies into one searchable string. The repo
- * (and URL) may be written in the automation.payload OR typed as a comment on
- * the task page, so resolvers search both. Tolerates the several shapes the
- * comments endpoint may return; returns "" on any miss.
- */
-export async function tedTaskCommentsText(
-  taskId: string | number,
-): Promise<string> {
-  const c = await tedGetJson(`/tasks/${taskId}/comments`)
-  const arr: any[] = Array.isArray(c)
-    ? c
-    : c?.comments || c?.data || c?.items || []
-  if (!Array.isArray(arr)) return ""
-  return arr
-    .map((x: any) =>
-      typeof x === "string"
-        ? x
-        : x?.text || x?.body || x?.content || x?.comment || "",
-    )
-    .filter(Boolean)
-    .join("\n")
-}
-
-/**
- * The TED path: timeline → beta_site.env task → `betaSiteRepo=<url>`, read from
- * the automation.payload first and, failing that, from the task's comments.
- */
-async function repoFromTedTimeline(
-  clientId: string | number,
-): Promise<string | null> {
-  const timeline = await tedGetTimeline(clientId)
-  if (!timeline) return null
-
-  // Prefer activeTasks (carry automation.templateKey); else timeline title match.
-  const active = (timeline.activeTasks || []).find(
-    (t: any) => (t?.automation?.templateKey || "").toLowerCase() === "beta_site.env",
-  )
-  const byTitle = (timeline.timeline || []).find((t: any) =>
-    /create beta site environment/i.test(t?.title || ""),
-  )
-  const taskId = active?.id || byTitle?.id
-  if (!taskId) return null
-
-  const task = await tedGetJson(`/tasks/${taskId}`)
-  const payload = task?.automation?.payload || task?.task?.automation?.payload
-  const payloadText =
-    typeof payload === "string" ? payload : payload ? JSON.stringify(payload) : ""
-
-  // Payload first, then the task's comments (the URL/repo is sometimes typed as
-  // a comment rather than baked into the payload).
-  // Stop the capture at whitespace, quotes, or angle brackets so a repo typed as
-  // an HTML anchor (<a href="https://…">https://…</a>) in a comment/payload yields
-  // just the URL — not the surrounding markup, which would otherwise leak into the
-  // report as half-eaten HTML.
-  const matchRepo = (text: string) => {
-    const m = text.match(/betaSiteRepo=([^\s"'<>]+)/i)
-    if (m) return m[1].replace(/[),.;]+$/, "")
-    // Also accept a bare GitHub URL written in a comment ("repo: https://…").
-    const g = text.match(/https?:\/\/(?:www\.)?github\.com\/[^\s"'<>]+/i)
-    return g ? g[0].replace(/[),.;]+$/, "") : null
-  }
-
-  const fromPayload = payloadText ? matchRepo(payloadText) : null
-  if (fromPayload) return fromPayload
-
-  const commentsText = await tedTaskCommentsText(taskId)
-  return commentsText ? matchRepo(commentsText) : null
+  const info = await getClientInfo(clientIdOrName)
+  return githubRepoUrl(info?.githubRepo)
 }
 
 // ---------------------------------------------------------------------------

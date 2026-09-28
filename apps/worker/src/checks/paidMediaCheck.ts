@@ -1,7 +1,7 @@
 import { Finding } from "@qacc/shared"
 import {
   getClientTimeline,
-  getClientDomain,
+  getClientHubspotId,
   getClientPlanField,
   resolveClient,
   tasksByDepartment,
@@ -62,19 +62,19 @@ export async function checkPaidMedia(
       ? String(tedClientId).trim()
       : clientName
   try {
-    // resolveClient, getClientTimeline and getClientDomain are independent TED
+    // resolveClient, getClientTimeline and getClientHubspotId are independent TED
     // reads with no ordering dependency, so run them concurrently. Only
-    // resolveHubspotClientData depends on the resolved domain, so it stays
+    // resolveHubspotClientData depends on the resolved HubSpot ID, so it stays
     // chained after. resolveClient falls back to a site-URL host match so
     // URL-only full scans still land on the right client record.
-    const [clientResult, timeline, domain] = await Promise.all([
+    const [clientResult, timeline, hubspotId] = await Promise.all([
       resolveClient(clientKey, siteUrl),
       getClientTimeline(clientKey),
-      getClientDomain(clientKey).catch(() => null),
+      getClientHubspotId(clientKey).catch(() => null),
     ])
     client = clientResult
     tasks = timeline
-    hs = await resolveHubspotClientData(domain, clientName).catch(() => null)
+    hs = await resolveHubspotClientData(hubspotId, clientName).catch(() => null)
   } catch (error: any) {
     logger.error({ error: error.message }, "TED read failed for paid media")
     return [

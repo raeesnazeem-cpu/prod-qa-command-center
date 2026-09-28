@@ -11,7 +11,7 @@
  * account the HubSpot plan calls for.
  */
 
-import { getClientDomain } from "./tedClient"
+import { getClientHubspotId } from "./tedClient"
 import { resolveHubspotClientData } from "./hubspotClient"
 
 export type UserwayTier = "pro" | "free"
@@ -73,14 +73,15 @@ export function detectUserwayInSource(html: string): InstalledUserway {
 
 /**
  * The UserWay tier the client's HubSpot plan requires, or null when HubSpot has
- * no accessibility_plan_add_on for them (can't decide a tier).
+ * no accessibility_plan_add_on for them (can't decide a tier). `clientKey` is the
+ * TED client id (preferred) or the client/project name.
  */
 export async function resolveRequiredUserwayTier(
-  clientName: string | null | undefined,
+  clientKey: string | null | undefined,
 ): Promise<{ tier: UserwayTier | null; planRaw: string | null }> {
-  if (!clientName) return { tier: null, planRaw: null }
-  const domain = await getClientDomain(clientName).catch(() => null)
-  const hs = await resolveHubspotClientData(domain, clientName).catch(() => null)
+  if (!clientKey) return { tier: null, planRaw: null }
+  const hubspotId = await getClientHubspotId(clientKey).catch(() => null)
+  const hs = await resolveHubspotClientData(hubspotId, clientKey).catch(() => null)
   const planRaw = hs?.accessibilityPlan || null
   return { tier: tierForPlan(planRaw), planRaw }
 }

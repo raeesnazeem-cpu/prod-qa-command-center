@@ -74,12 +74,18 @@ async function fetchPosts(origin: string): Promise<BlogPost[] | null> {
   }
 }
 
-/** Resolve the client's live-site URL: explicit run value first, else TED notes. */
+/** Resolve the client's live-site URL: explicit run value first, else the TED client page Website URL. */
 async function resolveLiveSite(
   liveSiteUrl?: string | null,
   projectId?: string | null,
+  tedClientId?: string | number | null,
 ): Promise<string> {
   if (liveSiteUrl && liveSiteUrl.trim()) return originOf(liveSiteUrl)
+  // Prefer the real TED client id; the project name is synthetic for full scans.
+  if (tedClientId != null && String(tedClientId).trim()) {
+    const domain = await getClientDomain(String(tedClientId).trim()).catch(() => null)
+    return domain ? originOf(domain) : ""
+  }
   if (!projectId) return ""
   try {
     const { data: project } = await supabase
@@ -102,6 +108,8 @@ export async function checkBlogVerification(
   liveSiteUrl?: string | null,
   projectId?: string | null,
   onProgress?: (progress: number, message: string) => Promise<void>,
+  // OPTIONAL: the real TED client id stored on the run (qa_runs.ted_client_id).
+  tedClientId?: string | number | null,
 ): Promise<Finding[]> {
   const betaOrigin = originOf(pageUrl)
 
@@ -141,17 +149,17 @@ export async function checkBlogVerification(
   }
 
   if (onProgress) await onProgress(50, "Resolving the client's live site to compare against...")
-  const liveOrigin = await resolveLiveSite(liveSiteUrl, projectId)
+  const liveOrigin = await resolveLiveSite(liveSiteUrl, projectId, tedClientId)
 
-  // 2a. No live site URL in the client notes → cannot compare → FAIL.
+  // 2a. No live site URL on the TED client page → cannot compare → FAIL.
   if (!liveOrigin) {
     return [
       {
         check_factor: CHECK_FACTOR,
         title: "Blogs found but no live site to compare against",
         description:
-          "Blogs found but no mention of the client's live site to compare it to. Add the client's live website URL to the notes so the beta blogs can be checked against the live blogs.",
-        context_text: `Beta site: ${betaOrigin}\nBeta blog posts: ${betaPosts.length}\nClient live site: (not found in notes)`,
+          "Blogs found but no mention of the client's live site to compare it to. Add the client's Website URL on the TED client page so the beta blogs can be checked against the live blogs.",
+        context_text: `Beta site: ${betaOrigin}\nBeta blog posts: ${betaPosts.length}\nClient live site: (no Website URL on the TED client page)`,
         screenshot_url: null,
         status: "open",
         ai_generated: false,

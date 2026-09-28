@@ -43,7 +43,7 @@ export async function processStartRunJob(job: Job) {
   const { data: run, error: fetchError } = await supabase
     .from("qa_runs")
     .select(
-      "id, site_url, project_id, selected_urls, status, enabled_checks, ted_task_id, ted_subtask_map",
+      "id, site_url, project_id, selected_urls, status, enabled_checks, ted_task_id, ted_subtask_map, ted_client_id",
     )
     .eq("id", runId)
     .single()
@@ -126,7 +126,7 @@ export async function processStartRunJob(job: Job) {
 
   // Detect the target theme type ONCE, before any check runs, and persist it on
   // the run so every check (and later the AI-fix job) can pick the classic- or
-  // block-theme variant. Hybrid: peek the beta_site.env GitHub repo → rendered-
+  // block-theme variant. Hybrid: peek the TED client page GitHub repo → rendered-
   // HTML fallback (no local fallback repo). Purely best-effort — a miss leaves
   // theme_type null and everything behaves exactly as before.
   try {
@@ -135,16 +135,23 @@ export async function processStartRunJob(job: Job) {
       .select("name")
       .eq("id", run.project_id)
       .single()
-    const { themeType, source } = await resolveThemeType({
-      projectName: proj?.name || null,
+    // Find the repo by the real TED client id (full scans have a synthetic
+    // project name that matches no client), else the project name.
+    const { themeType, source, repoKind } = await resolveThemeType({
+      clientKey: (run as any).ted_client_id || proj?.name || null,
       siteUrl: run.site_url,
     })
-    logger.info({ runId, themeType, source }, "Resolved target theme type")
+    logger.info({ runId, themeType, source, repoKind }, "Resolved target theme type")
     if (themeType !== "unknown") {
       await supabase
         .from("qa_runs")
         .update({ theme_type: themeType })
         .eq("id", runId)
+    }
+    // Separate write so a DB without the repo_kind column (migration not yet
+    // applied) can never cost us the theme_type above.
+    if (repoKind) {
+      await supabase.from("qa_runs").update({ repo_kind: repoKind }).eq("id", runId)
     }
   } catch (e: any) {
     logger.warn(

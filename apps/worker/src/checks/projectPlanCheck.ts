@@ -5,7 +5,7 @@ import sharp from "sharp"
 import { uploadScreenshot } from "../lib/supabaseStorage"
 import {
   getClientNotesText,
-  getClientDomain,
+  getClientHubspotId,
   getClientPlanField,
   resolveClient,
   parsePlan,
@@ -49,7 +49,7 @@ function isAcceleratorPlan(plan: string): boolean {
  *      client dashboard (ted.growth99.com/dashboard/clients/{id}). Resolved by
  *      the real ted_client_id when available, else the client name, else a host
  *      match against the record's beta/website URL (so URL-only full scans work).
- *   2. HubSpot company `growth99_plan` (joined by domain)
+ *   2. HubSpot company `growth99_plan` (by the TED client page HubSpot ID)
  *   3. "Growth99 Plan: <plan>" line in TED notes
  *   4. None -> FAIL ("plan not available to check"), no fix possible.
  *
@@ -105,9 +105,9 @@ export async function checkProjectPlan(
     planRaw = getClientPlanField(client)
     if (planRaw) planSource = "TED client page"
 
-    // 2. HubSpot (joined by domain from the TED client record).
-    const domain = await getClientDomain(clientKey).catch(() => null)
-    hs = await resolveHubspotClientData(domain, clientName).catch(() => null)
+    // 2. HubSpot, by the HubSpot ID on the TED client page.
+    const hubspotId = await getClientHubspotId(clientKey).catch(() => null)
+    hs = await resolveHubspotClientData(hubspotId, clientName).catch(() => null)
     if (!planRaw && hs?.plan) {
       planRaw = hs.plan
       planSource = "HubSpot"
@@ -143,7 +143,7 @@ export async function checkProjectPlan(
         title: "Project Plan not set",
         description:
           "No record for the project plan was found. NO fix possible — plan not available to check. Please set the plan on the TED client page.",
-        context_text: `Client: ${clientName} (id: ${clientKey}) — checked the TED client page \`plan\` field, HubSpot growth99_plan (by domain), and the "Growth99 Plan:" line in client notes.`,
+        context_text: `Client: ${clientName} (id: ${clientKey}) — checked the TED client page \`plan\` field, HubSpot growth99_plan (by HubSpot ID), and the "Growth99 Plan:" line in client notes.`,
         status: "open",
         ai_generated: false,
       } as Finding,

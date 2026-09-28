@@ -367,11 +367,11 @@ function canonicalHost(url: string): string | null {
  * CHECK: Cross-verify the live site link / domain (live_site_link)
  * -------------------------------------------------------------------------
  * Primary assertion: the URL released in the TED `release.security` task
- * matches the canonical site URL from the HubSpot client notes (both resolved
+ * matches the TED client page Website URL (both resolved
  * via TED at webhook time). Also confirms the released site resolves over a
  * valid HTTPS cert and is NOT still on a *.gogroth.com staging host.
  *
- * `notesUrl`    — canonical domain from HubSpot client notes (via TED)
+ * `notesUrl`    — TED client page Website URL (canonical)
  * `releasedUrl` — URL released in the release.security task (via TED)
  * `fallbackUrl` — crawl URL, only used for the health probe if neither resolves
  * =========================================================================
@@ -389,14 +389,14 @@ export async function checkLiveSiteLink(
 ): Promise<Finding[]> {
   const { notesUrl, releasedUrl, fallbackUrl } = urls
   try {
-    if (onProgress) await onProgress(20, "Comparing released URL vs client notes...")
+    if (onProgress) await onProgress(20, "Comparing released URL vs TED client page Website URL...")
 
     const issues: string[] = []
 
-    // 1. PRIMARY: released URL (release.security) must match the client-notes URL.
+    // 1. PRIMARY: released URL (release.security) must match the TED client page Website URL.
     if (!notesUrl) {
       issues.push(
-        "Could not resolve the canonical site URL from the HubSpot client notes (via TED). Cannot confirm the released domain is correct.",
+        "Could not resolve the Website URL from the TED client page. Cannot confirm the released domain is correct.",
       )
     }
     if (!releasedUrl) {
@@ -413,7 +413,7 @@ export async function checkLiveSiteLink(
         )
       } else if (notesHost !== releasedHost) {
         issues.push(
-          `Released domain \`${releasedHost}\` does NOT match the client-notes domain \`${notesHost}\`. The site may have gone live on the wrong URL.`,
+          `Released domain \`${releasedHost}\` does NOT match the TED client page Website URL domain \`${notesHost}\`. The site may have gone live on the wrong URL.`,
         )
       }
     }
@@ -494,11 +494,11 @@ export async function checkLiveSiteLink(
       {
         check_factor: "live_site_link",
         title: ok
-          ? `Released domain matches client notes (${hostname})`
+          ? `Released domain matches the TED client page Website URL (${hostname})`
           : "Live site link issues",
         description: ok
-          ? "No issues found. The released URL matches the canonical site URL from the HubSpot client notes, resolves over a valid HTTPS certificate, and is not on a `*.gogroth.com` staging host."
-          : "Confirms the URL released in the TED `release.security` task matches the canonical site URL from the HubSpot client notes, resolves over a valid HTTPS certificate, and is not still on a `*.gogroth.com` staging host.",
+          ? "No issues found. The released URL matches the TED client page Website URL, resolves over a valid HTTPS certificate, and is not on a `*.gogroth.com` staging host."
+          : "Confirms the URL released in the TED `release.security` task matches the TED client page Website URL, resolves over a valid HTTPS certificate, and is not still on a `*.gogroth.com` staging host.",
         context_text:
           `Client-notes URL (HubSpot via TED): ${notesUrl || "unresolved"}\n` +
           `Released URL (release.security via TED): ${releasedUrl || "unresolved"}\n` +

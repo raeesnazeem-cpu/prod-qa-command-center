@@ -48,6 +48,7 @@ import {
 import { applySpellingFix } from "../lib/spellingFix"
 import { detectFromRepoDir, type ThemeType } from "../lib/themeType"
 import { detectRepoKind, type RepoKind } from "../lib/gitopsResource"
+import { ownerRepoFromUrl, resolveGitFixToken } from "../lib/githubRepo"
 import {
   applySpellingGitops,
   applyGrammarGitops,
@@ -88,7 +89,7 @@ const logger = pino({
  * AI Fix module — runs AFTER the QA report is posted to TED.
  *
  * DELIVERY (Git-only, never touches WP admin/DB directly). The repo comes
- * STRICTLY from the client's beta_site.env task (betaSiteRepo), the same source
+ * STRICTLY from the TED client page GitHub site URL (githubRepo), the same source
  * for pre-release, post-release, and internal-QA runs. There is NO local/demo
  * fallback repo:
  *
@@ -111,7 +112,7 @@ const logger = pino({
  *
  * Gating: AI_FIX_MODULE_ENABLED=true. Every run attempts the fix, applies it,
  * and pushes a branch to raise ONE PR. A push happens whenever the client's
- * beta_site.env repo is resolvable and a push token (GIT_FIX_TOKEN or a per-repo
+ * client page GitHub repo is resolvable and a push token (GIT_FIX_TOKEN or a per-repo
  * override) is present. There is no dry-run: a push is only ever withheld by a
  * genuine repo-access gap, which the report states exactly.
  *
@@ -192,42 +193,6 @@ function parseTriageBatch(
   return out
 }
 
-function ownerRepoFromUrl(repoUrl: string): { owner: string; repo: string } | null {
-  // Repo names can contain dots (e.g. nuvoaestheticsclinic.gogroth.com), so we
-  // must NOT stop the repo capture at the first dot — only strip a trailing
-  // `.git` and any trailing slash / query / fragment.
-  const m = repoUrl.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?(?:[?#].*)?$/i)
-  return m ? { owner: m[1], repo: m[2] } : null
-}
-
-// Per-project push token override. Some clients' beta_site.env repos live under
-// a GitHub org/account the shared GIT_FIX_TOKEN cannot push to (e.g. TED client
-// 1534 → G99agency/nuvoaestheticsclinic.gogroth.com, which has its own
-// repo-scoped PAT). This maps a beta repo (owner/repo) to the env var holding
-// its dedicated token, so the correct token is used ONLY for that one repo and
-// falls back to GIT_FIX_TOKEN everywhere else.
-//
-// Config, never per-project code — GIT_FIX_TOKEN_OVERRIDES is a comma-separated
-// list of `owner/repo=ENV_VAR_NAME`. Add a new project by adding one line:
-//   GIT_FIX_TOKEN_OVERRIDES=G99agency/nuvoaestheticsclinic.gogroth.com=GH_TOKEN_NUVO
-function resolveGitFixToken(
-  ownerRepo: { owner: string; repo: string } | null,
-): string | undefined {
-  if (!ownerRepo) return undefined
-  const raw = process.env.GIT_FIX_TOKEN_OVERRIDES
-  if (!raw) return undefined
-  const key = `${ownerRepo.owner}/${ownerRepo.repo}`.toLowerCase()
-  for (const entry of raw.split(",")) {
-    const [repoKey, envVar] = entry.split("=").map((s) => s.trim())
-    if (!repoKey || !envVar) continue
-    if (repoKey.toLowerCase() === key) {
-      const val = process.env[envVar]
-      if (val) return val
-    }
-  }
-  return undefined
-}
-
 /**
  * Route a finding to a GitOps (resources/*.json) fix handler.
  *
@@ -246,6 +211,7 @@ async function runGitopsFix(
     pageUrl: string
     projectId?: string | null
     runType?: string | null
+    tedClientId?: string | null
   },
 ): Promise<GitopsFixResult | null> {
   const text = `${f.title || ""} ${f.description || ""}`.toLowerCase()
@@ -285,7 +251,7 @@ async function runGitopsFix(
         applySeoOgGitops(workDir, f, { company: ctx.company, pageUrl: ctx.pageUrl }),
       )
     case "accessibility_check":
-      return guardAsync(() => applyAccessibilityGitops(workDir, f, { projectName: ctx.company }))
+      return guardAsync(() => applyAccessibilityGitops(workDir, f, { projectName: ctx.company, tedClientId: ctx.tedClientId }))
     case "dead_links":
       return guard(() => applyDeadLinksGitops(workDir, f))
     case "top_bar_sticky":
@@ -399,7 +365,7 @@ export async function processAiFixRunJob(job: Job) {
   const { data: pages } = await supabase.from("pages").select("id, url").eq("run_id", runId)
   const pageUrlById = new Map<string, string>((pages || []).map((p: any) => [p.id, p.url]))
 
-  // Repo resolution — STRICTLY the client's beta_site.env repo (betaSiteRepo),
+  // Repo resolution — STRICTLY the TED client page GitHub site URL (githubRepo),
   // the same source for pre-release, internal-QA, and post-release runs. There
   // is NO local/demo fallback repo anymore:
   //   • repo resolves & clones → clone from GitHub → branch → apply → push →
@@ -412,8 +378,8 @@ export async function processAiFixRunJob(job: Job) {
   // — the exact key. Fall back to the QACC project name only when the id is
   // absent (older runs created before ted_client_id existed). Keying off the
   // name alone is what broke client 1534: the synthetic project name
-  // "QACC TED Test 1534" matched no TED client, so the beta_site.env repo — which
-  // IS present on the task — was never read.
+  // "QACC TED Test 1534" matched no TED client, so the client's repo — which
+  // IS present in TED — was never read.
   const repoLookupKey = (run as any)?.ted_client_id || project?.name
   const repoUrl: string | null = await resolveBetaSiteRepo(repoLookupKey).catch(
     () => null,
@@ -448,7 +414,7 @@ export async function processAiFixRunJob(job: Job) {
   if (noRepo) {
     logger.info(
       { runId, project: project?.name, siteUrl: run?.site_url },
-      "AI Fix: no beta_site.env repository access — reporting fixes per subtask without applying.",
+      "AI Fix: no GitHub repository access — reporting fixes per subtask without applying.",
     )
   }
 
@@ -486,6 +452,12 @@ export async function processAiFixRunJob(job: Job) {
       logger.info(
         { runId, files: repoIndex.length, themeType: repoThemeType, repoKind, source: "github" },
         "AI Fix: repo cloned and indexed",
+      )
+      // The clone is the most precise read of the repo shape — keep the run's
+      // repo_kind in step with it (best-effort; never blocks the fix).
+      await supabase.from("qa_runs").update({ repo_kind: repoKind }).eq("id", runId).then(
+        () => {},
+        () => {},
       )
     } catch (e: any) {
       logger.error({ runId, error: e.message }, "AI Fix: clone failed; triaging without repo context.")
@@ -886,6 +858,7 @@ export async function processAiFixRunJob(job: Job) {
         pageUrl,
         projectId: run?.project_id,
         runType: run?.run_type,
+        tedClientId: (run as any)?.ted_client_id || null,
       })
       if (g) {
         if (g.applied) committed++
@@ -2099,7 +2072,7 @@ export async function processAiFixRunJob(job: Job) {
   // is no dry-run. Priority: repo-access reasons first (they also explain a
   // zero-commit run), then a real push/PR error.
   const notPushedReason = noRepo
-    ? "no repository is linked to this client — the beta_site.env task carries no repo URL"
+    ? "no repository is linked to this client — the TED client page has no GitHub site URL"
     : cloneFailed
       ? "the repository could not be cloned — the GitHub token is invalid/revoked or the repo is private/inaccessible"
       : !token

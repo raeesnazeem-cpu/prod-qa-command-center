@@ -2,11 +2,9 @@
  * HubSpot read client — the source of truth for client-level data that TED does
  * not hold reliably: plan, paid-media engagement, and client details.
  *
- * Join key: DOMAIN, not TED's hubspotId. TED's hubspotId is the HubSpot record
- * id multiplied by 10 (e.g. TED 560466249290 = HubSpot company 56046624929), so
- * direct object lookups 404. Domain comes straight from the TED client notes
- * ("Client Domain/Website URL: …"). Two companies can share a domain (prod +
- * clone), so we disambiguate by exact name.
+ * Join key: the HubSpot ID shown on the TED client page (the client record's
+ * hubspotId), which is the HubSpot company id (e.g. 56046624929). The company is
+ * read directly by that id — no domain search.
  *
  * NOT sourced here (confirmed absent from the CRM): the beta site URL and GBP.
  * Those stay on TED / the live gbpCheck.
@@ -105,40 +103,23 @@ export interface HubspotClientData {
 }
 
 /**
- * Find the HubSpot company for a client by domain, disambiguating by exact name
- * when a domain is shared (prod vs clone). Returns null when HubSpot is off, the
- * domain is unknown, or nothing matches — every caller must have a TED fallback.
+ * Read the HubSpot company by its id (the TED client page's HubSpot ID).
+ * Returns null when HubSpot is off, the id is missing, or nothing matches —
+ * every caller must have a TED fallback.
  */
-export async function getCompanyByDomain(
-  domain: string | null | undefined,
-  name?: string | null,
+export async function getCompanyById(
+  hubspotId: string | null | undefined,
 ): Promise<{ id: string; properties: Record<string, any> } | null> {
-  if (!hsEnabled() || !domain) return null
-  const body = await hsFetch("/crm/v3/objects/companies/search", {
-    method: "POST",
-    body: JSON.stringify({
-      filterGroups: [
-        { filters: [{ propertyName: "domain", operator: "EQ", value: domain }] },
-      ],
-      properties: COMPANY_PROPS,
-      limit: 10,
-    }),
-  })
-  const results: any[] = body?.results || []
-  if (results.length === 0) return null
-
-  const want = (name || "").trim().toLowerCase()
-  const exact = want
-    ? results.find((c) => (c.properties?.name || "").trim().toLowerCase() === want)
-    : null
-  const chosen = exact || results[0]
-  if (results.length > 1 && !exact) {
-    logger.warn(
-      { domain, name, ids: results.map((c) => c.id) },
-      "HubSpot: multiple companies on domain, no exact name match — using first",
-    )
+  const id = String(hubspotId ?? "").trim()
+  if (!hsEnabled() || !/^\d+$/.test(id)) return null
+  const body = await hsFetch(
+    `/crm/v3/objects/companies/${id}?properties=${encodeURIComponent(COMPANY_PROPS.join(","))}`,
+  )
+  if (!body?.id) {
+    logger.warn({ hubspotId: id }, "HubSpot: no company for the TED client page HubSpot ID")
+    return null
   }
-  return { id: String(chosen.id), properties: chosen.properties || {} }
+  return { id: String(body.id), properties: body.properties || {} }
 }
 
 /** Resolve a HubSpot owner id to a display name (best-effort). */
@@ -151,21 +132,21 @@ async function ownerName(id: string | null | undefined): Promise<string | null> 
 }
 
 /**
- * Full client-level data for a TED client, joined into HubSpot by domain.
- * `domain` and `clientName` come from the TED client record (notes / name).
+ * Full client-level data for a TED client, read from HubSpot by the HubSpot ID
+ * on the TED client page. `clientName` is only a display fallback.
  */
 export async function resolveHubspotClientData(
-  domain: string | null | undefined,
+  hubspotId: string | null | undefined,
   clientName?: string | null,
 ): Promise<HubspotClientData | null> {
-  const company = await getCompanyByDomain(domain, clientName)
+  const company = await getCompanyById(hubspotId)
   if (!company) return null
   const p = company.properties
 
   return {
     companyId: company.id,
     name: p.name || clientName || "",
-    domain: p.domain || domain || null,
+    domain: p.domain || null,
     plan: (p.growth99_plan || "").trim() || null,
     accessibilityPlan: (p.accessibility_plan_add_on || "").trim() || null,
     paidSearchStrategist: await ownerName(p.paid_search_strategist),
