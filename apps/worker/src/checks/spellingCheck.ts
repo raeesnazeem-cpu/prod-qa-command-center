@@ -146,8 +146,16 @@ export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Prom
   // Track added words to deduplicate findings
   const dedupWords = new Set<string>();
 
+  // Lorem ipsum filler is placeholder text, not misspelled English. The
+  // dummy_content check already reports it once per page, so a block carrying
+  // the lorem marker is skipped whole — otherwise each Latin word ("sed",
+  // "tempor", "magna", …) becomes its own spelling finding on every page and
+  // crowds real issues out of the AI-fix queue with nonsense "corrections".
+  const LOREM_MARKER = /\blorem\s+ipsum\b|\bdolor\s+sit\s+amet\b/i;
+
   for (const block of rawTexts) {
     if (findings.length >= 50) break;
+    if (LOREM_MARKER.test(block.text)) continue;
     
     // Remove URLs to avoid tokenizing parts of them
     const textWithoutUrls = block.text.replace(urlRegex, ' ');
