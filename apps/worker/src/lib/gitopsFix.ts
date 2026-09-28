@@ -976,7 +976,7 @@ const USERWAY_SNIPPET_DIR = "resources/cpt/elementor_snippet/userway-accessibili
 export async function applyAccessibilityGitops(
   workDir: string,
   finding: Finding,
-  ctx: { projectName?: string | null },
+  ctx: { projectName?: string | null; tedClientId?: string | null },
 ): Promise<GitopsFixResult> {
   const title = (finding.title || "").toLowerCase()
   // Act only on the two real defects: wrong tier or not installed.
@@ -985,7 +985,10 @@ export async function applyAccessibilityGitops(
     return miss("accessibility finding is not a UserWay not-installed/mismatch defect")
   }
 
-  const { tier, planRaw } = await resolveRequiredUserwayTier(ctx.projectName).catch(() => ({
+  // Same key as the scan (TED client id first) so scan and fix pick the same tier.
+  const { tier, planRaw } = await resolveRequiredUserwayTier(
+    ctx.tedClientId || ctx.projectName,
+  ).catch(() => ({
     tier: null as "pro" | "free" | null,
     planRaw: null as string | null,
   }))

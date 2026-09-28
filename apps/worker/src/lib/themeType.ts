@@ -2,6 +2,8 @@ import fs from "fs"
 import path from "path"
 import axios from "axios"
 import { resolveBetaSiteRepo } from "./tedClient"
+import { ownerRepoFromUrl, resolveGitFixToken } from "./githubRepo"
+import { repoKindFromPaths, type RepoKind } from "./gitopsResource"
 
 /**
  * Theme-type detection — tells the checks/fixes whether the target is a CLASSIC
@@ -11,9 +13,12 @@ import { resolveBetaSiteRepo } from "./tedClient"
  * detection miss never changes what runs today.
  *
  * Hybrid resolution (see resolveThemeType):
- *   1. Repo-preferred — peek the client's beta_site.env repo when available
+ *   1. Repo-preferred — peek the client's GitHub repo (TED client page) when available
  *      (GitHub tree, read via the API). This is the authoritative signal because
  *      it sees the actual template files. (There is NO local fallback repo.)
+ *      The same tree also tells the repo kind: a GitOps content repo
+ *      (resources/ + g99-control) carries no theme files, so its theme type
+ *      comes from step 2.
  *   2. Front-end fallback — when no repo can be peeked, classify from the
  *      RENDERED HTML of the live site (block themes emit wp-block-* markup and a
  *      global-styles stylesheet; a classic WP site has neither).
@@ -172,20 +177,21 @@ export async function detectFromUrl(url: string): Promise<ThemeType> {
   }
 }
 
-function ownerRepoFromUrl(repoUrl: string): { owner: string; repo: string } | null {
-  const m = repoUrl.match(/github\.com[/:]([^/]+)\/([^/.]+)(?:\.git)?/i)
-  return m ? { owner: m[1], repo: m[2] } : null
-}
-
 /**
- * Peek a GitHub repo's file tree (one recursive git-tree call) and classify
- * without cloning. Best-effort — needs GIT_FIX_TOKEN; returns "unknown" on any
- * error or rate limit.
+ * Peek a GitHub repo's file tree (one recursive git-tree call, no clone) and
+ * classify both the repo kind and — for theme repos — the theme type.
+ * Uses the per-repo token override when set, else GIT_FIX_TOKEN. Stops after the
+ * first call when GitHub says the repo is missing or not readable (404/403),
+ * so no further requests go to a repo that can't be opened. Best-effort:
+ * { repoKind: null, themeType: "unknown" } on any miss.
  */
-async function detectFromGitHub(repoUrl: string): Promise<ThemeType> {
-  const token = (process.env.GIT_FIX_TOKEN || "").trim()
+async function detectFromGitHub(
+  repoUrl: string,
+): Promise<{ repoKind: RepoKind | null; themeType: ThemeType }> {
+  const none = { repoKind: null, themeType: "unknown" as ThemeType }
   const or = ownerRepoFromUrl(repoUrl)
-  if (!token || !or) return "unknown"
+  const token = (resolveGitFixToken(or) ?? process.env.GIT_FIX_TOKEN ?? "").trim()
+  if (!token || !or) return none
   const headers = {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
@@ -197,43 +203,53 @@ async function detectFromGitHub(repoUrl: string): Promise<ThemeType> {
       timeout: 15000,
       validateStatus: () => true,
     })
-    const branch = meta?.data?.default_branch || "main"
+    if (meta.status !== 200 || !meta.data?.default_branch) return none
+    const branch = meta.data.default_branch
     const tree = await axios.get(
-      `https://api.github.com/repos/${or.owner}/${or.repo}/git/trees/${branch}?recursive=1`,
+      `https://api.github.com/repos/${or.owner}/${or.repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
       { headers, timeout: 20000, validateStatus: () => true },
     )
     const paths: string[] = Array.isArray(tree?.data?.tree)
       ? tree.data.tree.map((t: any) => String(t?.path || "")).filter(Boolean)
       : []
-    if (paths.length === 0) return "unknown"
-    return classifyFromPaths(paths)
+    if (paths.length === 0) return none
+    const repoKind = repoKindFromPaths(paths)
+    // A GitOps repo holds page content, not theme files — no theme signal here.
+    return { repoKind, themeType: repoKind === "gitops" ? "unknown" : classifyFromPaths(paths) }
   } catch {
-    return "unknown"
+    return none
   }
 }
 
 /**
- * Hybrid resolver used at scan start. Repo-preferred (beta_site.env repo on
- * GitHub), then the rendered-HTML fallback. Never throws. No local fallback repo.
+ * Hybrid resolver used at scan start. Repo-preferred (the TED client page
+ * GitHub repo), then the rendered-HTML fallback. Never throws. No local fallback repo.
+ * `clientKey` is the TED client id (preferred) or name used to find the repo.
+ * Also returns the repo kind (gitops | theme) when the repo could be read.
  */
 export async function resolveThemeType(opts: {
-  projectName?: string | null
+  clientKey?: string | null
   siteUrl?: string | null
-}): Promise<{ themeType: ThemeType; source: "github-repo" | "front-end" | "none" }> {
-  // 1. Beta_site.env repo on GitHub — one API call, no clone.
+}): Promise<{
+  themeType: ThemeType
+  source: "github-repo" | "front-end" | "none"
+  repoKind: RepoKind | null
+}> {
+  // 1. TED client page GitHub repo — two API calls, no clone.
+  let repoKind: RepoKind | null = null
   try {
-    const repoUrl = await resolveBetaSiteRepo(opts.projectName || null).catch(() => null)
+    const repoUrl = await resolveBetaSiteRepo(opts.clientKey || null).catch(() => null)
     if (repoUrl) {
-      const t = await detectFromGitHub(repoUrl)
-      if (t !== "unknown") return { themeType: t, source: "github-repo" }
+      const r = await detectFromGitHub(repoUrl)
+      repoKind = r.repoKind
+      if (r.themeType !== "unknown") return { themeType: r.themeType, source: "github-repo", repoKind }
     }
   } catch {}
-
-  // 2. Front-end fallback — classify from the rendered site.
+  // 2. Front-end fallback — classify from the rendered site (the only signal for
+  //    a GitOps repo, and for any repo that could not be read).
   if (opts.siteUrl) {
     const t = await detectFromUrl(opts.siteUrl)
-    if (t !== "unknown") return { themeType: t, source: "front-end" }
+    if (t !== "unknown") return { themeType: t, source: "front-end", repoKind }
   }
-
-  return { themeType: "unknown", source: "none" }
+  return { themeType: "unknown", source: "none", repoKind }
 }

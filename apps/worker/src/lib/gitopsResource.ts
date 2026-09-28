@@ -34,6 +34,9 @@ export type RepoKind = "gitops" | "theme"
 /** Canonical portable-URL token (matches UrlRewriter::SITE_URL_TOKEN). */
 export const SITE_URL_TOKEN = "{{SITE_URL}}"
 
+const GITOPS_RESOURCES_DIR = "resources"
+const GITOPS_CONTROL_DIR = "web/app/mu-plugins/g99-control"
+
 /**
  * A GitOps repo is identified by BOTH a top-level `resources/` tree and the
  * `g99-control` MU plugin that reconciles it. Requiring both avoids a false
@@ -41,14 +44,26 @@ export const SITE_URL_TOKEN = "{{SITE_URL}}"
  */
 export function detectRepoKind(workDir: string): RepoKind {
   try {
-    const hasResources = fs.existsSync(path.join(workDir, "resources"))
-    const hasControl = fs.existsSync(
-      path.join(workDir, "web/app/mu-plugins/g99-control"),
-    )
+    const hasResources = fs.existsSync(path.join(workDir, GITOPS_RESOURCES_DIR))
+    const hasControl = fs.existsSync(path.join(workDir, GITOPS_CONTROL_DIR))
     return hasResources && hasControl ? "gitops" : "theme"
   } catch {
     return "theme"
   }
+}
+
+/**
+ * Same rule as detectRepoKind, applied to a flat list of repo-relative paths
+ * (e.g. a GitHub git-tree listing), so the scan-start peek and the AI-fix clone
+ * never disagree on a repo's kind.
+ */
+export function repoKindFromPaths(paths: string[]): RepoKind {
+  const has = (dir: string) =>
+    paths.some((p) => {
+      const n = p.replace(/\\/g, "/").replace(/^\.?\//, "")
+      return n === dir || n.startsWith(`${dir}/`)
+    })
+  return has(GITOPS_RESOURCES_DIR) && has(GITOPS_CONTROL_DIR) ? "gitops" : "theme"
 }
 
 // ---------------------------------------------------------------------------

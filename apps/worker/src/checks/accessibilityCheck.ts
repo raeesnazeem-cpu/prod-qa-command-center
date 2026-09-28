@@ -22,7 +22,7 @@ import {
  *   • present but no HubSpot plan to check against → PASS with a note
  *
  * The widget is site-wide, so this runs ONCE per run (the caller invokes it on
- * the homepage only) and takes the TED/HubSpot client name for the plan lookup.
+ * the homepage only) and takes the TED client id (else the client name) for the plan lookup.
  * check_factor stays "accessibility_check".
  */
 
@@ -31,6 +31,9 @@ const tierLabel = (t: UserwayTier): string => (t === "pro" ? "Pro" : "Basic")
 export async function checkAccessibility(
   page: PlaywrightPage,
   projectName?: string | null,
+  // OPTIONAL: the real TED client id stored on the run (qa_runs.ted_client_id).
+  // Preferred over the project name, which is synthetic for full scans.
+  tedClientId?: string | number | null,
 ): Promise<Finding[]> {
   const pageUrl = page.url()
   const factor = "accessibility_check"
@@ -43,7 +46,11 @@ export async function checkAccessibility(
     // catch). Both operations are read-only.
     const [html, { tier: requiredTier, planRaw }] = await Promise.all([
       page.content().then((c) => c || "").catch(() => ""),
-      resolveRequiredUserwayTier(projectName).catch(() => ({
+      resolveRequiredUserwayTier(
+        tedClientId != null && String(tedClientId).trim()
+          ? String(tedClientId).trim()
+          : projectName,
+      ).catch(() => ({
         tier: null as UserwayTier | null,
         planRaw: null as string | null,
       })),

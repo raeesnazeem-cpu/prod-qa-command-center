@@ -125,7 +125,7 @@ export async function processCrawlPageJob(job: Job) {
   const { data: run, error: runError } = await supabase
     .from("qa_runs")
     .select(
-      "status, is_woocommerce, site_url, enabled_checks, project_id, live_site_url, released_site_url, theme_type, run_type",
+      "status, is_woocommerce, site_url, enabled_checks, project_id, live_site_url, released_site_url, theme_type, run_type, ted_client_id",
     )
     .eq("id", runId)
     .single()
@@ -723,7 +723,7 @@ export async function processCrawlPageJob(job: Job) {
           (u || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "").toLowerCase()
         if (strip(pageUrl) === strip(run.site_url)) {
           scheduleOnSharedPage("accessibility_check", () =>
-            checkAccessibility(page, projectName).catch((e) => {
+            checkAccessibility(page, projectName, run.ted_client_id).catch((e) => {
               logger.error("Accessibility check failed:", e)
               return lapse("accessibility_check")(e)
             }),
@@ -827,6 +827,7 @@ export async function processCrawlPageJob(job: Job) {
               async (p, m) => {
                 await updateCheckProgress("blog_verification", p, m)
               },
+              run.ted_client_id,
             ).catch((e) => {
               logger.error("Blog verification check failed:", e)
               return lapse("blog_verification")(e)

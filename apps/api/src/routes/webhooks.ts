@@ -73,15 +73,15 @@ async function recordLocalTedWrite(
 const CLERK_WEBHOOK_SECRET = process.env.CLERK_WEBHOOK_SECRET || ""
 
 // NO FALLBACK SCAN URL (removed 2026-08-17). The scan target now comes STRICTLY
-// from TED — beta_site.env for pre-release/internal-QA, the released/live URL for
-// post-release. There is no longer any fallback to a local demo site
+// from TED — the client page Beta site URL for pre-release/internal-QA, the
+// released/live URL for post-release. There is no longer any fallback to a local demo site
 // (http://127.0.0.1:9400 + AI_FIX_LOCAL_REPO): scanning the wrong target is worse
 // than not scanning. When no real URL resolves, the run is created as `failed`
 // and a plain-language notice is posted to TED — see `createAbortedRun` below.
 //
 // Plain-language notices, stored as the failed run's name and posted to TED.
 const NO_BETA_URL_REASON =
-  "No beta site url found from beta site creation task. Scanning cancelled as there is no site Url to scan."
+  "No beta site url found on the TED client page. Scanning cancelled as there is no site Url to scan."
 const NO_LIVE_URL_REASON =
   "No live/released site url found from the release task. Scanning cancelled as there is no site Url to scan."
 
@@ -251,9 +251,10 @@ async function resolveRunCreatorId(
 // whenever its URL resolves from TED — independent of any repo — and only the
 // AI-FIX pass stalls when there's no clonable repo (see aiFixRunJob.ts).
 //
-//   internal_qa + pre_release → site source: beta_site.env (resolveBetaSiteUrlFromTED)
+//   internal_qa + pre_release → site source: TED client page Beta site URL
+//                               (resolveBetaSiteUrlFromTED)
 //   post_release              → site source: release.security released URL,
-//                               else the client-notes canonical domain
+//                               else the TED client page Website URL
 //
 // When NO real URL resolves the scan does NOT proceed: there is no fallback to a
 // local/demo site anymore. Instead the run is created as `failed` (visible in the
@@ -261,23 +262,10 @@ async function resolveRunCreatorId(
 // TED — see `createAbortedRun` above. The project's stored site_url is NOT
 // consulted — what gets scanned is strictly what THIS webhook resolves.
 //
-// FIX COHERENCE: the worker resolves the real betaSiteRepo for the fix pass and,
+// FIX COHERENCE: the worker resolves the TED client page GitHub repo for the fix pass and,
 // if there is no clonable repo, still reports each proposed fix per subtask but
 // notes the changes were not applied (no repo access). See aiFixRunJob.ts.
 // ===========================================================================
-
-// Resolve the beta site URL that QACC should scan, from TED.
-//
-// The URL lives on the client's `beta_site.env` task, in `automation.payload`
-// as a "betaSiteUrl=<url>" token (NOT in the webhook payload, the client notes,
-// or automation.siteUrl). We find that task client-agnostically:
-//   1. GET /api/clients/{clientId}/timeline  -> lists the client's tasks (with ids)
-//   2. pick the beta_site.env task (by automation.templateKey when present,
-//      else by the "Create beta site environment" title)
-//   3. GET /api/tasks/{id} -> verify automation.templateKey === "beta_site.env"
-//      and parse betaSiteUrl out of automation.payload
-// clientId comes from the webhook payload, so no task IDs are hardcoded.
-// Returns the URL string, or null if it can't be resolved.
 
 // A task's URL/repo may be written into automation.payload OR typed as a comment
 // on the same task page. This reads the task's comments into one searchable
@@ -309,43 +297,21 @@ async function fetchTedTaskCommentsText(
   }
 }
 
-// Parse a beta site URL out of free text — the beta_site.env task's automation
-// payload OR a human/AI comment on it. Handles all the shapes seen in the wild:
-//   • token:   betaSiteUrl=https://foo.gogroth.com
-//   • labelled: "Beta URL: https://…", "Beta site URL: https://…", "Beta link: …"
-//   • bare: the first non-GitHub http(s) URL in the text (so a "GitHub repo:"
-//     line on the same comment is never mistaken for the site URL).
-// Returns a cleaned URL (no trailing slash/punctuation), or null.
-function parseBetaSiteUrl(text: string): string | null {
-  if (!text) return null
-  // When the source is an HTML comment (e.g. <a href="URL">URL</a><br>GitHub),
-  // a bare \S+ match swallows the closing `">…</a><br>…` markup into the URL and
-  // that mangled value gets stored in site_url — breaking every place it renders
-  // (TED comments + QACC). Cut at the first char that cannot be part of a bare
-  // URL (quote, angle bracket, whitespace) BEFORE stripping trailing
-  // punctuation. Mirrors apps/web/src/lib/siteUrl.ts's cleanSiteUrl.
-  const clean = (u: string) =>
-    u
-      .split(/["'<>\s]/)[0]
-      .replace(/[.,;)]+$/, "")
-      .replace(/\/+$/, "")
-      .trim()
-  // 1. Explicit token.
-  const token = text.match(/betaSiteUrl\s*=\s*(\S+)/i)
-  if (token?.[1]) return clean(token[1])
-  // 2. Labelled line: "Beta URL:", "Beta site URL:", "Beta site link:", etc.
-  // URL char class excludes quotes/angle brackets so the match stops at HTML.
-  const labelled = text.match(
-    /beta[\s_-]*(?:site[\s_-]*)?(?:url|link)\s*[:=]\s*(https?:\/\/[^\s"'<>]+)/i,
-  )
-  if (labelled?.[1]) return clean(labelled[1])
-  // 3. Fallback: first http(s) URL that is NOT a GitHub repo link. Each match is
-  // a single clean URL (no quote/bracket chars), so the GitHub check is reliable
-  // even when the site URL and a GitHub link sit adjacent in HTML markup.
-  const urls = text.match(/https?:\/\/[^\s"'<>]+/gi) || []
-  const nonGithub = urls.find((u) => !/github\.com/i.test(u))
-  return nonGithub ? clean(nonGithub) : null
-}
+// ---------------------------------------------------------------------------
+// TED client "main page" fields — the single source for the beta site URL,
+// live site URL and GitHub repo.
+//
+// The TED client dashboard (ted.growth99.com/dashboard/clients/{id}) shows these
+// on its right-hand overview panel, which reads GET /api/clients/{id}/info:
+//   • betaSiteUrl → "Beta site URL"
+//   • liveSiteUrl → "Website URL" (live/production)
+//   • githubRepo  → "GitHub site URL", stored as the path after github.com
+//                   (e.g. "G99agency/nuvoaestheticsclinic.gogroth.com")
+// The HubSpot ID on the same panel is the client record's `hubspotId`.
+// These replace the older heuristics (beta_site.env task payload/comments,
+// client-notes regex). clientId comes from the webhook payload, so no task IDs
+// are hardcoded.
+// ---------------------------------------------------------------------------
 
 // Clean a raw URL to a scheme-normalized value (no trailing slash/punctuation).
 // Mirrors apps/web/src/lib/siteUrl.ts / worker tedClient.cleanSiteUrl.
@@ -361,54 +327,31 @@ function cleanRecordUrl(u: string | null | undefined): string | null {
   return /\.[a-z]{2,}/i.test(v) ? v : null
 }
 
-// Fetch a single TED client record from GET /api/clients by id (the list is the
-// only working endpoint — GET /api/clients/{id} returns 405). Returns the raw
-// client object, or null. Used to read the "main page" fields (plan, betaUrl,
-// website) that the TED client dashboard surfaces directly.
-async function fetchTedClientRecord(
+// Turn the TED `githubRepo` value into a full GitHub URL. TED stores the path
+// after github.com ("owner/repo"); a full github.com URL is accepted as-is.
+// Mirrors how the TED client page builds its "GitHub site URL" link.
+function githubRepoUrl(raw: string | null | undefined): string | null {
+  const v = String(raw || "").trim().replace(/\.git$/i, "").replace(/\/+$/, "")
+  if (!v) return null
+  const path = v
+    .replace(/^https?:\/\//i, "")
+    .replace(/^(?:www\.)?github\.com\//i, "")
+  return /^[\w.-]+\/[\w.-]+/.test(path) ? `https://github.com/${path}` : null
+}
+
+// GET /api/clients/{clientId}/info — the TED client page's overview panel.
+// Returns the raw info object, or null.
+async function fetchTedClientInfo(
   clientId?: string | number | null,
 ): Promise<any | null> {
   const apiToken = process.env.TED_API_TOKEN
-  if (!apiToken || clientId == null) return null
-  try {
-    const r = await fetch("https://ted.growth99.com/api/clients", {
-      headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
-    })
-    const ct = r.headers.get("content-type") || ""
-    if (!r.ok || !ct.includes("application/json")) return null
-    const body: any = await r.json().catch(() => null)
-    const list: any[] = Array.isArray(body)
-      ? body
-      : body?.clients || body?.data || body?.items || []
-    const want = String(clientId)
-    return list.find((c) => String(c?.id) === want) || null
-  } catch {
-    return null
-  }
-}
-
-// The beta site URL straight off the client record's main-page `betaUrl` field.
-async function betaUrlFromClientRecord(
-  clientId?: string | number | null,
-): Promise<string | null> {
-  const client = await fetchTedClientRecord(clientId)
-  return cleanRecordUrl(client?.clientDetails?.betaUrl)
-}
-
-async function resolveBetaSiteUrlFromTED(
-  clientId?: string | number | null,
-): Promise<{ url: string; source: string } | null> {
-  const apiToken = process.env.TED_API_TOKEN
   if (!apiToken) {
-    console.log("⚠️ TED_API_TOKEN missing — cannot resolve beta site URL.")
+    console.log("⚠️ TED_API_TOKEN missing — cannot read the TED client page.")
     return null
   }
-  if (clientId == null) {
-    console.log("⚠️ No clientId in payload — cannot resolve beta site URL.")
-    return null
-  }
-
-  const getJson = async (url: string): Promise<any | null> => {
+  if (clientId == null || String(clientId).trim() === "") return null
+  try {
+    const url = `https://ted.growth99.com/api/clients/${encodeURIComponent(String(clientId))}/info`
     const r = await fetch(url, {
       headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
     })
@@ -419,151 +362,67 @@ async function resolveBetaSiteUrlFromTED(
       )
       return null
     }
-    return r.json().catch(() => null)
-  }
-
-  try {
-    // 0. TED client record `clientDetails.betaUrl` — the "main page" beta site URL
-    //    shown on the TED client dashboard. This is the canonical, structured value
-    //    and needs no timeline/task drilling, so try it first. Only fall through to
-    //    the beta_site.env task lookup when the record field is blank.
-    const recordBeta = await betaUrlFromClientRecord(clientId)
-    if (recordBeta) {
-      console.log(
-        `✅ Resolved beta site URL from TED client record (main page): ${recordBeta}`,
-      )
-      return { url: recordBeta, source: "TED client page (betaUrl field)" }
-    }
-
-    const tl = await getJson(
-      `https://ted.growth99.com/api/clients/${clientId}/timeline`,
-    )
-    if (!tl) return null
-
-    // Collect candidate task ids for the beta_site.env task.
-    const ids = new Set<string>()
-    for (const t of tl.activeTasks || []) {
-      if (String(t?.automation?.templateKey || "") === "beta_site.env" && t?.id)
-        ids.add(String(t.id))
-    }
-    // Completed tasks appear in `timeline` without templateKey — match by title.
-    for (const t of tl.timeline || []) {
-      if (/beta site environment/i.test(t?.title || "") && t?.id)
-        ids.add(String(t.id))
-    }
-
-    if (ids.size === 0) {
-      console.log(
-        `⚠️ No beta_site.env task found in client ${clientId}'s timeline.`,
-      )
-      return null
-    }
-
-    for (const id of ids) {
-      const task = await getJson(`https://ted.growth99.com/api/tasks/${id}`)
-      // Authoritative check: the task must actually be the beta_site.env template.
-      // Reject only on a POSITIVE mismatch. TED stopped populating `automation` on
-      // GET /api/tasks/{id} (null on every task — verified 2026-08-24), so demanding
-      // a templateKey here rejected the very task the title match above had just
-      // identified, and the `continue` skipped BOTH the payload and comment lookups
-      // below — aborting every pre-release/internal-QA scan for "no beta site url"
-      // while the URL sat in the task's comment all along. When TED sends no
-      // templateKey, the timeline title match is the identity proof; when it does
-      // send one, it must still be beta_site.env.
-      const tk = String(task?.automation?.templateKey || "")
-      if (tk && tk !== "beta_site.env") continue
-      const payload: string = task?.automation?.payload || ""
-      // Payload first, then the task's comments (the URL is usually typed as a
-      // comment — e.g. "Beta URL: https://…" — rather than baked into payload).
-      const fromPayload = parseBetaSiteUrl(payload)
-      if (fromPayload) {
-        console.log(`✅ Resolved beta site URL from TED payload (task #${id}): ${fromPayload}`)
-        return { url: fromPayload, source: "beta site creation task (automation payload)" }
-      }
-      const fromComment = parseBetaSiteUrl(await fetchTedTaskCommentsText(id))
-      if (fromComment) {
-        console.log(`✅ Resolved beta site URL from TED comment (task #${id}): ${fromComment}`)
-        return { url: fromComment, source: "beta site creation task (comment)" }
-      }
-      console.log(
-        `⚠️ beta_site.env task #${id} has no beta site URL in payload or comments yet.`,
-      )
-    }
-    return null
+    return await r.json().catch(() => null)
   } catch (err) {
-    console.error("❌ Error resolving beta site URL from TED:", err)
+    console.error("❌ Error reading the TED client page:", err)
     return null
   }
 }
 
-// Resolve the beta site's REPO (betaSiteRepo=<url>) from the same beta_site.env
-// task's automation.payload (right next to betaSiteUrl). Client-agnostic, same
-// lookup path as resolveBetaSiteUrlFromTED. Returns the repo URL, or null.
-//
-// NOTE: this is part of the TED-first resolution that is COMMENTED OUT at the
-// call sites for the demo (see "DEMO OVERRIDE" / "TED-FIRST" markers). It's kept
-// as live, typechecked code so restoring TED-first after the demo is just an
-// uncomment — the function it references already exists and compiles.
-async function resolveBetaSiteRepoFromTED(
-  clientId?: string | number | null,
+// Find a TED client id by exact name (GET /api/clients). Only used when a
+// payload carries a client name but no clientId.
+async function findTedClientIdByName(
+  clientName?: string | null,
 ): Promise<string | null> {
   const apiToken = process.env.TED_API_TOKEN
-  if (!apiToken || clientId == null) return null
-
-  const getJson = async (url: string): Promise<any | null> => {
-    const r = await fetch(url, {
+  const want = (clientName || "").trim().toLowerCase()
+  if (!apiToken || !want) return null
+  try {
+    const r = await fetch("https://ted.growth99.com/api/clients", {
       headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
     })
     const ct = r.headers.get("content-type") || ""
     if (!r.ok || !ct.includes("application/json")) return null
-    return r.json().catch(() => null)
-  }
-
-  try {
-    const tl = await getJson(
-      `https://ted.growth99.com/api/clients/${clientId}/timeline`,
-    )
-    if (!tl) return null
-
-    const ids = new Set<string>()
-    for (const t of tl.activeTasks || []) {
-      if (String(t?.automation?.templateKey || "") === "beta_site.env" && t?.id)
-        ids.add(String(t.id))
-    }
-    for (const t of tl.timeline || []) {
-      if (/beta site environment/i.test(t?.title || "") && t?.id)
-        ids.add(String(t.id))
-    }
-    if (ids.size === 0) return null
-
-    for (const id of ids) {
-      const task = await getJson(`https://ted.growth99.com/api/tasks/${id}`)
-      if (String(task?.automation?.templateKey || "") !== "beta_site.env") continue
-      const payload: string = task?.automation?.payload || ""
-      // Payload first, then the task's comments. Accept the explicit
-      // betaSiteRepo= token or a bare GitHub URL written in a comment.
-      const matchRepo = (text: string) => {
-        const m = text.match(/betaSiteRepo=(\S+)/i)
-        if (m && m[1]) return m[1].replace(/[.,;)]+$/, "")
-        const g = text.match(/https?:\/\/(?:www\.)?github\.com\/\S+/i)
-        return g ? g[0].replace(/[.,;)]+$/, "") : null
-      }
-      const fromPayload = matchRepo(payload)
-      if (fromPayload) {
-        console.log(`✅ Resolved beta site REPO from TED payload (task #${id}): ${fromPayload}`)
-        return fromPayload
-      }
-      const fromComment = matchRepo(await fetchTedTaskCommentsText(id))
-      if (fromComment) {
-        console.log(`✅ Resolved beta site REPO from TED comment (task #${id}): ${fromComment}`)
-        return fromComment
-      }
-    }
-    return null
-  } catch (err) {
-    console.error("❌ Error resolving beta site repo from TED:", err)
+    const body: any = await r.json().catch(() => null)
+    const list: any[] = Array.isArray(body)
+      ? body
+      : body?.clients || body?.data || body?.items || []
+    const hit = list.find((c) => String(c?.name || "").trim().toLowerCase() === want)
+    return hit?.id != null ? String(hit.id) : null
+  } catch {
     return null
   }
+}
+
+// Resolve the beta site URL that QACC should scan: the TED client page's
+// "Beta site URL" (info.betaSiteUrl). Returns { url, source }, or null.
+async function resolveBetaSiteUrlFromTED(
+  clientId?: string | number | null,
+): Promise<{ url: string; source: string } | null> {
+  if (clientId == null) {
+    console.log("⚠️ No clientId in payload — cannot resolve beta site URL.")
+    return null
+  }
+  const info = await fetchTedClientInfo(clientId)
+  const url = cleanRecordUrl(info?.betaSiteUrl)
+  if (!url) {
+    console.log(`⚠️ TED client ${clientId} page has no Beta site URL.`)
+    return null
+  }
+  console.log(`✅ Resolved beta site URL from TED client page: ${url}`)
+  return { url, source: "TED client page (Beta site URL)" }
+}
+
+// Resolve the client's GitHub repo URL: the TED client page's "GitHub site URL"
+// (info.githubRepo, the path after github.com). Returns the repo URL, or null.
+async function resolveBetaSiteRepoFromTED(
+  clientId?: string | number | null,
+): Promise<string | null> {
+  if (clientId == null) return null
+  const info = await fetchTedClientInfo(clientId)
+  const repo = githubRepoUrl(info?.githubRepo)
+  if (repo) console.log(`✅ Resolved GitHub repo from TED client page: ${repo}`)
+  return repo
 }
 
 // Test whether a git repo URL is actually clonable with the current fix token.
@@ -588,101 +447,30 @@ async function isRepoClonable(repoUrl: string | null): Promise<boolean> {
   }
 }
 
-// Resolve the client's LIVE/production site URL from TED for POST-RELEASE runs.
-//
-// Post-release scans the client's real live site, whose URL lives in the client
-// record's `clientDetails.notes` after a "Client Domain/Website URL:" label
-// (e.g. "…Website URL: nuvoaestheticsclinic.com"). We look the client up in
-// GET /api/clients by clientId (preferred) or name — both from the payload — so
-// this stays client-agnostic. Returns a normalized https URL, or null.
+// Resolve the client's LIVE/production site URL from TED for POST-RELEASE runs:
+// the TED client page's "Website URL" (info.liveSiteUrl). Looked up by clientId
+// (preferred) or, when the payload has no id, by exact client name. Returns a
+// normalized https URL, or null.
 async function resolveClientNotesSiteUrlFromTED(
   clientId?: string | number | null,
   clientName?: string | null,
 ): Promise<string | null> {
-  const apiToken = process.env.TED_API_TOKEN
-  if (!apiToken) {
-    console.log("⚠️ TED_API_TOKEN missing — cannot resolve live site URL.")
-    return null
-  }
   if (clientId == null && !clientName) return null
-
-  try {
-    const res = await fetch("https://ted.growth99.com/api/clients", {
-      headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
-    })
-    const ct = res.headers.get("content-type") || ""
-    if (!res.ok || !ct.includes("application/json")) {
-      console.error(
-        `❌ TED /api/clients did not return JSON (HTTP ${res.status}, content-type "${ct}"). Cannot resolve live site URL.`,
-      )
-      return null
-    }
-
-    const body = (await res.json()) as any
-    const clients: any[] = Array.isArray(body)
-      ? body
-      : body?.clients || body?.data || body?.items || []
-
-    const wantId = clientId != null ? String(clientId) : null
-    const wantName = clientName ? clientName.trim().toLowerCase() : null
-    const client =
-      (wantId && clients.find((c) => String(c?.id) === wantId)) ||
-      (wantName &&
-        clients.find(
-          (c) => String(c?.name || "").trim().toLowerCase() === wantName,
-        )) ||
-      null
-
-    if (!client) {
-      console.log(
-        `⚠️ Client (id="${wantId}", name="${clientName}") not found among the ${clients.length} clients TED returned. Live site URL not resolved.`,
-      )
-      return null
-    }
-
-    // 0. TED client record `clientDetails.website` — the "main page" WEBSITE URL
-    //    on the TED client dashboard. Canonical and structured, so prefer it over
-    //    parsing the free-text notes below.
-    const recordWebsite = cleanRecordUrl(client?.clientDetails?.website)
-    if (recordWebsite) {
-      console.log(
-        `✅ Resolved client live site URL from TED client record (main page): ${recordWebsite}`,
-      )
-      return recordWebsite
-    }
-
-    const notes: string = client?.clientDetails?.notes || ""
-    if (!notes) return null
-
-    const text = notes
-      .replace(/&nbsp;/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-
-    const m =
-      text.match(/(?:domain\s*\/?\s*)?website\s*url\s*:?\s*([^\s,;]+)/i) ||
-      text.match(/\bdomain\s*url\s*:?\s*([^\s,;]+)/i) ||
-      text.match(/\burl\s*:?\s*(https?:\/\/[^\s,;]+)/i)
-
-    let url = m?.[1]?.trim()
-    if (!url) {
-      console.log(
-        `⚠️ Could not find a "Website URL:" value in client "${client?.name}" notes.`,
-      )
-      return null
-    }
-
-    url = url.replace(/[.,;)]+$/, "")
-    if (!/^https?:\/\//i.test(url)) url = `https://${url}`
-    if (!/\.[a-z]{2,}/i.test(url)) return null
-
-    console.log(`✅ Resolved client live site URL from TED: ${url}`)
-    return url
-  } catch (err) {
-    console.error("❌ Error resolving client live site URL from TED:", err)
+  const id = clientId != null ? String(clientId) : await findTedClientIdByName(clientName)
+  if (!id) {
+    console.log(
+      `⚠️ Client (id="${clientId ?? ""}", name="${clientName ?? ""}") not found in TED. Live site URL not resolved.`,
+    )
     return null
   }
+  const info = await fetchTedClientInfo(id)
+  const url = cleanRecordUrl(info?.liveSiteUrl)
+  if (!url) {
+    console.log(`⚠️ TED client ${id} page has no Website URL.`)
+    return null
+  }
+  console.log(`✅ Resolved client live site URL from TED client page: ${url}`)
+  return url
 }
 
 // Resolve the RELEASED site URL from the TED `release.security` task's
@@ -1232,7 +1020,7 @@ const POST_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   { matchers: ["numberofplugins", "totalnumber"], checks: ["plugin_number"] },
   { matchers: ["pluginsareupdated"], checks: ["verify_plugin_updates"] },
   // "Cross verify the live site link (Domain Name)" → the live_site_link check
-  // asserts the released URL matches the client-notes domain.
+  // asserts the released URL matches the TED client page Website URL.
   { matchers: ["livesitelink", "domainname"], checks: ["live_site_link"] },
   // "G99 Contact form, ChatBot and VC" → chatbot/VC detection AND the live
   // contact-form flow (find → fill → submit → thank-you) — see header note.
@@ -1444,7 +1232,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
           )
 
           // TED-first resolution (pre-release): SCAN the REAL beta site whenever
-          // we can resolve its URL from beta_site.env (payload OR task comment) —
+          // we can resolve its URL from the TED client page (Beta site URL) —
           // independent of whether a clonable repo exists. The repo only gates
           // the AI-FIX pass (which stalls when there's no repo, see aiFixRunJob),
           // NOT the scan. When no beta URL resolves the scan is CANCELLED (a
@@ -1454,7 +1242,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
           const tedSiteSource: string | null = betaResolved?.source || null
           if (!tedSiteUrl)
             console.log(
-              `ℹ️ pre-release: no beta site URL on beta_site.env → scan will be cancelled.`,
+              `ℹ️ pre-release: no Beta site URL on the TED client page → scan will be cancelled.`,
             )
 
           // Resolve the release.qa_pre task (client-agnostic, by template key)
@@ -1529,7 +1317,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 // No fallback URL: store the resolved beta URL, or empty when
                 // none resolved (the site_url column is NOT NULL). The scan is
                 // cancelled below in that case, and the backfill fills this in
-                // once a real URL appears on beta_site.env.
+                // once a real URL appears on the TED client page.
                 site_url: tedSiteUrl || "",
                 // release.pre_dev completed → this project is now in the
                 // pre-release QA stage.
@@ -1727,8 +1515,8 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
               .insert({
                 project_id: project.id,
                 run_type: "pre_release",
-                // Scan target = the TED beta_site.env URL, resolved strictly from
-                // beta_site.env. There is no fallback: the project's stored
+                // Scan target = the TED client page Beta site URL, resolved
+                // strictly from TED. There is no fallback: the project's stored
                 // site_url is deliberately NOT consulted, and when no URL resolves
                 // the scan is cancelled above rather than scanning a demo site.
                 site_url: tedSiteUrl,
@@ -1744,8 +1532,8 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 status: "running",
                 created_by: runCreatorId, // Assigns to the actual person from TED, or the Ghost User
                 ted_task_id: preReleaseTaskId ? String(preReleaseTaskId) : null,
-                // Real TED client id → worker resolves the beta_site.env repo by
-                // id, not the QACC project name. See resolveBetaSiteRepo.
+                // Real TED client id → worker resolves the client page GitHub repo
+                // by id, not the QACC project name. See resolveBetaSiteRepo.
                 ted_client_id: task.clientId ? String(task.clientId) : null,
               })
               .select()
@@ -2379,7 +2167,7 @@ async function handleAgentRunRequested(
     siteSource = releasedUrl
       ? "release.security released URL"
       : liveSiteUrl
-        ? "client-notes live URL"
+        ? "TED client page Website URL"
         : ""
   } else {
     const beta = await resolveBetaSiteUrlFromTED(clientId)
@@ -2394,7 +2182,7 @@ async function handleAgentRunRequested(
   if (!siteUrl) {
     const reason =
       runType === "post_release"
-        ? "No released/live site URL resolved (release.security + client notes) — single-subtask run cancelled."
+        ? "No released/live site URL resolved (release.security + TED client page) — single-subtask run cancelled."
         : NO_BETA_URL_REASON
     const abortedRunId = await createAbortedRun({
       projectId: project.id,
@@ -2647,7 +2435,7 @@ webhookRouter.post(
           )
 
           // TED-first resolution (internal QA): SCAN the REAL beta site whenever
-          // we can resolve its URL from beta_site.env (payload OR task comment) —
+          // we can resolve its URL from the TED client page (Beta site URL) —
           // independent of whether a clonable repo exists. The repo only gates
           // the AI-FIX pass (which stalls when there's no repo), NOT the scan.
           // When no beta URL resolves the scan is CANCELLED (a `failed` run is
@@ -2657,7 +2445,7 @@ webhookRouter.post(
           const tedSiteSource: string | null = betaResolved?.source || null
           if (!tedSiteUrl)
             console.log(
-              `ℹ️ internal-QA: no beta site URL on beta_site.env → scan will be cancelled.`,
+              `ℹ️ internal-QA: no Beta site URL on the TED client page → scan will be cancelled.`,
             )
 
           // Resolve the beta_site.internal_test target task QACC talks back to.
@@ -2922,8 +2710,8 @@ webhookRouter.post(
               .insert({
                 project_id: project.id,
                 run_type: "internal_qa",
-                // Scan target = the TED beta_site.env URL, resolved strictly from
-                // beta_site.env. No fallback: when no URL resolves the scan is
+                // Scan target = the TED client page Beta site URL, resolved
+                // strictly from TED. No fallback: when no URL resolves the scan is
                 // cancelled above rather than scanning a demo site.
                 site_url: tedSiteUrl,
                 enabled_checks: internalQaChecks,
@@ -2933,7 +2721,7 @@ webhookRouter.post(
                 created_by: runCreatorId,
                 ted_task_id: targetTaskId ? String(targetTaskId) : null,
                 // Real TED client id — the worker's AI-fix pass resolves the
-                // beta_site.env repo by this exact id (not the QACC project name,
+                // client page GitHub repo by this exact id (not the QACC project name,
                 // which may not match the TED client). See resolveBetaSiteRepo.
                 ted_client_id: task.clientId ? String(task.clientId) : null,
               })
@@ -3068,7 +2856,7 @@ webhookRouter.post(
 // Fires when a `release.security` task is marked Complete/Completed. It shifts
 // the (already-existing) QACC project into the post-release stage and starts a
 // post-release run of the automated General Checks. The scan URL is the client's
-// LIVE site (from client notes), not the beta site.
+// LIVE site (TED client page Website URL), not the beta site.
 webhookRouter.post(
   "/ted/post-release",
   async (req: Request, res: Response) => {
@@ -3231,14 +3019,14 @@ webhookRouter.post(
         )
 
         if (clientName) {
-          // Resolve the LIVE site URL from the HubSpot client notes (via TED).
+          // Resolve the LIVE site URL from the TED client page (Website URL).
           // This is the canonical/expected final domain.
           const liveSiteUrl = await resolveClientNotesSiteUrlFromTED(
             task.clientId,
             clientName,
           )
           // Resolve the RELEASED URL from the release.security task's payload —
-          // the live_site_link check asserts this matches the client-notes URL.
+          // the live_site_link check asserts this matches the client page Website URL.
           const releasedUrl = await resolveReleasedUrlFromReleaseSecurity(
             task.id,
           )
@@ -3369,13 +3157,13 @@ webhookRouter.post(
             // POST-RELEASE URL DECISION (no demo fallback):
             //  • releasedUrl = URL on the "Complete website security and release"
             //    (release.security) task — payload or its comments.
-            //  • liveSiteUrl = client notes / client details URL (canonical).
+            //  • liveSiteUrl = TED client page Website URL (canonical).
             // We prefer the released URL and cross-check it against the client
-            // notes/details URL:
+            // page Website URL:
             //  - released present, hosts MATCH → scan released, no warning.
             //  - released present, hosts DIFFER → scan released, but warn in the
             //    main thread (client likely opted for a domain change).
-            //  - released MISSING, notes present → scan the notes/details URL as a
+            //  - released MISSING, Website URL present → scan it as a
             //    FALLBACK, and say so explicitly.
             //  - neither → cancel the scan (failed run + notice), below.
             let runSiteUrl: string | null = null
@@ -3390,15 +3178,15 @@ webhookRouter.post(
                   normalizeHost(releasedUrl as string)
               ) {
                 urlWarning =
-                  `⚠️ Domain mismatch: the released URL (${releasedUrl}) does not match the client notes/details URL (${liveSiteUrl}). ` +
+                  `⚠️ Domain mismatch: the released URL (${releasedUrl}) does not match the TED client page Website URL (${liveSiteUrl}). ` +
                   `Scanning the released URL — the client has likely opted for a domain change. Please verify this is intended.`
               }
             } else if (liveSiteUrl) {
               runSiteUrl = liveSiteUrl as string
-              siteUrlSource = "client notes / client details (fallback)"
+              siteUrlSource = "TED client page Website URL (fallback)"
               urlWarning =
                 `⚠️ Fallback URL in use: no released domain was found on the "Complete website security and release" task ` +
-                `(neither in its automation payload nor its comments), so the client notes/details URL (${liveSiteUrl}) is being scanned instead.`
+                `(neither in its automation payload nor its comments), so the TED client page Website URL (${liveSiteUrl}) is being scanned instead.`
             }
             if (!runSiteUrl) {
               scanAborted = true
@@ -3463,11 +3251,11 @@ webhookRouter.post(
                 status: "running",
                 created_by: runCreatorId,
                 ted_task_id: scanTaskId ? String(scanTaskId) : null,
-                // Real TED client id → worker resolves the beta_site.env repo by
-                // id, not the QACC project name. See resolveBetaSiteRepo.
+                // Real TED client id → worker resolves the client page GitHub repo
+                // by id, not the QACC project name. See resolveBetaSiteRepo.
                 ted_client_id: task.clientId ? String(task.clientId) : null,
                 // live_site_link compares these two TED-sourced URLs:
-                //   live_site_url    = HubSpot client-notes canonical domain
+                //   live_site_url    = TED client page Website URL
                 //   released_site_url = URL released in the release.security task
                 live_site_url: liveSiteUrl,
                 released_site_url: releasedUrl,
@@ -4028,7 +3816,7 @@ webhookRouter.post("/ted/full-scan", async (req: Request, res: Response) => {
         // Report target (release.qa_post parent). Its STATUS is never changed by a
         // full scan — the worker's full_scan branch posts the report and stops.
         ted_task_id: reportTaskId ? String(reportTaskId) : null,
-        // For the on-demand GitOps fix pass to resolve the beta_site.env repo.
+        // For the on-demand GitOps fix pass to resolve the client page GitHub repo.
         ted_client_id: task.clientId ? String(task.clientId) : null,
         custom_name: `Full Scan — ${nowIso}`,
       })
