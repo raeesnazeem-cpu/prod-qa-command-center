@@ -72,6 +72,9 @@ export async function persistScanCheckResults(runId: string): Promise<void> {
       let status: "failed" | "errored" | "passed"
       if (real.length > 0) status = "failed"
       else if (group.length > 0 && lapses.length === group.length) status = "errored"
+      // image_relevance writes a row for every service page it judged, so no
+      // row at all means no service page was reached: nothing was verified.
+      else if (group.length === 0 && factor === "image_relevance") status = "errored"
       // AI-backed checks: a page the AI never read blocks a pass.
       else if (aiLapseBlocksPass(factor, group)) status = "errored"
       else status = "passed"
@@ -88,7 +91,9 @@ export async function persistScanCheckResults(runId: string): Promise<void> {
           ? first.title || first.description || null
           : status === "errored" && aiLapseBlocksPass(factor, group)
             ? `Could not complete: ${aiLapseSummary(group)}`
-            : null,
+            : status === "errored" && group.length === 0 && factor === "image_relevance"
+              ? "Could not complete: no service pages were identified in this scan"
+              : null,
         page_url: first ? urlById.get(first.page_id) || null : null,
         screenshot_url: first ? first.screenshot_url || null : null,
         severity: first ? first.severity || null : null,

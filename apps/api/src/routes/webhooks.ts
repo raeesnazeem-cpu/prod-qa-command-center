@@ -1785,6 +1785,10 @@ const FULL_SCAN_CHECKS = [
   "false_breakpoint",
   "functionality_check",
   "image_quality",
+  // Service pages only: every content image must fit the page's service.
+  // FULL SCAN ONLY — no other suite lists it, and the worker also refuses to
+  // run it on any other run_type.
+  "image_relevance",
   "grammar",
   // The real accessibility check — UserWay (pro/basic) installation detection.
   "accessibility_check",

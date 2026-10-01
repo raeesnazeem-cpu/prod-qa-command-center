@@ -32,7 +32,8 @@ interface FindingCardProps {
 }
 
 interface ImgIssue {
-  type: "blur" | "watermark"
+  // image_quality: blur | watermark. image_relevance: irrelevant | unrelated.
+  type: "blur" | "watermark" | "irrelevant" | "unrelated"
   src: string
   thumb: string
   note: string
@@ -125,7 +126,7 @@ export const ImageQualityFindingCard: React.FC<FindingCardProps> = ({
       <td className="px-3 py-2 align-top">
         <span
           className={`inline-block px-2 py-0.5 rounded-full text-[9px] font-bold uppercase ${
-            it.type === "watermark"
+            it.type === "watermark" || it.type === "irrelevant"
               ? "bg-red-50 text-red-600 border border-red-200"
               : "bg-yellow-50 text-yellow-700 border border-yellow-200"
           }`}

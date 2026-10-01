@@ -34,6 +34,7 @@ import { checkFunctionality } from "../checks/functionalityCheck"
 import { checkHamburgerMenu } from "../checks/hamburgerMenuCheck"
 import { checkBlogVerification } from "../checks/blogVerificationCheck"
 import { checkImageQuality } from "../checks/imageQualityCheck"
+import { checkImageRelevance } from "../checks/imageRelevanceCheck"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
 import { checkAccessibility } from "../checks/accessibilityCheck"
@@ -740,6 +741,35 @@ export async function processCrawlPageJob(job: Job) {
             return lapse("image_quality")(e)
           }),
         )
+      }
+
+      // Image relevance — FULL SCAN ONLY, service pages only. The run_type guard
+      // is deliberate: only FULL_SCAN_CHECKS lists this key, but a retry's
+      // overrideChecks or a hand-built run must still never run it elsewhere.
+      // Never on the homepage; the check itself decides which other pages are
+      // service pages and stays silent on the rest.
+      if (enabledChecks.includes("image_relevance") && run.run_type === "full_scan") {
+        const strip = (u: string) =>
+          (u || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "").toLowerCase()
+        if (strip(pageUrl) !== strip(run.site_url)) {
+          schedule("image_relevance", () =>
+            checkImageRelevance(
+              pageUrl,
+              runId,
+              pageId,
+              run.site_url,
+              browser,
+              async (p, m) => {
+                await updateCheckProgress("image_relevance", p, m)
+              },
+              // Brand hint so "Botox | Nuvo Clinic" reads as "Botox".
+              projectName ? [projectName] : [],
+            ).catch((e) => {
+              logger.error("Image relevance check failed:", e)
+              return lapse("image_relevance")(e)
+            }),
+          )
+        }
       }
 
       if (run?.is_woocommerce && enabledChecks.includes("woocommerce")) {
