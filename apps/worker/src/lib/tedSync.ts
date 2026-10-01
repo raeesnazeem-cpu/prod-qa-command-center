@@ -876,6 +876,7 @@ export const FRIENDLY: Record<string, string> = {
   external_links: "External Links",
   image_quality: "Image Quality (Watermark & Blur)",
   image_relevance: "Image Relevance (Service Pages)",
+  media_crop: "Image & Video Cropping (Desktop / Tablet / Mobile)",
   hero_media: "Hero Video & Image Load",
   false_breakpoint: "False Breaking Points",
   cross_browser: "Cross-Browser Visual",
@@ -943,6 +944,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   gbp_check: "Mention to complete the Google Business Profile — add the missing phone, matching website, hours, photos, or reviews",
   image_quality: "Mention to replace the flagged blurry and watermarked images with clean, sharp versions",
   image_relevance: "Mention to replace the flagged images on each service page with images that show that service",
+  media_crop: "Mention to fix the flagged images/videos so they are not cut off at the listed screen sizes (desktop, tablet or mobile)",
   blog_verification: "Mention to migrate the missing blog posts from the client's live site to the beta site",
   cross_browser: "Mention to review the SmartUI cross-browser diffs and fix the rendering differences",
   gsr_check: "Review the listed Google search result titles and snippets and correct the invalid characters at the source (page title / meta description)",
@@ -1480,6 +1482,40 @@ export async function renderCheckSectionHtml(
     return { status: "failed", html: header + blocks.join("<br>") }
   }
 
+  // Media crop failures: one block per page — the grid of what the visitor
+  // sees at each width, then "Image N — <viewport> — X% hidden: why" per item.
+  if (real.length > 0 && factor === "media_crop") {
+    const blocks: string[] = []
+    let totalFlagged = 0
+    for (const f of dedupeFindings(real)) {
+      const rows = parseImageIssues(f.context_text)
+      const pageUrl = (f.page_id && pageUrlById?.get(String(f.page_id))) || ""
+      const pageLabel = pageUrl ? `<a href="${esc(pageUrl)}">${esc(pageUrl)}</a>` : "this page"
+      let block = `<p>📄 <strong>Page:</strong> ${pageLabel} — ${esc(f.title || "")}</p>`
+      if (rows.length) {
+        const grid = await renderImageGrid(rows, imgBudget, f.inline_media?.grid)
+        if (grid) block += grid
+        block += `<ul>${rows
+          .map(
+            (it: any, i: number) =>
+              `<li>${i + 1}. ${esc(it.note || "")} — <a href="${esc(String(it.src || it.thumb || ""))}">source</a></li>`,
+          )
+          .join("")}</ul>`
+        totalFlagged += rows.length
+      } else {
+        const desc = clipText(String(f.description || "").replace(/\s+/g, " ").trim(), 300)
+        if (desc) block += `<p>${esc(desc)}</p>`
+        totalFlagged += 1
+      }
+      const fx = f.id ? fixMap.get(String(f.id)) : undefined
+      const fixLine = renderFixLine(fx, !!f.ai_generated)
+      if (fixLine) block += `<p>${fixLine.replace(/^<br>/, "")}</p>`
+      blocks.push(block)
+    }
+    const header = `<p>❌ <strong>${esc(label)}</strong> — ${totalFlagged} cropped item${totalFlagged > 1 ? "s" : ""} across ${blocks.length} page${blocks.length > 1 ? "s" : ""}.</p>`
+    return { status: "failed", html: header + blocks.join("<br>") }
+  }
+
   // Link checks: render EVERY broken link in full (whole URL, status/reason,
   // anchor text, and the page it was found on) — never a clipped preview, since
   // a truncated URL tells the client nothing. Merged + deduped across pages.
@@ -1826,7 +1862,11 @@ export async function precomputeFindingMedia(runId: string): Promise<void> {
 
       // image_quality / image_relevance → the composite grid built from their
       // context_text images.
-      if (f.check_factor === "image_quality" || f.check_factor === "image_relevance") {
+      if (
+        f.check_factor === "image_quality" ||
+        f.check_factor === "image_relevance" ||
+        f.check_factor === "media_crop"
+      ) {
         const seen = new Set<string>()
         const uniq: any[] = []
         for (const it of parseImageIssues(f.context_text)) {

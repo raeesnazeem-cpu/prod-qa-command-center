@@ -652,6 +652,28 @@ export async function processAiFixRunJob(job: Job) {
       continue
     }
 
+    // --- media_crop: scan only, no fix ---------------------------------
+    // Whether a crop is acceptable (and how to re-frame it) is a design call
+    // per breakpoint, so it is never auto-edited or sent to AI triage.
+    if (f.check_factor === "media_crop") {
+      analysis.push({
+        findingId: f.id ? String(f.id) : null,
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+        category: "manual",
+        fix: "No fix possible. Adjust the flagged images/videos so they are not cut off at the listed screen sizes.",
+        applied: false,
+        proposed: false,
+        noAutoFix: true,
+        suggestedFix: "Adjust the flagged images/videos so they are not cut off at the listed screen sizes",
+        lapse: false,
+        filesOffered: [],
+        filesChanged: [],
+      })
+      continue
+    }
+
     // --- learn_more_buttons: ALWAYS a manual, editorial hand-off ----------
     // Rewording a generic "Learn More" CTA is a judgement call about where the
     // link goes, so it is NEVER auto-applied and NEVER a "proposal" the report
