@@ -73,7 +73,9 @@ export const FindingCard: React.FC<FindingCardProps> = (props) => {
     return <DeadLinksFindingCard {...props} />
   }
 
-  if (finding.check_factor === "image_quality" || finding.check_factor === "image_relevance") {
+  if (finding.check_factor === "image_quality" ||
+    finding.check_factor === "image_relevance" ||
+    finding.check_factor === "media_crop") {
     return <ImageQualityFindingCard {...props} />
   }
 

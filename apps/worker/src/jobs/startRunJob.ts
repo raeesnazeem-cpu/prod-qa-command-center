@@ -178,6 +178,7 @@ export async function processStartRunJob(job: Job) {
       "functionality_check",
       "image_quality",
       "image_relevance",
+      "media_crop",
       "grammar",
       "accessibility_check",
     ]

@@ -19,6 +19,7 @@ const FRIENDLY: Record<string, string> = {
   dead_links: "Dead Links",
   image_quality: "Image Quality",
   image_relevance: "Image Relevance",
+  media_crop: "Image & Video Cropping",
   hero_media: "Hero Media",
   false_breakpoint: "False Breaking Points",
   backend_check: "Backend / WordPress",

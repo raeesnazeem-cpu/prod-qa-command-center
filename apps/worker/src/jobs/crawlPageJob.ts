@@ -35,6 +35,7 @@ import { checkHamburgerMenu } from "../checks/hamburgerMenuCheck"
 import { checkBlogVerification } from "../checks/blogVerificationCheck"
 import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkImageRelevance } from "../checks/imageRelevanceCheck"
+import { checkMediaCrop } from "../checks/mediaCropCheck"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
 import { checkAccessibility } from "../checks/accessibilityCheck"
@@ -770,6 +771,20 @@ export async function processCrawlPageJob(job: Job) {
             }),
           )
         }
+      }
+
+      // Media crop — FULL SCAN ONLY, every page. Same run_type guard as
+      // image_relevance: only FULL_SCAN_CHECKS lists it, but a retry's
+      // overrideChecks must never run it elsewhere. Scan only, no fix.
+      if (enabledChecks.includes("media_crop") && run.run_type === "full_scan") {
+        schedule("media_crop", () =>
+          checkMediaCrop(pageUrl, runId, pageId, browser, async (p, m) => {
+            await updateCheckProgress("media_crop", p, m)
+          }).catch((e) => {
+            logger.error("Media crop check failed:", e)
+            return lapse("media_crop")(e)
+          }),
+        )
       }
 
       if (run?.is_woocommerce && enabledChecks.includes("woocommerce")) {

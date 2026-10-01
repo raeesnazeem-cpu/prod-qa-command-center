@@ -33,7 +33,8 @@ interface FindingCardProps {
 
 interface ImgIssue {
   // image_quality: blur | watermark. image_relevance: irrelevant | unrelated.
-  type: "blur" | "watermark" | "irrelevant" | "unrelated"
+  // media_crop: cropped.
+  type: "blur" | "watermark" | "irrelevant" | "unrelated" | "cropped"
   src: string
   thumb: string
   note: string

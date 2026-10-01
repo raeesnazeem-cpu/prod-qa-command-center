@@ -1789,6 +1789,9 @@ const FULL_SCAN_CHECKS = [
   // FULL SCAN ONLY — no other suite lists it, and the worker also refuses to
   // run it on any other run_type.
   "image_relevance",
+  // Every page: images/videos cut off at desktop, tablet or mobile width.
+  // FULL SCAN ONLY and scan only (no fix) — the worker also guards run_type.
+  "media_crop",
   "grammar",
   // The real accessibility check — UserWay (pro/basic) installation detection.
   "accessibility_check",
