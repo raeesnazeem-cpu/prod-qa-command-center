@@ -2,6 +2,7 @@ import { Browser } from "playwright"
 import { Finding, aiFailureReason } from "@qacc/shared"
 import { describeImageResult } from "../lib/aiFallback"
 import pLimit from "p-limit"
+import { createHash } from "crypto"
 
 /**
  * QA Image Quality — watermark & blur (per-image)
@@ -48,13 +49,17 @@ export async function checkImageQuality(
   let context: any = null
   let page: any = null
 
+  // Per-page key so thumbnails from different pages in the same run don't
+  // overwrite each other (upload uses upsert on a shared runId folder).
+  const pageKey = createHash("sha1").update(pageUrl).digest("hex").slice(0, 10)
+
   const uploadThumb = async (buf: Buffer, name: string): Promise<string> => {
     try {
       const thumb = await sharp(buf)
         .resize({ width: 600, withoutEnlargement: true })
         .jpeg({ quality: 80 })
         .toBuffer()
-      return await uploadScreenshot(thumb, `${runId}/imgq_${name}.jpg`).catch(() => "")
+      return await uploadScreenshot(thumb, `${runId}/imgq_${pageKey}_${name}.jpg`).catch(() => "")
     } catch {
       return ""
     }

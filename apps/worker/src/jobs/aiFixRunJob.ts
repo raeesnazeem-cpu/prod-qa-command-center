@@ -619,6 +619,9 @@ export async function processAiFixRunJob(job: Job) {
         fix: "No fix possible. Review and replace content accordingly.",
         applied: false,
         proposed: false,
+        // Rendered as a plain suggestion, never the "needs REST API" label.
+        noAutoFix: true,
+        suggestedFix: "Review and replace the placeholder content accordingly",
         lapse: false,
         filesOffered: [],
         filesChanged: [],
