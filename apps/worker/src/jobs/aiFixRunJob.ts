@@ -626,6 +626,29 @@ export async function processAiFixRunJob(job: Job) {
       continue
     }
 
+    // --- image_relevance: no fix possible -------------------------------
+    // Choosing the right photo for a service is an editorial call (and needs
+    // real images), so it is never auto-edited or sent to AI triage.
+    if (f.check_factor === "image_relevance") {
+      analysis.push({
+        findingId: f.id ? String(f.id) : null,
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+        category: "manual",
+        fix: "No fix possible. Replace the flagged images with images that show this page's service.",
+        applied: false,
+        proposed: false,
+        // Rendered as a plain suggestion, never the "needs REST API" label.
+        noAutoFix: true,
+        suggestedFix: "Replace the flagged images with images that show this page's service",
+        lapse: false,
+        filesOffered: [],
+        filesChanged: [],
+      })
+      continue
+    }
+
     // --- learn_more_buttons: ALWAYS a manual, editorial hand-off ----------
     // Rewording a generic "Learn More" CTA is a judgement call about where the
     // link goes, so it is NEVER auto-applied and NEVER a "proposal" the report

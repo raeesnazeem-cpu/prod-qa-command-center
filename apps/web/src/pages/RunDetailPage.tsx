@@ -1072,6 +1072,7 @@ export const RunDetailPage = () => {
         "review_reputation_check",
         "functionality_check",
         "image_quality",
+        "image_relevance",
         "gbp_check",
         "grammar",
         "accessibility_check",
@@ -1861,6 +1862,7 @@ export const RunDetailPage = () => {
                     functionality_check: "Website Functionality Testing",
                     gbp_check: "GBP Optimization Check",
                     image_quality: "Image Quality (Watermark & Blur)",
+                    image_relevance: "Image Relevance (Service Pages)",
                     grammar: "Grammar Check",
                     accessibility_check: "Accessibility Check",
                   }

@@ -24,6 +24,15 @@ import { gsrVerdict } from "./gsrVerdict"
 export const VISION_VERDICT_CHECKS = new Set(["logo_chatbot", "footer_logo"])
 
 /**
+ * Checks for which a completed run with NO finding at all is "could not
+ * complete", not a pass. The vision-verdict checks above, plus image_relevance:
+ * it writes a row for every service page it judged and stays silent on every
+ * other page, so zero rows means no service page was identified or reached —
+ * nothing was verified, and a green "passed" would hide that.
+ */
+export const NO_RESULT_IS_LAPSE_CHECKS = new Set([...VISION_VERDICT_CHECKS, "image_relevance"])
+
+/**
  * Checks that emit a purely informational row every run (e.g. `plugin_number`
  * reports the detected plugin count for a human to eyeball). Not a defect, and
  * not a "no issues found" sentinel either.
@@ -36,7 +45,16 @@ const INFORMATIONAL_CHECKS = new Set(["plugin_number", "video_recording"])
  * read are not evidence the site is fine, so a mix of clean pages and lapsed
  * pages is "could not complete", not a pass. A real defect still fails it.
  */
-export const AI_VERDICT_CHECKS = new Set(["grammar", "image_quality", "project_plan"])
+/**
+ * image_relevance titles carry the service name and AI-written image
+ * descriptions, so free-text regex could be tricked by them (a service called
+ * "No Issues Found Facial"). Its verdict is fixed by exact titles instead — the
+ * check writes only these, plus the crawl job's generic "Check Failed" lapse.
+ */
+const IMAGE_RELEVANCE_PASS_TITLE = "No image relevance issues found"
+const IMAGE_RELEVANCE_LAPSE_TITLE = /^(image relevance )?check failed$/i
+
+export const AI_VERDICT_CHECKS = new Set(["grammar", "image_quality", "image_relevance", "project_plan"])
 
 // The honest, specific reasons an AI-backed check could not complete. Checks
 // put one of these in their lapse description so the report can say WHY.
@@ -108,6 +126,8 @@ export function aiLapseSummary(findings: any[]): string {
  */
 export function isToolLapseFinding(f: any): boolean {
   if (f?.check_factor === "gsr_check") return gsrVerdict(f) === "lapse"
+  if (f?.check_factor === "image_relevance")
+    return IMAGE_RELEVANCE_LAPSE_TITLE.test(String(f?.title || "").trim())
   const t = String(f?.title || "").toLowerCase()
   const d = String(f?.description || "").toLowerCase()
   const s = `${t} ${d}`
@@ -132,6 +152,8 @@ export function isToolLapseFinding(f: any): boolean {
  */
 export function isCleanPassFinding(f: any): boolean {
   if (f?.check_factor === "gsr_check") return gsrVerdict(f) === "pass"
+  if (f?.check_factor === "image_relevance")
+    return String(f?.title || "").trim() === IMAGE_RELEVANCE_PASS_TITLE
   const t = String(f?.title || "").toLowerCase()
   const d = String(f?.description || "").toLowerCase()
   const s = `${t} ${d}`
@@ -188,9 +210,9 @@ export function resultForCheck(
 ): CheckResult {
   if (!findings || findings.length === 0) {
     if (!runComplete) return "notRun"
-    // A vision-verdict check that emitted nothing verified nothing, so it cannot
-    // be called a pass — same rule the report renderer applies.
-    return VISION_VERDICT_CHECKS.has(checkFactor) ? "lapsed" : "pass"
+    // A vision-verdict check (or image_relevance) that emitted nothing verified
+    // nothing, so it cannot be called a pass — same rule the report renderer applies.
+    return NO_RESULT_IS_LAPSE_CHECKS.has(checkFactor) ? "lapsed" : "pass"
   }
   // Any real defect fails the check, even alongside lapses — mirrors the report,
   // where a non-empty `real` set is what makes a section "failed".

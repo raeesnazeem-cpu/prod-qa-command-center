@@ -875,6 +875,7 @@ export const FRIENDLY: Record<string, string> = {
   broken_links: "Broken Links",
   external_links: "External Links",
   image_quality: "Image Quality (Watermark & Blur)",
+  image_relevance: "Image Relevance (Service Pages)",
   hero_media: "Hero Video & Image Load",
   false_breakpoint: "False Breaking Points",
   cross_browser: "Cross-Browser Visual",
@@ -941,6 +942,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   functionality_check: "Mention to fix the broken interactive controls — resolve the JavaScript errors and layout breaks triggered when interacting with the page",
   gbp_check: "Mention to complete the Google Business Profile — add the missing phone, matching website, hours, photos, or reviews",
   image_quality: "Mention to replace the flagged blurry and watermarked images with clean, sharp versions",
+  image_relevance: "Mention to replace the flagged images on each service page with images that show that service",
   blog_verification: "Mention to migrate the missing blog posts from the client's live site to the beta site",
   cross_browser: "Mention to review the SmartUI cross-browser diffs and fix the rendering differences",
   gsr_check: "Review the listed Google search result titles and snippets and correct the invalid characters at the source (page title / meta description)",
@@ -1412,7 +1414,7 @@ function couldNotRunText(factor: string, group: any[]): string {
 // carousel URL the "View before / after" link opens.
 export type ImageFixInfo = { enhanced: number; total: number; url: string }
 
-async function renderCheckSectionHtml(
+export async function renderCheckSectionHtml(
   factor: string,
   group: any[],
   fixMap: Map<string, FixReportInfo>,
@@ -1432,6 +1434,50 @@ async function renderCheckSectionHtml(
   // posts an honest "could not complete this run"), never a silent pass.
   if (VISION_VERDICT_CHECKS.has(factor) && group.length === 0) {
     return { status: "errored", html: "" }
+  }
+
+  // Image relevance writes one row per service page it judged and nothing on
+  // other pages. No row at all = no service page was identified or reached, so
+  // nothing was verified. Said out loud — never a silent pass, never hidden.
+  if (factor === "image_relevance" && group.length === 0) {
+    return {
+      status: "errored",
+      html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete: no service pages were identified in this scan, so no images were checked.</p>`,
+    }
+  }
+
+  // Image relevance failures: one block per service page — what is wrong, the
+  // numbered image grid, then "Image N shows X — should show Y" per image.
+  if (real.length > 0 && factor === "image_relevance") {
+    const blocks: string[] = []
+    let totalFlagged = 0
+    for (const f of real) {
+      const rows = parseImageIssues(f.context_text)
+      const pageUrl = (f.page_id && pageUrlById?.get(String(f.page_id))) || ""
+      const pageLabel = pageUrl ? `<a href="${esc(pageUrl)}">${esc(pageUrl)}</a>` : "this page"
+      let block = `<p>📄 <strong>Page:</strong> ${pageLabel} — ${esc(f.title || "")}</p>`
+      if (rows.length) {
+        const grid = await renderImageGrid(rows, imgBudget, f.inline_media?.grid)
+        if (grid) block += grid
+        block += `<ul>${rows
+          .map(
+            (it: any, i: number) =>
+              `<li>${i + 1}. ${esc(it.note || "")} — <a href="${esc(String(it.src || it.thumb || ""))}">image</a></li>`,
+          )
+          .join("")}</ul>`
+        totalFlagged += rows.length
+      } else {
+        const desc = clipText(String(f.description || "").replace(/\s+/g, " ").trim(), 300)
+        if (desc) block += `<p>${esc(desc)}</p>`
+        totalFlagged += 1
+      }
+      const fx = f.id ? fixMap.get(String(f.id)) : undefined
+      const fixLine = renderFixLine(fx, !!f.ai_generated)
+      if (fixLine) block += `<p>${fixLine.replace(/^<br>/, "")}</p>`
+      blocks.push(block)
+    }
+    const header = `<p>❌ <strong>${esc(label)}</strong> — ${real.length} service page${real.length > 1 ? "s" : ""} with image problems (${totalFlagged} item${totalFlagged > 1 ? "s" : ""}).</p>`
+    return { status: "failed", html: header + blocks.join("<br>") }
   }
 
   // Link checks: render EVERY broken link in full (whole URL, status/reason,
@@ -1696,6 +1742,15 @@ async function renderCheckSectionHtml(
     return { status: "passed", html }
   }
 
+  // Image relevance pass: say how many service pages were actually verified.
+  if (factor === "image_relevance" && cleanPass.length > 0) {
+    const n = new Set(cleanPass.map((f: any, i: number) => (f.page_id ? String(f.page_id) : `row-${i}`))).size
+    return {
+      status: "passed",
+      html: `<p>✅ <strong>${esc(label)}</strong> — Passed. Images on ${n} service page${n > 1 ? "s" : ""} match the service each page is about.</p>`,
+    }
+  }
+
   const detail = cleanPass.length
     ? clipText(
         String(cleanPass[0].description || cleanPass[0].title || "")
@@ -1769,8 +1824,9 @@ export async function precomputeFindingMedia(runId: string): Promise<void> {
         if (Object.keys(shots).length) media.shots = shots
       }
 
-      // image_quality → the composite grid built from its context_text images.
-      if (f.check_factor === "image_quality") {
+      // image_quality / image_relevance → the composite grid built from their
+      // context_text images.
+      if (f.check_factor === "image_quality" || f.check_factor === "image_relevance") {
         const seen = new Set<string>()
         const uniq: any[] = []
         for (const it of parseImageIssues(f.context_text)) {

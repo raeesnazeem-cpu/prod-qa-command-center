@@ -165,7 +165,12 @@ async function cloudflareVision(
         err.status = r.status
         throw err
       }
-      const text = body?.result?.response
+      // When the model answers in JSON, Workers AI hands `response` back already
+      // PARSED (an object, not a string). Every caller expects text, so turn it
+      // back into JSON text — otherwise `.match()` on the reply throws and the
+      // answer is reported as "could not be read".
+      const raw = body?.result?.response
+      const text = raw == null ? "" : typeof raw === "string" ? raw : JSON.stringify(raw)
       if (text) return text
       lastErr = new Error(`${model}: returned an empty reply`)
     } catch (e) {
@@ -316,6 +321,7 @@ const textBreaker: { tripped: boolean; code: string | null } = {
 export function resetAiBreakers(): void {
   deadVisionProviders.clear()
   deadVisionReasons.clear()
+  deadIsolatedText.clear()
   textBreaker.tripped = false
   textBreaker.code = null
 }
@@ -487,6 +493,100 @@ export async function completeText(system: string, user: string): Promise<AiResu
   throw lastErr || new Error("No AI providers available (no keys set)")
 }
 
+// ---------------------------------------------------------------------------
+// Isolated text chain — for high-volume, per-image judgements (image_relevance).
+//
+// completeText's circuit breaker is per RUN and shared by every text caller: one
+// 429/503 trips it and grammar fails fast for the rest of the scan. A check that
+// makes one text call per image must never be the thing that trips it, so this
+// chain is separate: Cloudflare Workers AI text (free, same daily neurons as
+// vision) → OpenRouter → Gemini (free key). It has its own per-run dead-provider
+// set and never touches textBreaker. It does NOT fall back to completeText.
+// ---------------------------------------------------------------------------
+const CLOUDFLARE_TEXT_MODELS = (
+  process.env.CLOUDFLARE_TEXT_MODELS ||
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast,@cf/meta/llama-3.1-8b-instruct"
+)
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+const OPENROUTER_TEXT_MODELS = (process.env.OPENROUTER_TEXT_MODELS || "meta-llama/llama-3.3-70b-instruct")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+const deadIsolatedText = new Set<string>()
+
+async function cloudflareText(models: string[], system: string, user: string): Promise<string> {
+  const acc = process.env.CLOUDFLARE_ACCOUNT_ID || ""
+  const tok = process.env.CLOUDFLARE_API_TOKEN || ""
+  let lastErr: any
+  for (const model of models) {
+    try {
+      const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${acc}/ai/run/${model}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${tok}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+          max_tokens: 256,
+        }),
+      })
+      const body: any = await r.json().catch(() => ({}))
+      if (!r.ok) {
+        const err: any = new Error(`${model}: HTTP ${r.status} ${body?.errors?.[0]?.message || ""}`)
+        err.status = r.status
+        throw err
+      }
+      // Same quirk as vision: a JSON answer comes back already parsed.
+      const raw = body?.result?.response
+      const text = raw == null ? "" : typeof raw === "string" ? raw : JSON.stringify(raw)
+      if (text) return text
+      lastErr = new Error(`${model}: returned an empty reply`)
+    } catch (e) {
+      lastErr = e
+      if (isExhaustedOrUnreachable(e)) throw e
+    }
+  }
+  throw lastErr || new Error("cloudflare text: no model returned text")
+}
+
+/** Text completion on the isolated chain (see above). Throws when every provider fails. */
+export async function completeTextIsolated(system: string, user: string): Promise<AiResult> {
+  const env = process.env
+  const providers: { name: string; run: () => Promise<string> }[] = []
+  if (env.CLOUDFLARE_ACCOUNT_ID && env.CLOUDFLARE_API_TOKEN && CLOUDFLARE_TEXT_MODELS.length)
+    providers.push({ name: "cloudflare", run: () => cloudflareText(CLOUDFLARE_TEXT_MODELS, system, user) })
+  if (env.OPENROUTER_API_KEY)
+    for (const model of OPENROUTER_TEXT_MODELS)
+      providers.push({
+        name: `openrouter:${model}`,
+        run: () => openAiCompatible("https://openrouter.ai/api/v1", env.OPENROUTER_API_KEY!, model, system, user),
+      })
+  if (env.GOOGLE_AI_API_KEY) providers.push({ name: "gemini", run: () => geminiText(genAI, system, user) })
+  if (providers.length === 0) throw new Error("No AI providers available (no keys set)")
+
+  const live = providers.filter((p) => !deadIsolatedText.has(p.name))
+  if (live.length === 0)
+    throw new Error(`text AI unavailable: all ${providers.length} provider(s) exhausted/unreachable earlier this run`)
+
+  const errors: string[] = []
+  let attempts = 0
+  for (const p of live) {
+    if (attempts >= TEXT_MAX_ATTEMPTS) break
+    attempts++
+    try {
+      const text = await withTimeout(p.run(), TEXT_ATTEMPT_TIMEOUT_MS, `isolated text attempt ${attempts} (${p.name})`)
+      return { text, provider: p.name }
+    } catch (e: any) {
+      errors.push(`${p.name}: ${e?.message || e}`)
+      if (isExhaustedOrUnreachable(e)) deadIsolatedText.add(p.name)
+    }
+  }
+  throw new Error(errors.join(" | ") || "isolated text: no provider answered")
+}
+
 /**
  * Vision: describe/analyze a screenshot, with multi-provider fallback. The chain
  * puts the free Cloudflare tier first, then the cheap APIs, then Gemini keys:
@@ -523,6 +623,9 @@ export interface VisionResult {
 export async function describeImageResult(
   buffer: Buffer | Buffer[],
   prompt: string,
+  // strongFirst: try the stronger paid-cheap models first and the free
+  // Cloudflare model LAST — for a second opinion where accuracy beats cost.
+  opts: { strongFirst?: boolean } = {},
 ): Promise<VisionResult> {
   const env = process.env
   const providers: { name: string; run: () => Promise<string> }[] = []
@@ -573,6 +676,11 @@ export async function describeImageResult(
   )
   if (env.GEMINI_API_KEY)
     providers.push({ name: "gemini-paid", run: () => analyzeImageWith(paidGemini(), GEMINI_MODELS, buffer, prompt) })
+
+  if (opts.strongFirst) {
+    const cf = providers.findIndex((p) => p.name === "cloudflare")
+    if (cf >= 0) providers.push(...providers.splice(cf, 1))
+  }
 
   if (providers.length === 0) {
     const error =
