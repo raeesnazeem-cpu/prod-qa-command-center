@@ -45,9 +45,54 @@ function couldNotRun(reason: string, detail: string): Finding {
   } as Finding
 }
 
-// How many SERP pages to walk. Previously the while-loop said 15 while the
-// pagination guard said 5, so 5 was the real bound and 15 was misleading.
-const MAX_SERP_PAGES = 5
+// How many SERP pages to walk. Each page is one billed ScraperAPI request, and
+// `num=100` already returns up to 100 results on the first page — enough for
+// most client sites — so the default is 1. Raise via GSR_MAX_SERP_PAGES.
+const MAX_SERP_PAGES = Math.max(1, Number(process.env.GSR_MAX_SERP_PAGES) || 1)
+
+// Beta sites (*.gogroth.com) are hidden from search engines, so a site: search
+// never has results and only burns ScraperAPI credits. GSR applies after release.
+const BETA_HOST = /(^|\.)gogroth\.com$/i
+
+// Successful results per domain, kept for a day in this (long-lived) worker
+// process, so rescanning the same site does not spend credits again. Only
+// readable results are cached — a failure is always retried.
+const GSR_CACHE_TTL_MS = Math.max(
+  0,
+  Number(process.env.GSR_CACHE_TTL_MS ?? 24 * 60 * 60 * 1000),
+)
+const gsrCache = new Map<string, { at: number; serps: any[] }>()
+
+// ScraperAPI URL for a Google page. Standard proxies first (cheaper); premium
+// only when the standard attempt was blocked — see the retry below.
+const scraperUrlFor = (apiKey: string, googleUrl: string, premium: boolean) =>
+  `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(googleUrl)}${premium ? "&premium=true" : ""}`
+
+// The standard attempt was refused by Google (CAPTCHA) or ScraperAPI could not
+// fetch it — worth one premium retry. Credit/key/rate-limit failures are not:
+// premium would fail the same way and cost more.
+const shouldRetryPremium = (status: number | null, body: string) =>
+  (status !== null && status >= 500) ||
+  /unusual traffic|\/sorry\/|captcha|not a robot/i.test(body || "")
+
+// Build the finding from a set of results. Verdict is decided with the SAME rule
+// the report and the live count use (@qacc/shared serpBadReason), so the saved
+// title can't contradict it. The results stay in `description` — the web GSR
+// card reads them there.
+function resultFinding(serps: any[], domain: string, cached: boolean): Finding {
+  const bad = serps.reduce((n, s) => (serpBadReason(s) ? n + 1 : n), 0)
+  return {
+    check_factor: "gsr_check",
+    title: bad
+      ? `${bad} of ${serps.length} Google search results contain invalid characters`
+      : `${serps.length} Google search results checked — no issues found`,
+    description: JSON.stringify(serps),
+    context_text: `Found ${serps.length} search results for site:${domain}${cached ? " (reused from a search in the last 24 hours)" : ""}`,
+    screenshot_url: null,
+    status: "open",
+    ai_generated: false,
+  }
+}
 
 export async function checkGsr(
   page: PlaywrightPage,
@@ -58,6 +103,20 @@ export async function checkGsr(
     if (onProgress) await onProgress(10, "Initializing search...")
     const urlObj = new URL(pageRecord.url)
     const domain = urlObj.hostname.replace(/^www\./, "")
+
+    if (BETA_HOST.test(domain)) {
+      return [
+        couldNotRun(
+          `Not applicable before release: ${domain} is a beta site hidden from search engines, so Google has no results for it. GSR runs on the live domain after release. ${NOT_SITE}`,
+          `site:${domain} not searched (beta host)`,
+        ),
+      ]
+    }
+
+    const hit = gsrCache.get(domain)
+    if (hit && Date.now() - hit.at < GSR_CACHE_TTL_MS) {
+      return [resultFinding(hit.serps, domain, true)]
+    }
 
     // Create a new page so we don't mess up the original page's state
     const context = page.context()
@@ -76,19 +135,28 @@ export async function checkGsr(
         ),
       ]
     }
-    const googleUrl = encodeURIComponent(
-      `https://www.google.com/search?q=site:${domain}&num=100&filter=0`,
-    )
-    const scraperUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${googleUrl}&premium=true`
+    const googleUrl = `https://www.google.com/search?q=site:${domain}&num=100&filter=0`
     // Keep the first response so a failure can be explained exactly.
     let firstStatus: number | null = null
     let firstBody = ""
+    // Once a standard request was blocked, stay on premium for later pages.
+    let usePremium = false
     try {
-      const resp = await newPage.goto(scraperUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: 60000,
-      })
-      firstStatus = resp ? resp.status() : null
+      const load = async (premium: boolean) => {
+        const resp = await newPage.goto(scraperUrlFor(apiKey, googleUrl, premium), {
+          waitUntil: "domcontentloaded",
+          timeout: 60000,
+        })
+        firstStatus = resp ? resp.status() : null
+        firstBody = await newPage
+          .evaluate(() => (document.body?.innerText || "").slice(0, 4000))
+          .catch(() => "")
+      }
+      await load(false)
+      if (shouldRetryPremium(firstStatus, firstBody)) {
+        usePremium = true
+        await load(true)
+      }
     } catch (e: any) {
       await newPage.close().catch(() => {})
       const timedOut = /timeout/i.test(e?.message || "")
@@ -101,9 +169,6 @@ export async function checkGsr(
         ),
       ]
     }
-    firstBody = await newPage
-      .evaluate(() => (document.body?.innerText || "").slice(0, 4000))
-      .catch(() => "")
     const earlyReason =
       firstStatus !== null && firstStatus >= 400
         ? describeGsrFailure(firstStatus, firstBody, domain)
@@ -239,8 +304,7 @@ export async function checkGsr(
 
       if (nextUrl && pagesChecked < MAX_SERP_PAGES) {
         if (onProgress) await onProgress(85, `Loading next page...`)
-        const scraperNextUrl = `http://api.scraperapi.com?api_key=${apiKey}&url=${encodeURIComponent(nextUrl)}&premium=true`
-        await newPage.goto(scraperNextUrl, {
+        await newPage.goto(scraperUrlFor(apiKey, nextUrl, usePremium), {
           waitUntil: "domcontentloaded",
           timeout: 60000,
         })
@@ -258,23 +322,8 @@ export async function checkGsr(
       return [couldNotRun(reason, `0 results for site:${domain}`)]
     }
 
-    // Verdict is decided here with the SAME rule the report and the live count
-    // use (@qacc/shared serpBadReason), so the saved title can't contradict it.
-    // The results stay in `description` — the web GSR card reads them there.
-    const bad = serps.reduce((n, s) => (serpBadReason(s) ? n + 1 : n), 0)
-    return [
-      {
-        check_factor: "gsr_check",
-        title: bad
-          ? `${bad} of ${serps.length} Google search results contain invalid characters`
-          : `${serps.length} Google search results checked — no issues found`,
-        description: JSON.stringify(serps),
-        context_text: `Found ${serps.length} search results for site:${domain}`,
-        screenshot_url: null,
-        status: "open",
-        ai_generated: false,
-      },
-    ]
+    gsrCache.set(domain, { at: Date.now(), serps })
+    return [resultFinding(serps, domain, false)]
   } catch (error: any) {
     return [
       {
