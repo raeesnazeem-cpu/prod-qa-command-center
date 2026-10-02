@@ -36,6 +36,7 @@ import { checkBlogVerification } from "../checks/blogVerificationCheck"
 import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkImageRelevance } from "../checks/imageRelevanceCheck"
 import { checkMediaCrop } from "../checks/mediaCropCheck"
+import { checkBlogSidebar } from "../checks/blogSidebarCheck"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
 import { checkAccessibility } from "../checks/accessibilityCheck"
@@ -456,6 +457,20 @@ export async function processCrawlPageJob(job: Job) {
       ) => {
         checkPromises.push(
           sharedPageLane(() => timeCheck(runId, name, pageUrl, factory)),
+        )
+      }
+
+      // Blog sidebar — FULL SCAN ONLY, every page (silent unless the page is a
+      // blog post). Scheduled FIRST on the serial shared-page lane, so it reads
+      // the page exactly as crawled: no other check has clicked, submitted a
+      // form or navigated it yet. Read-only (one evaluate + a screenshot on
+      // fail), so it cannot disturb the checks queued behind it.
+      if (enabledChecks.includes("blog_sidebar") && run.run_type === "full_scan" && page) {
+        scheduleOnSharedPage("blog_sidebar", () =>
+          checkBlogSidebar(page, pageUrl, runId, pageId).catch((e) => {
+            logger.error("Blog sidebar check failed:", e)
+            return lapse("blog_sidebar")(e)
+          }),
         )
       }
 

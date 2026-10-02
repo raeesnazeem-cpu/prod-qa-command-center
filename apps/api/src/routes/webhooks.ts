@@ -1792,6 +1792,9 @@ const FULL_SCAN_CHECKS = [
   // Every page: images/videos cut off at desktop, tablet or mobile width.
   // FULL SCAN ONLY and scan only (no fix) — the worker also guards run_type.
   "media_crop",
+  // Every blog post needs a sidebar with search, Recent Posts and Categories.
+  // FULL SCAN ONLY and scan only (no fix) — the worker also guards run_type.
+  "blog_sidebar",
   "grammar",
   // The real accessibility check — UserWay (pro/basic) installation detection.
   "accessibility_check",

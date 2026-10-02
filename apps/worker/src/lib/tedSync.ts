@@ -877,6 +877,7 @@ export const FRIENDLY: Record<string, string> = {
   image_quality: "Image Quality (Watermark & Blur)",
   image_relevance: "Image Relevance (Service Pages)",
   media_crop: "Image & Video Cropping (Desktop / Tablet / Mobile)",
+  blog_sidebar: "Blog Post Sidebar",
   hero_media: "Hero Video & Image Load",
   false_breakpoint: "False Breaking Points",
   cross_browser: "Cross-Browser Visual",
@@ -944,6 +945,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   gbp_check: "Mention to complete the Google Business Profile — add the missing phone, matching website, hours, photos, or reviews",
   image_quality: "Mention to replace the flagged blurry and watermarked images with clean, sharp versions",
   image_relevance: "Mention to replace the flagged images on each service page with images that show that service",
+  blog_sidebar: "Mention to add a sidebar to the listed blog posts with a search bar, a Recent Posts section and a Categories section",
   media_crop: "Mention to fix the flagged images/videos so they are not cut off at the listed screen sizes (desktop, tablet or mobile)",
   blog_verification: "Mention to migrate the missing blog posts from the client's live site to the beta site",
   cross_browser: "Mention to review the SmartUI cross-browser diffs and fix the rendering differences",
@@ -1445,6 +1447,67 @@ export async function renderCheckSectionHtml(
     return {
       status: "errored",
       html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete: no service pages were identified in this scan, so no images were checked.</p>`,
+    }
+  }
+
+  // Blog sidebar: one row per blog post. Rows are identical text across posts,
+  // so they are keyed by PAGE (never dedupeFindings' title|description, which
+  // would collapse every failing post into one), and a retried page counts once.
+  if (factor === "blog_sidebar") {
+    if (group.length === 0)
+      return {
+        status: "errored",
+        html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete: no blog post pages were found in this scan, so no sidebar was checked.</p>`,
+      }
+    const keyOf = (f: any, i: number) => (f.page_id ? String(f.page_id) : `row-${i}`)
+    const urlOf = (f: any) =>
+      (f.page_id && pageUrlById?.get(String(f.page_id))) ||
+      String(f.context_text || "").match(/^Page:\s*(\S+)/m)?.[1] ||
+      ""
+    const failed = new Map<string, any>()
+    const lapsed = new Map<string, any>()
+    const passed = new Set<string>()
+    group.forEach((f: any, i: number) => {
+      const k = keyOf(f, i)
+      if (isRealDefect(f)) failed.set(k, f)
+      else if (isToolLapseFinding(f)) lapsed.set(k, f)
+      else if (isCleanPassFinding(f)) passed.add(k)
+    })
+    // A page that failed is failed; a page that lapsed but also produced a
+    // verdict (retry) is not unverified.
+    for (const k of failed.keys()) {
+      lapsed.delete(k)
+      passed.delete(k)
+    }
+    for (const k of passed) lapsed.delete(k)
+    const linkLi = (f: any, why: string) => {
+      const u = urlOf(f)
+      const link = u ? `<a href="${esc(u)}">${esc(u)}</a>` : "(page link unavailable)"
+      return `<li>${link} — ${esc(why)}</li>`
+    }
+    const why = (f: any) =>
+      clipText(String(f.description || f.title || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(), 240)
+    const total = failed.size + lapsed.size + passed.size
+    if (failed.size > 0) {
+      let html = `<p>❌ <strong>${esc(label)}</strong> — ${failed.size} of ${total} blog post${total > 1 ? "s" : ""} failed. Each needs a sidebar with a search bar, Recent Posts and Categories.</p>`
+      html += `<ul>${[...failed.values()].map((f) => linkLi(f, why(f))).join("")}</ul>`
+      if (lapsed.size)
+        html += `<p><small>Could not check ${lapsed.size} post${lapsed.size > 1 ? "s" : ""}:</small></p><ul>${[...lapsed.values()].map((f) => linkLi(f, why(f))).join("")}</ul>`
+      const shots = [...failed.values()].map((f) => f.screenshot_url).filter(Boolean).slice(0, 4).join(",")
+      if (shots) html += await renderScreenshotsHtml(shots, imgBudget)
+      return { status: "failed", html }
+    }
+    if (lapsed.size > 0) {
+      return {
+        status: "errored",
+        html:
+          `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete: checked ${passed.size} of ${total} blog posts.</p>` +
+          `<ul>${[...lapsed.values()].map((f) => linkLi(f, why(f))).join("")}</ul>`,
+      }
+    }
+    return {
+      status: "passed",
+      html: `<p>✅ <strong>${esc(label)}</strong> — Passed. All ${passed.size} blog post${passed.size > 1 ? "s have a sidebar" : " has a sidebar"} with a search bar, Recent Posts and Categories.</p>`,
     }
   }
 

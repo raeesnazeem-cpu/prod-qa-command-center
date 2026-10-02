@@ -26,6 +26,13 @@ const logger = {
  *           'errored' — the check only produced tool lapses (QACC-internal error)
  *           'passed'  — the check ran and found nothing actionable
  */
+// Checks that write a row only on the pages they apply to (service pages, blog
+// posts). No row at all means no such page was reached: nothing was verified.
+const NO_ROW_MESSAGE: Record<string, string> = {
+  image_relevance: "Could not complete: no service pages were identified in this scan",
+  blog_sidebar: "Could not complete: no blog post pages were found in this scan",
+}
+
 export async function persistScanCheckResults(runId: string): Promise<void> {
   try {
     const { data: run } = await supabase
@@ -72,9 +79,7 @@ export async function persistScanCheckResults(runId: string): Promise<void> {
       let status: "failed" | "errored" | "passed"
       if (real.length > 0) status = "failed"
       else if (group.length > 0 && lapses.length === group.length) status = "errored"
-      // image_relevance writes a row for every service page it judged, so no
-      // row at all means no service page was reached: nothing was verified.
-      else if (group.length === 0 && factor === "image_relevance") status = "errored"
+      else if (group.length === 0 && NO_ROW_MESSAGE[factor]) status = "errored"
       // AI-backed checks: a page the AI never read blocks a pass.
       else if (aiLapseBlocksPass(factor, group)) status = "errored"
       else status = "passed"
@@ -91,8 +96,8 @@ export async function persistScanCheckResults(runId: string): Promise<void> {
           ? first.title || first.description || null
           : status === "errored" && aiLapseBlocksPass(factor, group)
             ? `Could not complete: ${aiLapseSummary(group)}`
-            : status === "errored" && group.length === 0 && factor === "image_relevance"
-              ? "Could not complete: no service pages were identified in this scan"
+            : status === "errored" && group.length === 0 && NO_ROW_MESSAGE[factor]
+              ? NO_ROW_MESSAGE[factor]
               : null,
         page_url: first ? urlById.get(first.page_id) || null : null,
         screenshot_url: first ? first.screenshot_url || null : null,
