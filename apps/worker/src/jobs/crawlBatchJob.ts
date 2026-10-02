@@ -1,6 +1,6 @@
 import { Job } from "bullmq"
 import { supabase } from "../lib/supabase"
-import { processCrawlPageJob } from "./crawlPageJob"
+import { PageTimeoutError, processCrawlPageJob } from "./crawlPageJob"
 import pino from "pino"
 
 const logger = pino({
@@ -43,17 +43,38 @@ export async function processCrawlBatchJob(job: Job) {
       // This ensures we keep the exact same logic, progress updates, and database increments
       logger.info({ pageId, pageUrl }, "Processing page within batch")
 
-      await processCrawlPageJob({
-        data: {
-          runId,
-          pageId,
-          url: pageUrl,
-          projectId,
-          enabledChecks: job.data.enabledChecks,
-          overrideChecks: job.data.overrideChecks,
-          wpPassword,
-        },
-      } as Job)
+      const pageJobData = {
+        runId,
+        pageId,
+        url: pageUrl,
+        projectId,
+        enabledChecks: job.data.enabledChecks,
+        overrideChecks: job.data.overrideChecks,
+        wpPassword,
+      }
+
+      try {
+        await processCrawlPageJob({
+          data: { ...pageJobData, retryOnTimeout: !job.data.overrideChecks },
+        } as Job)
+      } catch (error: any) {
+        if (!(error instanceof PageTimeoutError) || job.data.overrideChecks)
+          throw error
+        // A hung page gets one fresh try. Drop the timed-out attempt's partial
+        // findings first so the retry doesn't duplicate them. If the retry
+        // times out too, the page ends "failed" and still counts as finished.
+        logger.warn({ pageId, pageUrl }, "Page timed out; retrying once")
+        await supabase
+          .from("findings")
+          .delete()
+          .eq("run_id", runId)
+          .eq("page_id", pageId)
+        await supabase
+          .from("pages")
+          .update({ check_progress: {} })
+          .eq("id", pageId)
+        await processCrawlPageJob({ data: pageJobData } as Job)
+      }
     } catch (error: any) {
       logger.error(
         { pageId, error: error.message },

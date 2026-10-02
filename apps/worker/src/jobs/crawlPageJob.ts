@@ -70,6 +70,7 @@ import { persistScanCheckResults } from "../lib/runResults"
 import type { ThemeType } from "../lib/themeType"
 import pLimit from "p-limit"
 import { gotoResilient, looksBlocked, newRealContext } from "../lib/browserContext"
+import { markActivity } from "../lib/workerHealth"
 import pino from "pino"
 
 // How many browser-owning / HTTP checks may run at once on a single page.
@@ -79,6 +80,24 @@ const CHECK_CONCURRENCY = Math.max(
   1,
   Number(process.env.CHECK_CONCURRENCY || 2),
 )
+
+// Wall-clock limit for one attempt at a page. Most Playwright calls the checks
+// make (evaluate, waits) have no timeout of their own, so on a frozen browser
+// (e.g. the box out of memory) they never settle — and the page, its batch and
+// the whole run hang with them. Normal pages take 30–75s; 3 min is ~2.5x the
+// slowest seen. On expiry the page's browser is closed (every pending call on
+// it rejects) and crawlBatchJob retries the page once.
+export const PAGE_TIMEOUT_MS = Math.max(
+  30000,
+  Number(process.env.PAGE_TIMEOUT_MS || 180000),
+)
+
+export class PageTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Page timed out after ${Math.round(ms / 1000)}s`)
+    this.name = "PageTimeoutError"
+  }
+}
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -214,6 +233,7 @@ export async function processCrawlPageJob(job: Job) {
   }
 
   const updateProgress = async (progress: number, step: string) => {
+    markActivity()
     if (!job.data.overrideChecks) {
       const { error: progressError } = await supabase
         .from("pages")
@@ -310,9 +330,16 @@ export async function processCrawlPageJob(job: Job) {
     progress: number,
     step: string,
   ) => {
+    markActivity()
     currentCheckProgress[checkKey] = { progress, step }
     await flushCheckProgress()
   }
+
+  // Set when the page timer fires. When the caller will retry (retryOnTimeout),
+  // the retry does the completion increment, so this attempt must not — or the
+  // page is counted twice and the run completes early.
+  let timedOut = false
+  const retryPending = () => timedOut && !!job.data.retryOnTimeout
 
   try {
     if (!job.data.overrideChecks) {
@@ -415,6 +442,22 @@ export async function processCrawlPageJob(job: Job) {
         ],
       })
     }
+
+    let pageTimer: NodeJS.Timeout | undefined
+    const deadline = new Promise<never>((_, reject) => {
+      pageTimer = setTimeout(() => {
+        timedOut = true
+        logger.warn(
+          { pageId, pageUrl, timeoutMs: PAGE_TIMEOUT_MS },
+          "Page timed out; closing its browser",
+        )
+        // Every pending Playwright call on this browser rejects once it closes.
+        browser?.close().catch(() => {})
+        reject(new PageTimeoutError(PAGE_TIMEOUT_MS))
+      }, PAGE_TIMEOUT_MS)
+    })
+    // The timer can fire before anything awaits the deadline.
+    deadline.catch(() => {})
 
     try {
       if (!isOnlyFastScanChecks) {
@@ -1258,6 +1301,9 @@ export async function processCrawlPageJob(job: Job) {
       const streamingPromises = checkPromises.map((p) =>
         p
           .then(async (results) => {
+            // A check that settles after the page timed out belongs to a dead
+            // attempt; the retry writes its own findings.
+            if (timedOut) return
             if (results && results.length > 0) {
               const findingsToInsert = results.map((f) => ({
                 ...f,
@@ -1295,8 +1341,9 @@ export async function processCrawlPageJob(job: Job) {
           }),
       )
 
-      // Wait for all streamed checks to finish
-      await Promise.all(streamingPromises)
+      // Wait for all streamed checks to finish, or the page timer — a check
+      // stuck outside the browser (closing it frees the rest) must not hang us.
+      await Promise.race([Promise.all(streamingPromises), deadline])
 
       // Insert responsive findings immediately since they resolve synchronously
       if (responsiveFindings && responsiveFindings.length > 0) {
@@ -1359,6 +1406,7 @@ export async function processCrawlPageJob(job: Job) {
         }
       }
     } finally {
+      clearTimeout(pageTimer)
       if (browser) {
         await browser
           .close()
@@ -1368,6 +1416,11 @@ export async function processCrawlPageJob(job: Job) {
       }
     }
   } catch (error: any) {
+    // Once the timer fired, whatever surfaced (often "Target closed" from the
+    // browser we shut) is the timeout — report it as such so the caller retries.
+    if (timedOut && !(error instanceof PageTimeoutError)) {
+      error = new PageTimeoutError(PAGE_TIMEOUT_MS)
+    }
     logger.error(
       { runId, pageUrl, error: error.message },
       "Error during page crawl",
@@ -1411,7 +1464,7 @@ export async function processCrawlPageJob(job: Job) {
 
     throw error
   } finally {
-    if (!job.data.overrideChecks) {
+    if (!job.data.overrideChecks && !retryPending()) {
       // Step 6 & 7: Atomically increment pages_processed and check for run completion
       const { data: isComplete, error: rpcError } = await supabase.rpc(
         "increment_and_check_completion",
