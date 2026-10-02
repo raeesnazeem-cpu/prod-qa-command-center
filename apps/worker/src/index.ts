@@ -17,6 +17,7 @@ import { qaQueue, connection } from "./lib/queue"
 import { processCaptureMultiviewScreenshotsJob } from "./jobs/captureMultiviewScreenshotsJob"
 import { startStuckRunSweeper } from "./lib/stuckRunSweeper"
 import { releaseReportGate } from "./lib/reportGate"
+import { healthStatus, scanJobEnded, scanJobStarted } from "./lib/workerHealth"
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -71,6 +72,7 @@ const worker = new Worker(
       `Job ${name} received - starting processing`,
     )
 
+    scanJobStarted(job.id, name)
     try {
       switch (name) {
         case "start_run":
@@ -122,6 +124,8 @@ const worker = new Worker(
         `Error processing job ${name}`,
       )
       throw error
+    } finally {
+      scanJobEnded(job.id)
     }
   },
   {
@@ -159,10 +163,19 @@ startStuckRunSweeper()
 
 import http from "http"
 
-// Dummy HTTP server for Dokploy/PaaS health checks
+// Health server for Dokploy/PaaS. GET /health is the real liveness check: 503
+// when a scan job is active but has made no progress for WORKER_STUCK_MS (see
+// lib/workerHealth.ts), so the container health check can restart a wedged
+// worker. Every other path keeps the old always-200 reply.
 const port =
   process.env.PORT || (process.env.NODE_ENV === "production" ? 8080 : 0)
 const server = http.createServer((req, res) => {
+  if (req.url?.split("?")[0] === "/health") {
+    const status = healthStatus()
+    res.writeHead(status.ok ? 200 : 503, { "Content-Type": "application/json" })
+    res.end(JSON.stringify(status) + "\n")
+    return
+  }
   res.writeHead(200, { "Content-Type": "text/plain" })
   res.end("Worker is healthy\n")
 })
