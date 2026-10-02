@@ -1,5 +1,6 @@
 import { Page as PlaywrightPage } from 'playwright';
 import { Finding } from '@qacc/shared';
+import { looksBlocked } from '../lib/browserContext';
 
 // Placeholder / dummy text left over from a theme or template. Each entry is a
 // regex source matched case-insensitively on the page's VISIBLE text, with word
@@ -26,9 +27,36 @@ const PATTERNS = [
 ];
 
 const MAX_MATCHES = 50;
+// Visible text scanned per page. Enough for any real page; bounds the regex
+// work on endless feeds / giant product grids.
+const MAX_TEXT_CHARS = 500_000;
 
 export async function checkDummyContent(page: PlaywrightPage, pageRecord: any): Promise<Finding[]> {
-  const visibleText = await page.evaluate(() => document.body?.innerText || '');
+  let visibleText = '';
+  try {
+    visibleText = String(
+      (await page.evaluate((max: number) => (document.body?.innerText || '').slice(0, max), MAX_TEXT_CHARS)) || '',
+    );
+  } catch {
+    // The page re-rendered mid-read (SPA hydration / client redirect): retry once.
+    await page.waitForTimeout(1500).catch(() => {});
+    visibleText = String(
+      (await page.evaluate((max: number) => (document.body?.innerText || '').slice(0, max), MAX_TEXT_CHARS)) || '',
+    );
+  }
+
+  // A bot-challenge page is not the site; "no placeholder text" there is no pass.
+  if (visibleText.length < 3000 && (await looksBlocked(page))) {
+    return [{
+      check_factor: 'dummy_content',
+      title: 'Dummy Content Check Failed',
+      description: 'Could not complete: the site served a bot-protection page to the QACC browser, so its text could not be checked. Process aborted gracefully.',
+      context_text: 'System Error: bot protection',
+      screenshot_url: null,
+      status: 'open',
+      ai_generated: false
+    } as Finding];
+  }
 
   const matches: { text: string; context: string }[] = [];
 
@@ -58,7 +86,7 @@ export async function checkDummyContent(page: PlaywrightPage, pageRecord: any): 
     title: `${count} placeholder/dummy content match${count === 1 ? '' : 'es'} found`,
     description: `The page shows placeholder or dummy text (${distinct.slice(0, 5).join(', ')}${distinct.length > 5 ? ', …' : ''}). Review and replace it with the real content before release.`,
     context_text: matches.map((m) => `Match: "${m.text}" | Context: ${m.context}`).join('\n').substring(0, 2000),
-    screenshot_url: pageRecord.desktopUrl,
+    screenshot_url: pageRecord?.desktopUrl ?? null,
     status: 'open',
     ai_generated: false
   }];

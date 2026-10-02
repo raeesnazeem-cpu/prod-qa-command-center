@@ -1074,6 +1074,7 @@ export const RunDetailPage = () => {
         "image_quality",
         "image_relevance",
         "media_crop",
+        "blog_sidebar",
         "gbp_check",
         "grammar",
         "accessibility_check",
@@ -1865,6 +1866,7 @@ export const RunDetailPage = () => {
                     image_quality: "Image Quality (Watermark & Blur)",
                     image_relevance: "Image Relevance (Service Pages)",
                     media_crop: "Image & Video Cropping",
+                    blog_sidebar: "Blog Post Sidebar",
                     grammar: "Grammar Check",
                     accessibility_check: "Accessibility Check",
                   }

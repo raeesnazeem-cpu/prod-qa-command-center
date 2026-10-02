@@ -1,6 +1,7 @@
 import { Browser } from "playwright"
 import { Finding } from "@qacc/shared"
 import type { ThemeType } from "../lib/themeType"
+import { MOBILE_UA, TABLET_UA, realContextOptions, launchStealthBrowser, gotoResilient, looksBlocked } from "../lib/browserContext"
 
 /**
  * Mobile & Tablet Hamburger Menu Check
@@ -39,13 +40,13 @@ const VIEWPORTS: { name: "mobile" | "tablet"; width: number; height: number; ua:
     name: "mobile",
     width: 390,
     height: 844,
-    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    ua: MOBILE_UA,
   },
   {
     name: "tablet",
     width: 768,
     height: 1024,
-    ua: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    ua: TABLET_UA,
   },
 ]
 
@@ -54,8 +55,9 @@ const MAX_LINKS = 40
 const CLICK_TIMEOUT = 2500
 const SETTLE_MS = 500
 
-// Mobile-menu toggles by WordPress theme type. QACC only scans WordPress sites,
-// so we use KNOWN theme markup rather than a generic heuristic.
+// Mobile-menu toggles by WordPress theme type — KNOWN theme markup first (the
+// fast path the pre/post-release suites rely on), then GENERIC_TOGGLES below so
+// any other site (other builders, Squarespace, Webflow, Shopify, SPAs) works too.
 //
 //   • BLOCK / FSE themes — the core Navigation block's responsive "open" button.
 //     When open, `.wp-block-navigation__responsive-container` gains `is-menu-open`.
@@ -110,15 +112,40 @@ const ELEMENTOR_TOGGLES = [
   '.elementor-icon-wrapper a[href*="elementor-action"][href*="popup"]',
 ]
 
+// Any-site toggles: other WP builders (Divi, Beaver, Oxygen, Bricks), hosted
+// platforms (Squarespace `.header-burger-btn`, Webflow `.w-nav-button`, Shopify
+// Dawn's `<summary>` drawer, Wix) and accessible hand-built / React headers
+// (a button that controls a collapsed region, or is labelled "menu"). Only
+// buttons, summaries and role=button nodes take the label match, so a plain
+// "Menu" link on a restaurant site is never mistaken for a toggle. Bare
+// aria-controls/aria-expanded buttons are matched separately in tagToggles,
+// and only when icon-only or labelled menu/nav — a desktop "Services ▾"
+// dropdown chevron must never pass as the hamburger.
+const GENERIC_TOGGLES = [
+  ".et_mobile_nav_menu, .mobile_menu_bar",
+  ".fl-menu-mobile-toggle",
+  ".oxy-menu-toggle",
+  ".brxe-nav-menu .bricks-mobile-menu-toggle",
+  ".w-nav-button",
+  ".header-burger-btn",
+  "header-drawer summary, .header__icon--menu",
+  '[data-testid*="hamburger" i], [data-testid*="menu-toggle" i]',
+  '[class*="hamburger" i]',
+  '[class*="burger" i]',
+  '[class*="nav-toggle" i], [class*="navbar-toggle" i], [class*="menu-btn" i], [class*="menu-button" i]',
+  'button[aria-label*="menu" i], button[aria-label*="navigation" i], [role="button"][aria-label*="menu" i]',
+  'summary[aria-label*="menu" i]',
+]
+
 // Build the ordered selector list for a theme (theme-specific first, Elementor
-// last as fallback). Unknown theme → try block + classic + Elementor.
+// next, generic any-site toggles last). Unknown theme → try everything.
 function toggleSelectorsFor(themeType?: ThemeType): string {
   const groups =
     themeType === "block"
-      ? [BLOCK_TOGGLES, ELEMENTOR_TOGGLES]
+      ? [BLOCK_TOGGLES, ELEMENTOR_TOGGLES, GENERIC_TOGGLES]
       : themeType === "classic"
-        ? [CLASSIC_TOGGLES, ELEMENTOR_TOGGLES]
-        : [BLOCK_TOGGLES, CLASSIC_TOGGLES, ELEMENTOR_TOGGLES]
+        ? [CLASSIC_TOGGLES, ELEMENTOR_TOGGLES, GENERIC_TOGGLES]
+        : [BLOCK_TOGGLES, CLASSIC_TOGGLES, ELEMENTOR_TOGGLES, GENERIC_TOGGLES]
   return groups.flat().join(", ")
 }
 
@@ -150,9 +177,8 @@ export async function checkHamburgerMenu(
   // Stealth chromium: gogroth (and other Cloudflare-fronted) staging sites 403
   // a plain headless browser. The passed-in `browser` is a plain-playwright
   // instance, so launch our own stealth browser here and close it in finally.
-  const { chromium } = require("playwright-extra")
-  const stealth = require("puppeteer-extra-plugin-stealth")()
-  chromium.use(stealth)
+  // launchStealthBrowser falls back to plain playwright if the stealth plugin
+  // is missing, and we fall back to the passed-in browser if launch fails.
   let ownBrowser: any = null
 
   const selectors = toggleSelectorsFor(themeType)
@@ -194,23 +220,28 @@ export async function checkHamburgerMenu(
     }
 
     try {
-      context = await ownBrowser.newContext({
-        viewport: { width: vp.width, height: vp.height },
-        isMobile: true,
-        hasTouch: true,
-        deviceScaleFactor: 2,
-        userAgent: vp.ua,
-      })
+      context = await (ownBrowser || browser).newContext(
+        realContextOptions({
+          viewport: { width: vp.width, height: vp.height },
+          isMobile: true,
+          hasTouch: true,
+          deviceScaleFactor: 2,
+          userAgent: vp.ua,
+        }),
+      )
       page = await context.newPage()
       // A tapped link may open a new tab — close it so we never hang.
       context.on("page", (p: any) => p.close().catch(() => {}))
 
       if (onProgress) await onProgress(baseProgress + 2, `Loading homepage at ${label} width...`)
-      try {
-        await page.goto(pageUrl, { waitUntil: "load", timeout: 60000 })
-      } catch (e: any) {
-        if (!/Timeout|aborted|closed/i.test(e?.message || "")) throw e
+      // A load timeout is NOT fatal (chat widgets / beacons keep "load" from
+      // firing but the header is rendered); only a real navigation failure or
+      // a bot-challenge page means this viewport could not be verified.
+      const nav = await gotoResilient(page, pageUrl, { timeout: 60000 })
+      if (!nav.ok || (await looksBlocked(page))) {
         result.loadOk = false
+        result.shotUrl = await shot("not_loaded")
+        return result
       }
       await page.waitForTimeout(600)
 
@@ -262,6 +293,19 @@ export async function checkHamburgerMenu(
 
             // (A) Known theme / Elementor / custom-class selectors.
             const hits: Element[] = Array.from(document.querySelectorAll(selList)).filter(isVisibleHeader)
+
+            // (A2) Accessible disclosure buttons that are icon-only or say
+            //      "menu" / "navigation" (React / hand-built headers).
+            Array.from(
+              document.querySelectorAll("button[aria-controls][aria-expanded], [role='button'][aria-controls][aria-expanded]"),
+            ).forEach((el) => {
+              const text = (el.textContent || "").replace(/\s+/g, " ").trim()
+              const label = `${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""} ${text}`
+              const ok =
+                /menu|nav/i.test(label) || (!text && !/search|cart|bag|close|account|log ?in|user|lang|cookie/i.test(label))
+              if (!ok || hits.includes(el)) return
+              if (isVisibleHeader(el)) hits.push(el)
+            })
 
             // (B) Icon-shape fallback — key on the ICON, not the class. ANY
             //     small, header-area clickable whose inline <svg> draws the
@@ -379,6 +423,21 @@ export async function checkHamburgerMenu(
             ({ before, sel }: { before: number; sel: string }) => {
               const tog = document.querySelector(sel)
               if (tog && tog.getAttribute("aria-expanded") === "true") return true
+              // Generic open states: a <details> drawer (Shopify), Webflow's
+              // `w--open`, or the region named by aria-controls now showing.
+              if (tog && tog.closest("details[open]")) return true
+              if (tog && (tog.classList.contains("w--open") || document.querySelector(".w-nav-overlay [data-nav-menu-open]")))
+                return true
+              const ctl = tog && tog.getAttribute("aria-controls")
+              if (ctl) {
+                const target = document.getElementById(ctl.split(/\s+/)[0])
+                if (target) {
+                  const tr = target.getBoundingClientRect()
+                  const ts = getComputedStyle(target)
+                  if (tr.width > 40 && tr.height > 40 && ts.display !== "none" && ts.visibility !== "hidden" && tr.right > 0 && tr.left < window.innerWidth)
+                    return target.querySelectorAll("a, button").length > 0
+                }
+              }
               if (document.querySelector(".wp-block-navigation__responsive-container.is-menu-open")) return true
               if (
                 Array.from(document.querySelectorAll(".elementor-popup-modal, .dialog-widget.elementor-popup-modal")).some(
@@ -410,7 +469,13 @@ export async function checkHamburgerMenu(
             { timeout: SETTLE_MS + 500 },
           )
           .catch(() => {})
-        const expanded = await cand.getAttribute("aria-expanded").catch(() => null)
+        const expanded = await cand
+          .evaluate((n: Element) =>
+            n.getAttribute("aria-expanded") ||
+            (n.closest("details[open]") ? "true" : null) ||
+            (n.classList.contains("w--open") ? "true" : null),
+          )
+          .catch(() => null)
         const after = await countInViewAnchors(page)
         if (
           expanded === "true" ||
@@ -426,7 +491,7 @@ export async function checkHamburgerMenu(
         // Not this one. If it navigated, reload + re-tag; else tap again to undo
         // any partial state before trying the next toggle.
         if (page.url().split("#")[0] !== beforeUrl.split("#")[0]) {
-          await page.goto(pageUrl, { waitUntil: "load", timeout: 30000 }).catch(() => {})
+          await gotoResilient(page, pageUrl, { timeout: 30000 })
           await page.waitForTimeout(600)
           await tagToggles()
         } else {
@@ -532,7 +597,7 @@ export async function checkHamburgerMenu(
   }
 
   try {
-    ownBrowser = await chromium.launch({ headless: true })
+    ownBrowser = await launchStealthBrowser().catch(() => null)
 
     if (onProgress) await onProgress(10, "Checking the hamburger menu at mobile width...")
     const mobile = await probeViewport(VIEWPORTS[0], true, 10)
@@ -584,9 +649,11 @@ export async function checkHamburgerMenu(
     // If nothing could be verified because neither viewport loaded, ask for a
     // retry rather than reporting a false defect.
     if (notLoaded.length === perView.length) {
+      // "Check skipped" wording so the shared verdict counts it as a lapse (QACC
+      // could not run), never as a site defect.
       push(
-        "Hamburger menu could not be checked",
-        `The homepage did not finish loading at mobile or tablet width, so the hamburger menu could not be verified. This will be retried on the next run.`,
+        "Hamburger menu check skipped: homepage did not load",
+        `The homepage did not load (or showed a bot-protection page) at mobile and tablet width, so the hamburger menu could not be verified. This will be retried on the next run.`,
         evidenceShot,
       )
       return findings
@@ -745,7 +812,7 @@ async function testOpens(
 
     // Return home so the next test starts clean.
     if (navigated) {
-      await page.goto(pageUrl, { waitUntil: "load", timeout: 30000 }).catch(() => {})
+      await gotoResilient(page, pageUrl, { timeout: 30000 })
       await page.waitForTimeout(400)
     }
     return { opened }

@@ -60,6 +60,7 @@ async function hsFetch(
   if (!token) return null
   try {
     const r = await fetch(`${HS_BASE}${path}`, {
+      signal: AbortSignal.timeout(30000),
       ...init,
       headers: {
         Authorization: `Bearer ${token}`,

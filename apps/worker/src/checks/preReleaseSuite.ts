@@ -5,6 +5,13 @@ import * as cheerio from "cheerio"
 import pLimit from "p-limit"
 import type { ThemeType } from "../lib/themeType"
 import pino from "pino"
+import {
+  MOBILE_UA,
+  gotoResilient,
+  launchStealthBrowser,
+  looksBlocked,
+  newRealContext,
+} from "../lib/browserContext"
 
 /** A discovered page and its browser-tab title. */
 interface PageInfo {
@@ -314,12 +321,23 @@ async function gotoStable(
   } = {},
 ): Promise<any> {
   await installPopupKiller(page)
-  const resp = await page
-    .goto(url, {
-      waitUntil: opts.waitUntil ?? "load",
-      timeout: opts.timeout ?? 30000,
-    })
-    .catch(() => null)
+  // "networkidle" as the goto condition makes a chat/analytics-heavy page burn
+  // the whole timeout and return null even though it rendered fine. Navigate on
+  // "load" and let the capped networkidle wait below do the settling instead.
+  const waitUntil = opts.waitUntil === "networkidle" ? "load" : opts.waitUntil ?? "load"
+  const timeout = opts.timeout ?? 30000
+  let navError = ""
+  let resp = await page.goto(url, { waitUntil, timeout }).catch((e: any) => {
+    navError = String(e?.message || e)
+    return null
+  })
+  // A non-timeout failure (aborted by a redirect, an interstitial, a broken
+  // "load" event) often succeeds on a second, lighter navigation.
+  if (!resp && navError && !/timeout/i.test(navError)) {
+    resp = await page
+      .goto(url, { waitUntil: "domcontentloaded", timeout })
+      .catch(() => null)
+  }
   // Let in-flight requests settle so late-injected nav/footer/call buttons and
   // hero media are present. Many sites never fully idle (analytics polling), so
   // this is capped and best-effort.
@@ -332,6 +350,176 @@ async function gotoStable(
   // any layout shift they leave behind.
   await page.waitForTimeout(opts.settleMs ?? 1200).catch(() => {})
   return resp
+}
+
+/**
+ * Why a navigated page can't be judged, or null when it is usable. Lets a
+ * check report "could not complete" instead of a false "not found" when the
+ * page never rendered or a bot filter served a challenge page instead.
+ */
+async function pageLoadProblem(page: PlaywrightPage): Promise<string | null> {
+  try {
+    const info = await page
+      .evaluate(() => ({
+        href: location.href,
+        elements: document.body ? document.body.getElementsByTagName("*").length : 0,
+      }))
+      .catch(() => null)
+    if (!info || /^(about:blank|chrome-error:)/.test(info.href) || info.elements < 3)
+      return "the page did not load"
+    if (await looksBlocked(page)) return "the site served a bot-protection challenge instead of the page"
+    return null
+  } catch {
+    return "the page did not load"
+  }
+}
+
+// Marker attributes the locate helpers stamp on the element they chose, so the
+// caller gets one stable Locator however the element was found.
+const FOOTER_MARK = "data-qacc-footer"
+const HEADER_MARK = "data-qacc-header"
+
+/**
+ * Find the site footer on ANY site and return a Locator for it (null when none).
+ *
+ * Fast path is the selector list the WP checks always used. A bare `footer`
+ * is not trusted blindly: testimonial `<blockquote><footer>` and article
+ * footers come first in the DOM on many sites, so nested/invisible matches are
+ * skipped and the outermost, last-in-page candidate wins. Fallbacks: the
+ * Elementor last top-level section, then any builder (Wix, Squarespace,
+ * Webflow, SPAs): the outermost link-rich block that ends at the bottom of the
+ * document.
+ */
+async function locateFooter(page: PlaywrightPage): Promise<any | null> {
+  // Footers are often lazy-rendered; scroll to the bottom once so they exist.
+  await page
+    .evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
+    .catch(() => {})
+  await page.waitForTimeout(600).catch(() => {})
+  const found = await page
+    .evaluate((mark: string) => {
+      document.querySelectorAll(`[${mark}]`).forEach((e) => e.removeAttribute(mark))
+      const visible = (el: Element) => {
+        const r = el.getBoundingClientRect()
+        const cs = getComputedStyle(el)
+        return r.width > 50 && r.height > 20 && cs.display !== "none" && cs.visibility !== "hidden"
+      }
+      const nestedInContent = (el: Element) =>
+        !!el.parentElement?.closest(
+          "article, blockquote, figure, aside, dialog, [role='dialog'], [class*='testimonial' i], [class*='review' i], [class*='card' i], [class*='modal' i]",
+        )
+      const groups = [
+        "footer, [role='contentinfo']",
+        ".wp-block-template-part[class*='footer'], .site-footer, #footer, .footer, .wp-block-group[class*='footer'], [data-elementor-type='footer'], #SITE_FOOTER",
+        "[id*='footer' i], [class*='footer' i]",
+      ]
+      for (const sel of groups) {
+        const all = Array.from(document.querySelectorAll(sel)).filter(
+          (el) => visible(el) && !nestedInContent(el),
+        )
+        const outer = all.filter((el) => !all.some((o) => o !== el && o.contains(el)))
+        if (outer.length) {
+          outer[outer.length - 1].setAttribute(mark, "1")
+          return true
+        }
+      }
+      // Elementor pages built without a theme footer template carry the footer
+      // as the last top-level section (only when it looks like one: 5+ links).
+      const el = document.querySelector(
+        "[data-elementor-type='wp-page'] > .e-parent:last-child, [data-elementor-type='wp-page'] > .elementor-section:last-child",
+      )
+      if (el && el.querySelectorAll("a[href]").length >= 5) {
+        el.setAttribute(mark, "1")
+        return true
+      }
+      // Generic: the outermost block that ends at the document bottom, starts in
+      // its lower part, isn't most of the page, and carries 5+ links.
+      const docH = document.documentElement.scrollHeight
+      const top = (e: Element) => e.getBoundingClientRect().top + window.scrollY
+      const bottom = (e: Element) => e.getBoundingClientRect().bottom + window.scrollY
+      const blocks = Array.from(document.body?.querySelectorAll("div, section, nav") || [])
+        .slice(0, 4000)
+        .filter((e) => {
+          const h = bottom(e) - top(e)
+          return (
+            visible(e) &&
+            docH - bottom(e) < 120 &&
+            top(e) > docH * 0.5 &&
+            h < docH * 0.6 &&
+            e.querySelectorAll("a[href]").length >= 5
+          )
+        })
+      const outer = blocks.filter((e) => !blocks.some((o) => o !== e && o.contains(e)))
+      if (outer.length) {
+        outer[0].setAttribute(mark, "1")
+        return true
+      }
+      return false
+    }, FOOTER_MARK)
+    .catch(() => false)
+  return found ? page.locator(`[${FOOTER_MARK}]`).first() : null
+}
+
+/**
+ * Find the site header on ANY site (null when none). Tries the theme-aware WP
+ * selector first, then generic header/nav class and id patterns, then any
+ * full-width fixed/sticky bar at the top. Hidden, tiny, off-top and in-article
+ * matches (e.g. `<header class="entry-header">`) are skipped.
+ */
+async function locateHeader(page: PlaywrightPage, headerSelector: string): Promise<any | null> {
+  const found = await page
+    .evaluate(
+      ({ mark, primary }: { mark: string; primary: string }) => {
+        document.querySelectorAll(`[${mark}]`).forEach((e) => e.removeAttribute(mark))
+        const vw = window.innerWidth
+        const ok = (el: Element) => {
+          const r = el.getBoundingClientRect()
+          const cs = getComputedStyle(el)
+          return (
+            r.width >= vw * 0.5 &&
+            r.height >= 20 &&
+            r.top + window.scrollY < 400 &&
+            cs.display !== "none" &&
+            cs.visibility !== "hidden" &&
+            !el.parentElement?.closest("article, main article, [role='article'], dialog")
+          )
+        }
+        const groups = [
+          primary,
+          "[data-elementor-type='header'], #SITE_HEADER, [id*='header' i], [class*='header' i], [class*='navbar' i], [class*='topbar' i], [class*='top-bar' i], nav, [role='navigation']",
+        ]
+        for (const sel of groups) {
+          let list: Element[] = []
+          try {
+            list = Array.from(document.querySelectorAll(sel)).filter(ok)
+          } catch {
+            continue
+          }
+          // Outermost first: the whole header, not the inner logo row.
+          const outer = list.filter((el) => !list.some((o) => o !== el && o.contains(el)))
+          if (outer.length) {
+            outer[0].setAttribute(mark, "1")
+            return true
+          }
+        }
+        // Builders that use neither: a full-width fixed/sticky bar at the top
+        // that carries links (the header pinned by CSS).
+        const pinned = Array.from(document.body?.querySelectorAll("div, section") || [])
+          .slice(0, 3000)
+          .find((el) => {
+            const p = getComputedStyle(el).position
+            return (p === "fixed" || p === "sticky") && ok(el) && el.querySelectorAll("a[href]").length >= 2
+          })
+        if (pinned) {
+          pinned.setAttribute(mark, "1")
+          return true
+        }
+        return false
+      },
+      { mark: HEADER_MARK, primary: headerSelector },
+    )
+    .catch(() => false)
+  return found ? page.locator(`[${HEADER_MARK}]`).first() : null
 }
 
 /**
@@ -373,29 +561,24 @@ export async function checkPrivacyPolicy(
       footerHasLink: boolean
       screenshotUrl: string
     }> => {
-      const context = await browser.newContext()
+      const context = await newRealContext(browser, { viewport: { width: 1920, height: 1080 } })
       try {
         const page = await context.newPage()
-        await page.setViewportSize({ width: 1920, height: 1080 })
         // Kill popups + wait for the footer to actually render before reading it.
-        await gotoStable(page, url, { waitUntil: "networkidle", timeout: 25000 })
+        await gotoStable(page, url, { waitUntil: "load", timeout: 25000 })
+        // A page that never rendered (or a bot challenge) has no footer to read:
+        // throw so this becomes "could not complete", not "Privacy Policy Missing".
+        const loadProblem = await pageLoadProblem(page)
+        if (loadProblem) throw new Error(`could not read the homepage footer: ${loadProblem}`)
 
         let footerHasLink = false
         let screenshotUrl = ""
-        let footerElement = page.locator("footer").first()
-        if ((await footerElement.count()) === 0) {
-          footerElement = page
-            .locator(
-              '[role="contentinfo"], .wp-block-template-part[class*="footer"], .site-footer, .footer, #footer, .wp-block-group[class*="footer"]',
-            )
-            .first()
-        }
+        const PRIVACY_LINK = 'a:has-text("Privacy"), a[href*="privacy" i]'
+        const footerElement = await locateFooter(page)
 
-        if ((await footerElement.count()) > 0) {
-          const privacyLinks = footerElement.locator(
-            'a:has-text("Privacy Policy"), a:has-text("Privacy")',
-          )
-          if ((await privacyLinks.count()) > 0) {
+        if (footerElement) {
+          const privacyLinks = footerElement.locator(PRIVACY_LINK)
+          if ((await privacyLinks.count().catch(() => 0)) > 0) {
             footerHasLink = true
             await footerElement.scrollIntoViewIfNeeded().catch(() => null)
             const screenshotBuffer = await footerElement
@@ -412,6 +595,23 @@ export async function checkPrivacyPolicy(
               }).catch(() => "")
             }
           }
+        }
+
+        // No recognisable footer element (or the link sits just outside it, as
+        // in a builder's separate bottom bar): a privacy link anywhere in the
+        // bottom third of the page is still a footer link.
+        if (!footerHasLink) {
+          footerHasLink = await page
+            .evaluate(() => {
+              const docH = document.documentElement.scrollHeight
+              return Array.from(document.querySelectorAll("a")).some((a) => {
+                const text = `${a.textContent || ""} ${a.getAttribute("href") || ""}`
+                if (!/privacy/i.test(text)) return false
+                const r = a.getBoundingClientRect()
+                return r.width > 0 && r.height > 0 && r.top + window.scrollY > docH * 0.66
+              })
+            })
+            .catch(() => false)
         }
 
         if (!footerHasLink) {
@@ -446,17 +646,16 @@ export async function checkPrivacyPolicy(
       checkoutExists: boolean
       hasPrivacyPolicyOnCheckout: boolean
     }> => {
-      const context = await browser.newContext()
+      const context = await newRealContext(browser, { viewport: { width: 1920, height: 1080 } })
       let checkoutExists = false
       let hasPrivacyPolicyOnCheckout = false
       try {
         const page = await context.newPage()
-        await page.setViewportSize({ width: 1920, height: 1080 })
         const checkoutUrl = url.endsWith("/")
           ? `${url}checkout`
           : `${url}/checkout`
         const resp = await gotoStable(page, checkoutUrl, {
-          waitUntil: "networkidle",
+          waitUntil: "load",
           timeout: 15000,
         })
         const status = resp ? resp.status() : 0
@@ -465,7 +664,7 @@ export async function checkPrivacyPolicy(
             const hasCheckoutForm =
               !!document.querySelector(
                 'form.woocommerce-checkout, form.checkout, .wc-block-checkout, .woocommerce-checkout',
-              ) || document.body.className.includes("woocommerce-checkout")
+              ) || (document.body?.className || "").includes("woocommerce-checkout")
             const privacyEl = document.querySelector(
               ".woocommerce-privacy-policy-text",
             )
@@ -495,18 +694,29 @@ export async function checkPrivacyPolicy(
       isContentMatch: boolean
       actualPolicyText: string
     }> => {
-      const context = await browser.newContext()
+      const context = await newRealContext(browser, { viewport: { width: 1920, height: 1080 } })
       let fullPolicyScreenshotUrl = ""
       let isContentMatch = false
       let actualPolicyText = ""
       try {
         const page = await context.newPage()
-        await page.setViewportSize({ width: 1920, height: 1080 })
-        const policyUrl = url.endsWith("/")
-          ? `${url}privacy-policy`
-          : `${url}/privacy-policy`
-      await gotoStable(page, policyUrl, { waitUntil: "networkidle", timeout: 15000 })
-      let policyText = await page.evaluate(() => document.body.innerText)
+        const base = url.endsWith("/") ? url : `${url}/`
+        // WordPress uses /privacy-policy; Squarespace, Wix, Shopify and static
+        // sites commonly use /privacy or /privacy-policy.html. First one that
+        // answers below 400 wins (probed with cheap requests, then loaded once).
+        let policyUrl = `${base}privacy-policy`
+        for (const slug of ["privacy-policy", "privacy", "privacy-policy.html", "policies/privacy-policy"]) {
+          const status = await context.request
+            .get(`${base}${slug}`, { timeout: 10000 })
+            .then((r: any) => r.status())
+            .catch(() => 0)
+          if (status > 0 && status < 400) {
+            policyUrl = `${base}${slug}`
+            break
+          }
+        }
+        await gotoStable(page, policyUrl, { waitUntil: "load", timeout: 15000 })
+      let policyText = await page.evaluate(() => document.body?.innerText || "")
 
       const startMatch = policyText.match(/Privacy Policy/i)
       if (startMatch && startMatch.index !== undefined) {
@@ -784,45 +994,22 @@ export async function checkFooterLogo(
 
     const vpResults = await Promise.all(
       viewports.map(async (vp) => {
-        const context = await browser.newContext({
+        // Real UA per viewport (mobile UA on the phone view so responsive
+        // footers render as they do for visitors; desktop UA otherwise).
+        const context = await newRealContext(browser, {
           viewport: { width: vp.width, height: vp.height },
+          ...(vp.name === "mobile" ? { userAgent: MOBILE_UA, isMobile: true, hasTouch: true } : {}),
         })
         try {
           const newPage = await context.newPage()
-          const resp = await newPage
-            .goto(url, { waitUntil: "load", timeout: 30000 })
-            .catch(() => null)
-          const loaded = !!resp
+          const nav = await gotoResilient(newPage, url, { timeout: 30000 })
+          const loaded = nav.ok && !(await pageLoadProblem(newPage))
 
-          let footer = newPage.locator("footer").first()
-          if ((await footer.count()) === 0) {
-            footer = newPage
-              .locator(
-                '[role="contentinfo"], .wp-block-template-part[class*="footer"], .site-footer, .footer, #footer, .wp-block-group[class*="footer"]',
-              )
-              .first()
-          }
+          // Semantic footer → WP/builder classes → Elementor last section →
+          // generic link-rich bottom block. See locateFooter.
+          const footer = loaded ? await locateFooter(newPage) : null
 
-          // Elementor fallback: pages built without a theme footer template
-          // (e.g. GitOps sites on Hello Elementor) carry the footer as the LAST
-          // top-level section of the page document. Use it only when it looks
-          // like a footer (a block of navigation links), so a closing CTA
-          // section is never mistaken for one.
-          if ((await footer.count()) === 0) {
-            const lastSection = newPage
-              .locator(
-                '[data-elementor-type="wp-page"] > .e-parent:last-child, [data-elementor-type="wp-page"] > .elementor-section:last-child',
-              )
-              .first()
-            if (
-              (await lastSection.count()) > 0 &&
-              (await lastSection.locator("a[href]").count()) >= 5
-            ) {
-              footer = lastSection
-            }
-          }
-
-          if ((await footer.count()) > 0) {
+          if (footer) {
             // Scroll the footer into view to trigger lazy loading of images
             await footer.scrollIntoViewIfNeeded().catch(() => {})
 
@@ -832,45 +1019,42 @@ export async function checkFooterLogo(
             // stall us.
             await newPage
               .waitForFunction(
-                () => {
-                  const f =
-                    document.querySelector("footer") ||
-                    document.querySelector(
-                      '[role="contentinfo"], .site-footer, .footer, #footer',
-                    ) ||
-                    document.querySelector(
-                      '[data-elementor-type="wp-page"] > .e-parent:last-child, [data-elementor-type="wp-page"] > .elementor-section:last-child',
-                    )
+                (mark: string) => {
+                  const f = document.querySelector(`[${mark}]`)
                   if (!f) return true
                   return Array.from(f.querySelectorAll("img")).every(
                     (img) => (img as HTMLImageElement).complete,
                   )
                 },
+                FOOTER_MARK,
                 { timeout: 3000 },
               )
               .catch(() => {})
 
-            // Capture only the footer element
-            const buffer = await footer.screenshot()
-            const storagePath = `${runId}/${pageId}/footer_${vp.name}.png`
-            const publicUrl = await uploadScreenshot(buffer, storagePath)
-            return {
-              name: vp.name,
-              loaded,
-              footerFound: true,
-              buffer,
-              url: publicUrl,
+            // Capture only the footer element. A footer taller than the
+            // screenshot limit or detached mid-capture must not abort all views.
+            const buffer: Buffer | null = await footer.screenshot({ timeout: 15000 }).catch(() => null)
+            if (buffer) {
+              const storagePath = `${runId}/${pageId}/footer_${vp.name}.png`
+              const publicUrl = await uploadScreenshot(buffer, storagePath).catch(() => "")
+              return {
+                name: vp.name,
+                loaded,
+                footerFound: true,
+                buffer,
+                url: (publicUrl || null) as string | null,
+              }
             }
           }
           return {
             name: vp.name,
             loaded,
-            footerFound: false,
+            footerFound: !!footer,
             buffer: null as Buffer | null,
             url: null as string | null,
           }
         } finally {
-          await context.close()
+          await context.close().catch(() => {})
         }
       }),
     )
@@ -1029,13 +1213,8 @@ export async function checkSingleScript(
   sharedBrowser?: any,
   onProgress?: (progress: number, message: string) => Promise<void>,
 ): Promise<Finding[]> {
-  const { chromium } = require("playwright-extra")
-  const stealth = require("puppeteer-extra-plugin-stealth")()
-  chromium.use(stealth)
-  
-  // Decouple from shared browser
-  sharedBrowser = undefined;
-
+  // Own stealth browser (decoupled from the shared plain-playwright one): the
+  // Cloudflare-fronted staging sites 403 a plain headless browser.
   const { uploadScreenshot } = require("../lib/supabaseStorage")
 
   let desktopUrl = ""
@@ -1048,45 +1227,38 @@ export async function checkSingleScript(
   // per site, so we key on the STABLE integration script src (installed = the
   // loader script is present); the id div alone (no loader) is not functional.
   let installed = false
+  const INTEGRATION = "chatbot.growth99.com/assets/js/integration.js"
+  // Set when the page itself could not be read — "not installed" would then be
+  // a guess, so the check reports could-not-complete instead.
+  let loadProblem: string | null = null
 
+  let browser: any = null
   try {
-    const browser = sharedBrowser || (await chromium.launch({ headless: true }))
+    browser = await launchStealthBrowser()
 
     if (onProgress)
       await onProgress(10, "Initializing single script check session...")
 
-    const context = await browser.newContext({
-      viewport: { width: 1920, height: 1080 },
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    })
+    const context = await newRealContext(browser, { viewport: { width: 1920, height: 1080 } })
 
     const newPage = await context.newPage()
 
     let activeJsRequests = 0
-    newPage.on("request", (request: any) => {
-      if (
-        request.resourceType() === "script" ||
-        request.url().endsWith(".js")
-      ) {
-        activeJsRequests++
+    const isScript = (request: any) => {
+      try {
+        return request.resourceType() === "script" || request.url().endsWith(".js")
+      } catch {
+        return false
       }
+    }
+    newPage.on("request", (request: any) => {
+      if (isScript(request)) activeJsRequests++
     })
     newPage.on("requestfinished", (request: any) => {
-      if (
-        request.resourceType() === "script" ||
-        request.url().endsWith(".js")
-      ) {
-        activeJsRequests = Math.max(0, activeJsRequests - 1)
-      }
+      if (isScript(request)) activeJsRequests = Math.max(0, activeJsRequests - 1)
     })
     newPage.on("requestfailed", (request: any) => {
-      if (
-        request.resourceType() === "script" ||
-        request.url().endsWith(".js")
-      ) {
-        activeJsRequests = Math.max(0, activeJsRequests - 1)
-      }
+      if (isScript(request)) activeJsRequests = Math.max(0, activeJsRequests - 1)
     })
 
     if (onProgress)
@@ -1095,13 +1267,15 @@ export async function checkSingleScript(
     // domcontentloaded, not networkidle: a WP site with chat/analytics widgets
     // rarely goes idle, so networkidle just burns the full 30 s timeout. The
     // script-request poll below is the real "external scripts settled" signal.
-    await newPage
-      .goto(url, { waitUntil: "domcontentloaded", timeout: 30000 })
-      .catch(() => {})
+    await gotoResilient(newPage, url, { waitUntil: "domcontentloaded", timeout: 30000 })
+    loadProblem = await pageLoadProblem(newPage)
 
     await newPage.evaluate(() => window.scrollBy(0, 500)).catch(() => {})
+    // Only a page that carries the loader can ever render #feature-buttons; on
+    // any other site don't sit through the full 15 s wait for it.
+    const loaderInHtml = (await newPage.content().catch(() => "")).includes(INTEGRATION)
     await newPage
-      .waitForSelector("#feature-buttons", { timeout: 15000 })
+      .waitForSelector("#feature-buttons", { timeout: loaderInHtml ? 15000 : 3000 })
       .catch(() => {})
 
     // Wait for JS network requests to settle (max 15s). This is what actually
@@ -1113,74 +1287,70 @@ export async function checkSingleScript(
       waited += 500
     }
 
+    // Detect the single-script embed first: the integration loader script is
+    // the definitive signal (id div value varies per site, script src does
+    // not). Evidence screenshots below are best-effort and never decide it.
+    try {
+      const domHit = await newPage.evaluate(
+        (src: string) => !!document.querySelector(`script[src*="${src}"]`),
+        INTEGRATION,
+      )
+      const content = await newPage.content().catch(() => "")
+      installed = domHit || content.includes(INTEGRATION)
+    } catch {
+      installed = false
+    }
+
+    const shoot = async (name: string): Promise<string> => {
+      const buf = await newPage.screenshot({ fullPage: false, timeout: 15000 }).catch(() => null)
+      if (!buf) return ""
+      return uploadScreenshot(buf, `${runId}/${pageId}/single_script_${name}.png`).catch(() => "")
+    }
+
     // Desktop screenshot
-    const desktopBuffer = await newPage.screenshot({ fullPage: false })
-    desktopUrl = await uploadScreenshot(
-      desktopBuffer,
-      `${runId}/${pageId}/single_script_desktop.png`,
-    )
+    desktopUrl = await shoot("desktop")
 
     // Tablet screenshot
     if (onProgress) await onProgress(50, `Capturing tablet view...`)
-    await newPage.setViewportSize({ width: 768, height: 1024 })
+    await newPage.setViewportSize({ width: 768, height: 1024 }).catch(() => {})
     await newPage.waitForTimeout(250) // brief settle after viewport reflow
-    const tabletBuffer = await newPage.screenshot({ fullPage: false })
-    tabletUrl = await uploadScreenshot(
-      tabletBuffer,
-      `${runId}/${pageId}/single_script_tablet.png`,
-    )
+    tabletUrl = await shoot("tablet")
 
     // Mobile screenshot
     if (onProgress) await onProgress(60, `Capturing mobile view...`)
-    await newPage.setViewportSize({ width: 375, height: 812 })
+    await newPage.setViewportSize({ width: 375, height: 812 }).catch(() => {})
     await newPage.waitForTimeout(250) // brief settle after viewport reflow
-    const mobileBuffer = await newPage.screenshot({ fullPage: false })
-    mobileUrl = await uploadScreenshot(
-      mobileBuffer,
-      `${runId}/${pageId}/single_script_mobile.png`,
-    )
+    mobileUrl = await shoot("mobile")
 
     // 4th screenshot: Page source of #feature-buttons code (reusing the same page)
     if (onProgress)
       await onProgress(70, "Fetching page source for script verification...")
 
-    const codeSnippet = await newPage.evaluate(() => {
-      const el = document.querySelector("#feature-buttons")
-      return el
-        ? el.outerHTML
-        : "Element #feature-buttons not found in page source"
-    })
+    const codeSnippet: string = await newPage
+      .evaluate(() => {
+        const el = document.querySelector("#feature-buttons")
+        return el
+          ? el.outerHTML
+          : "Element #feature-buttons not found in page source"
+      })
+      .catch(() => "Element #feature-buttons not found in page source")
 
-    // Detect the single-script embed: the integration loader script is the
-    // definitive signal (id div value varies per site, script src does not).
     try {
-      const domHit = await newPage.evaluate(
-        () =>
-          !!document.querySelector(
-            'script[src*="chatbot.growth99.com/assets/js/integration.js"]',
-          ),
+      const renderPage = await context.newPage()
+      await renderPage.setContent(
+        `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
       )
-      const content = await newPage.content().catch(() => "")
-      installed =
-        domHit ||
-        content.includes("chatbot.growth99.com/assets/js/integration.js")
+      const codeBuffer = await renderPage.screenshot({ fullPage: false })
+      codeUrl = await uploadScreenshot(
+        codeBuffer,
+        `${runId}/${pageId}/single_script_code.png`,
+      ).catch(() => "")
+      await renderPage.close().catch(() => {})
     } catch {
-      installed = false
+      // Code snippet evidence is optional.
     }
 
-    const renderPage = await context.newPage()
-    await renderPage.setContent(
-      `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
-    )
-    const codeBuffer = await renderPage.screenshot({ fullPage: false })
-    codeUrl = await uploadScreenshot(
-      codeBuffer,
-      `${runId}/${pageId}/single_script_code.png`,
-    )
-    await renderPage.close().catch(() => {})
-
-    await context.close()
-    if (!sharedBrowser) await browser.close()
+    await context.close().catch(() => {})
     if (onProgress) await onProgress(90, "Finalizing findings...")
   } catch (e: any) {
     console.error("Single script screenshot failed", e)
@@ -1190,6 +1360,25 @@ export async function checkSingleScript(
         title: "Single Script Check Failed",
         description: `The check encountered an unexpected error: ${e.message}. Process aborted gracefully.`,
         screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  } finally {
+    // Our own browser — always close it, including on the error path.
+    if (browser) await browser.close().catch(() => {})
+  }
+
+  // The page never rendered or a bot filter blocked it: we can't say whether
+  // the embed is installed, so this is a lapse, not "Not Installed".
+  if (!installed && loadProblem) {
+    return [
+      {
+        check_factor: "single_script",
+        title: "Single Script Check Failed",
+        description: `Could not complete: ${loadProblem}, so the single-script embed could not be checked.`,
+        context_text: `URL: ${url}`,
+        screenshot_url: [desktopUrl, tabletUrl, mobileUrl].filter(Boolean).join(",") || null,
         status: "open",
         ai_generated: false,
       } as Finding,
@@ -1248,14 +1437,8 @@ export async function checkTopBarAndStickyHeader(
   themeType?: ThemeType,
 ): Promise<Finding[]> {
   // Stealth chromium: gogroth (and other Cloudflare-fronted) staging sites 403
-  // a plain headless browser. playwright-extra + the stealth plugin hides the
-  // headless/webdriver tells. The shared browser is a plain-playwright instance,
-  // so decouple and launch our own stealth browser here.
-  const { chromium } = require("playwright-extra")
-  const stealth = require("puppeteer-extra-plugin-stealth")()
-  chromium.use(stealth)
-  sharedBrowser = undefined
-
+  // a plain headless browser. The shared browser is a plain-playwright
+  // instance, so we launch (and always close) our own stealth browser here.
   const { uploadScreenshot } = require("../lib/supabaseStorage")
   // Classic themes may carry the nav in a bare <nav>; block themes use a
   // template-part header. Pick the matching selector set (defaults to block).
@@ -1266,17 +1449,14 @@ export async function checkTopBarAndStickyHeader(
   let headerFound = false
   let stickyMeasured = false
   let stickyObserved = false
+  let loadProblem: string | null = null
 
+  let browser: any = null
   try {
-    const browser = sharedBrowser || (await chromium.launch({ headless: true }))
-    // Set a real desktop UA. Without one, Playwright sends a "HeadlessChrome"
-    // user-agent that Cloudflare (and similar WAFs) block with a 403 — every
-    // other desktop check here already sets a UA; this one used to be missed.
-    const context = await browser.newContext({
-      viewport: { width: 1920, height: 1080 },
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    })
+    browser = await launchStealthBrowser()
+    // Real desktop UA. Without one, Playwright sends a "HeadlessChrome"
+    // user-agent that Cloudflare (and similar WAFs) block with a 403.
+    const context = await newRealContext(browser, { viewport: { width: 1920, height: 1080 } })
     const newPage = await context.newPage()
     if (onProgress)
       await onProgress(10, "Navigating to homepage to check top bar...")
@@ -1285,6 +1465,7 @@ export async function checkTopBarAndStickyHeader(
     // or a JS-hydrated header used to make this screenshot before the real
     // header existed, producing a false "no header found".
     await gotoStable(newPage, url, { waitUntil: "load", timeout: 30000 })
+    loadProblem = await pageLoadProblem(newPage)
 
     // Wait for the header itself — it's what we screenshot and measure. Give
     // late-hydrated headers room to attach; capped so a headerless page still
@@ -1294,15 +1475,17 @@ export async function checkTopBarAndStickyHeader(
       .catch(() => {})
     if (onProgress) await onProgress(40, "Taking screenshot of the header...")
 
-    const headerElement = newPage
-      .locator(headerSelector)
-      .first()
-    if ((await headerElement.count()) > 0) {
-      const buffer = await headerElement.screenshot()
-      headerUrl = await uploadScreenshot(
-        buffer,
-        `${runId}/${pageId}/header_nav.png`,
-      )
+    // WP selector first, then generic header/nav patterns and pinned top bars
+    // (Squarespace, Wix, Webflow, SPAs). See locateHeader.
+    const headerElement = loadProblem ? null : await locateHeader(newPage, headerSelector)
+    if (headerElement) {
+      headerFound = true
+      const buffer = await headerElement.screenshot({ timeout: 15000 }).catch(() => null)
+      if (buffer)
+        headerUrl = await uploadScreenshot(
+          buffer,
+          `${runId}/${pageId}/header_nav.png`,
+        ).catch(() => "")
 
       // Sticky-header measurement (docstring promise): compare the header's
       // viewport-relative position before and after scrolling. A sticky/fixed
@@ -1315,14 +1498,69 @@ export async function checkTopBarAndStickyHeader(
             const r = el.getBoundingClientRect()
             return { top: r.top, height: r.height }
           })
-        const before = await measure()
-        await newPage.evaluate(() => window.scrollBy(0, 800))
+        // A reference point lower on the page tells us whether the page really
+        // scrolled. Smooth-scroll libraries (Lenis/Locomotive) and short pages
+        // ignore window.scrollBy — then a header that "stayed at the top" means
+        // nothing and must not pass.
+        const probe = () =>
+          newPage
+            .evaluate(() => {
+              const el = document.elementFromPoint(window.innerWidth / 2, window.innerHeight - 40)
+              return { y: window.scrollY, ref: el ? el.getBoundingClientRect().top : null }
+            })
+            .catch(() => ({ y: 0, ref: null as number | null }))
+        const p0 = await probe()
+        await newPage.evaluate(() => window.scrollBy(0, 800)).catch(() => {})
         await newPage.waitForTimeout(600)
+        let p1 = await probe()
+        if (p1.y - p0.y < 150) {
+          // Custom scroll container: a real wheel event is what those listen to.
+          await newPage.mouse.move(960, 600).catch(() => {})
+          await newPage.mouse.wheel(0, 800).catch(() => {})
+          await newPage.waitForTimeout(900)
+          p1 = await probe()
+        }
+        // Scrolled = window moved, or the reference point's content moved up.
+        const scrolled =
+          p1.y - p0.y >= 150 ||
+          (p0.ref !== null && p1.ref !== null && p0.ref - p1.ref >= 150)
         const after = await measure()
-        headerFound = true
         // Pinned = still within the top band of the viewport and visible.
         stickyObserved =
-          after.top >= -5 && after.top < 150 && after.height > 0
+          scrolled && after.top >= -5 && after.top < 150 && after.height > 0
+
+        // Builders (Astra, Elementor, Divi, Squarespace, Wix) often pin a
+        // CLONE or a separate fixed bar on scroll and leave the original header
+        // behind. A full-width, link-carrying fixed/sticky bar at the top of the
+        // viewport after scrolling is the same visible result: a pinned header.
+        if (scrolled && !stickyObserved) {
+          stickyObserved = await newPage
+            .evaluate(() => {
+              const vw = window.innerWidth
+              const stack = new Set<Element>()
+              for (const x of [vw * 0.2, vw * 0.5, vw * 0.8])
+                for (const el of document.elementsFromPoint(x, 10)) stack.add(el)
+              return Array.from(stack).some((el) => {
+                let n: Element | null = el
+                while (n && n !== document.body) {
+                  const cs = getComputedStyle(n)
+                  if (cs.position === "fixed" || cs.position === "sticky") {
+                    const r = n.getBoundingClientRect()
+                    return (
+                      r.top <= 5 &&
+                      r.height >= 30 &&
+                      r.height <= 400 &&
+                      r.width >= vw * 0.6 &&
+                      n.querySelectorAll("a[href]").length >= 2
+                    )
+                  }
+                  n = n.parentElement
+                }
+                return false
+              })
+            })
+            .catch(() => false)
+        }
 
         // Additional pass condition: if the header element itself — or any
         // header/sticky-classed element inside it — declares position:sticky
@@ -1330,17 +1568,21 @@ export async function checkTopBarAndStickyHeader(
         // check must pass, even if the scroll-based measurement did not
         // observe pinning (e.g. the page is too short to scroll 800px, or a
         // sticky ancestor keeps rect.top from crossing the threshold).
+        let cssSticky = false
         try {
-          const cssSticky = await headerElement.evaluate(
+          cssSticky = await headerElement.evaluate(
             (el: Element, HEADER_SELECTOR: string) => {
               const isSticky = (node: Element) =>
                 getComputedStyle(node).position === "sticky"
               if (isSticky(el)) return true
-              const nested = Array.from(
-                el.querySelectorAll(
-                  `${HEADER_SELECTOR}, .is-sticky, .sticky-header, [class*='sticky' i]`,
-                ),
-              )
+              let nested: Element[] = []
+              try {
+                nested = Array.from(
+                  el.querySelectorAll(
+                    `${HEADER_SELECTOR}, .is-sticky, .sticky-header, [class*='sticky' i]`,
+                  ),
+                )
+              } catch {}
               return nested.some(isSticky)
             },
             headerSelector,
@@ -1350,7 +1592,9 @@ export async function checkTopBarAndStickyHeader(
           // Computed-style probe failed — fall back to the scroll measurement.
         }
 
-        stickyMeasured = true
+        // Without a real scroll the position test proved nothing; only the
+        // computed-style signal can still settle it.
+        stickyMeasured = scrolled || cssSticky
         // Reset scroll so the code-snippet capture below is unaffected.
         await newPage.evaluate(() => window.scrollTo(0, 0)).catch(() => {})
       } catch {
@@ -1360,42 +1604,53 @@ export async function checkTopBarAndStickyHeader(
 
     if (onProgress) await onProgress(70, "Extracting header code snippet...")
 
-    const codeSnippet = await newPage.evaluate((HEADER_SELECTOR: string) => {
-      // Prefer the element that is GENUINELY pinned (computed position), rather
-      // than guessing from class names — block themes pin via theme.json/CSS and
-      // carry no framework-specific "sticky" class.
-      const candidates = Array.from(
-        document.querySelectorAll(
-          `${HEADER_SELECTOR}, .is-sticky, .sticky-header, [class*='sticky' i], [class*='fixed' i]`,
-        ),
-      ).slice(0, 40)
-      const pinned = candidates.find((el) => {
-        const cs = getComputedStyle(el)
-        if (cs.position !== "sticky" && cs.position !== "fixed") return false
-        const r = el.getBoundingClientRect()
-        return r.height > 0 && r.top + window.scrollY < 400
-      })
-      if (pinned) return pinned.outerHTML
+    const codeSnippet: string = await newPage
+      .evaluate(
+        ({ HEADER_SELECTOR, mark }: { HEADER_SELECTOR: string; mark: string }) => {
+          // Prefer the element that is GENUINELY pinned (computed position), rather
+          // than guessing from class names — block themes pin via theme.json/CSS and
+          // carry no framework-specific "sticky" class.
+          let candidates: Element[] = []
+          try {
+            candidates = Array.from(
+              document.querySelectorAll(
+                `[${mark}], ${HEADER_SELECTOR}, .is-sticky, .sticky-header, [class*='sticky' i], [class*='fixed' i]`,
+              ),
+            ).slice(0, 40)
+          } catch {}
+          const pinned = candidates.find((el) => {
+            const cs = getComputedStyle(el)
+            if (cs.position !== "sticky" && cs.position !== "fixed") return false
+            const r = el.getBoundingClientRect()
+            return r.height > 0 && r.top + window.scrollY < 400
+          })
+          if (pinned) return pinned.outerHTML
 
-      const el = document.querySelector(HEADER_SELECTOR)
-      return el ? el.outerHTML : "Header element not found"
-    }, headerSelector)
+          const el = document.querySelector(`[${mark}]`) || document.querySelector(HEADER_SELECTOR)
+          return el ? el.outerHTML : "Header element not found"
+        },
+        { HEADER_SELECTOR: headerSelector, mark: HEADER_MARK },
+      )
+      .catch(() => "Header element not found")
 
-    const codeContext = await browser.newContext()
-    const renderPage = await codeContext.newPage()
-    await renderPage.setContent(
-      `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
-    )
-    const codeBuffer = await renderPage.screenshot({ fullPage: false })
-    codeUrl = await uploadScreenshot(
-      codeBuffer,
-      `${runId}/${pageId}/header_code.png`,
-    )
+    try {
+      const codeContext = await newRealContext(browser)
+      const renderPage = await codeContext.newPage()
+      await renderPage.setContent(
+        `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.slice(0, 20000).replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
+      )
+      const codeBuffer = await renderPage.screenshot({ fullPage: false })
+      codeUrl = await uploadScreenshot(
+        codeBuffer,
+        `${runId}/${pageId}/header_code.png`,
+      ).catch(() => "")
+      await codeContext.close().catch(() => {})
+    } catch {
+      // Code snippet evidence is optional.
+    }
 
-    await codeContext.close()
     if (onProgress) await onProgress(90, "Finalizing findings...")
-    await context.close()
-    if (!sharedBrowser) await browser.close()
+    await context.close().catch(() => {})
   } catch (e: any) {
     console.error("Header screenshot failed", e)
     return [
@@ -1404,6 +1659,23 @@ export async function checkTopBarAndStickyHeader(
         title: "Top Bar & Sticky Header Check Failed",
         description: `The check encountered an unexpected error: ${e.message}. Process aborted gracefully.`,
         screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  } finally {
+    if (browser) await browser.close().catch(() => {})
+  }
+
+  // Page never rendered / bot-blocked → could not complete, not "no header".
+  if (loadProblem) {
+    return [
+      {
+        check_factor: "top_bar_sticky",
+        title: "Top Bar & Sticky Header Check Failed",
+        description: `Could not complete: ${loadProblem}, so the header could not be checked.`,
+        context_text: `URL: ${url}`,
+        screenshot_url: codeUrl || null,
         status: "open",
         ai_generated: false,
       } as Finding,
@@ -1515,23 +1787,22 @@ export async function checkFavicon(
     // the old sequential version. Bounded to 4 concurrent contexts (2 vCPU box).
     const viewportTask = Promise.all(
       viewports.map(async (vp) => {
-        const context = await browser.newContext({
+        const context = await newRealContext(browser, {
           viewport: { width: vp.width, height: vp.height },
-          userAgent:
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         })
         try {
           const newPage = await context.newPage()
-          await newPage
-            .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-            .catch(() => {})
+          // "load", not "networkidle": a chat/analytics-heavy page never idles,
+          // and the favicon <link> is in the head long before that anyway.
+          await gotoResilient(newPage, url, { timeout: 30000 })
 
           // Inject mock browser tab UI to visually verify the favicon inside the viewport screenshot
           await newPage
             .evaluate(async () => {
-              const faviconUrl = document.querySelector(
-                'link[rel*="icon" i], link[rel*="shortcut" i], link[rel="apple-touch-icon" i]',
-              ) as HTMLLinkElement | null
+              const faviconUrl = (document.querySelector('link[rel~="icon" i]') ||
+                document.querySelector(
+                  'link[rel*="icon" i], link[rel*="shortcut" i], link[rel="apple-touch-icon" i]',
+                )) as HTMLLinkElement | null
               const urlStr = faviconUrl
                 ? faviconUrl.href
                 : window.location.origin + "/favicon.ico"
@@ -1580,75 +1851,129 @@ export async function checkFavicon(
             })
             .catch(() => {})
 
-          const buffer = await newPage.screenshot({ fullPage: false })
+          // Evidence only — a failed capture must not abort the other views.
+          const buffer = await newPage.screenshot({ fullPage: false, timeout: 15000 }).catch(() => null)
+          if (!buffer) return { name: vp.name, url: "" }
           const storagePath = `${runId}/${pageId}/favicon_${vp.name}.png`
-          const publicUrl = await uploadScreenshot(buffer, storagePath)
-          return { name: vp.name, url: publicUrl }
+          const publicUrl = await uploadScreenshot(buffer, storagePath).catch(() => "")
+          return { name: vp.name, url: publicUrl as string }
+        } catch {
+          return { name: vp.name, url: "" }
         } finally {
-          await context.close()
+          await context.close().catch(() => {})
         }
       }),
     )
 
     const codeTask = (async () => {
-      const codeContext = await browser.newContext({
-        userAgent:
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      })
+      const codeContext = await newRealContext(browser)
       try {
         const codePage = await codeContext.newPage()
-        const codeResp = await codePage
-          .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-          .catch(() => null)
-        codeLoadOk = !!codeResp
+        const nav = await gotoResilient(codePage, url, { timeout: 30000 })
+        // Loaded = navigation usable AND not a bot-challenge page (whose own
+        // favicon would say nothing about the site's).
+        codeLoadOk = nav.ok && !(await pageLoadProblem(codePage))
 
-        const faviconInfo = await codePage.evaluate(() => {
-          const el = document.querySelector(
-            'link[rel*="icon" i], link[rel*="shortcut" i], link[rel="apple-touch-icon" i]',
-          ) as HTMLLinkElement | null
-          return {
-            declared: !!el,
-            // Resolve to an absolute URL; fall back to the conventional /favicon.ico.
-            href: el ? el.href : window.location.origin + "/favicon.ico",
-            outerHTML: el
-              ? el.outerHTML
-              : "Favicon element not found in page source",
-          }
-        })
+        const faviconInfo = await codePage
+          .evaluate(() => {
+            // rel~="icon" covers "icon" and "shortcut icon" — the one browsers
+            // put in the tab. apple-touch-icon / mask-icon are fallbacks only.
+            const el = (document.querySelector('link[rel~="icon" i][href]') ||
+              document.querySelector(
+                'link[rel*="icon" i][href], link[rel*="shortcut" i][href], link[rel="apple-touch-icon" i][href]',
+              )) as HTMLLinkElement | null
+            return {
+              declared: !!el,
+              // Resolve to an absolute URL; fall back to the conventional /favicon.ico.
+              href: el && el.href ? el.href : window.location.origin + "/favicon.ico",
+              outerHTML: el
+                ? el.outerHTML
+                : "Favicon element not found in page source",
+            }
+          })
+          .catch(() => ({
+            declared: false,
+            href: "",
+            outerHTML: "Favicon element not found in page source",
+          }))
         const codeSnippet = faviconInfo.outerHTML
 
         // Actually verify the favicon RESOURCE resolves (docstring promise). A link
         // tag that points at a 404 is a broken favicon and must be reported, not
         // silently passed. Only attempt when the page itself loaded.
-        if (codeLoadOk) {
-          try {
-            const res = await codePage.request.get(faviconInfo.href, {
-              timeout: 15000,
-            })
-            faviconHttpStatus = res.status()
-            const ct = (res.headers()["content-type"] || "").toLowerCase()
-            // OK = 2xx AND not obviously the HTML 404/soft-404 page.
-            faviconResourceOk = res.ok() && !ct.includes("text/html")
+        if (codeLoadOk && faviconInfo.href) {
+          if (/^data:image\//i.test(faviconInfo.href)) {
+            // Inline data-URI icon (common on SPAs/static builds): nothing to fetch.
+            faviconHttpStatus = 200
+            faviconResourceOk = true
             faviconChecked = true
-          } catch (e) {
-            // Network-level failure — cannot determine; leave faviconChecked false
-            // so we fall back to the manual-verify card rather than a false defect.
-            faviconChecked = false
+          } else {
+            try {
+              const res = await codePage.request.get(faviconInfo.href, {
+                timeout: 15000,
+              })
+              faviconHttpStatus = res.status()
+              const ct = (res.headers()["content-type"] || "").toLowerCase()
+              // OK = 2xx AND not obviously the HTML 404/soft-404 page.
+              faviconResourceOk = res.ok() && !ct.includes("text/html")
+              faviconChecked = true
+            } catch (e) {
+              // Network-level failure — cannot determine; leave faviconChecked false
+              // so we fall back to the manual-verify card rather than a false defect.
+              faviconChecked = false
+            }
+            // A bot filter can refuse the bare request (403/429/503) while the
+            // browser itself loads the icon fine. Ask the browser: if the image
+            // decodes in the page, the favicon works.
+            if (!faviconResourceOk) {
+              const decoded = await codePage
+                .evaluate(
+                  (src: string) =>
+                    new Promise<boolean>((resolve) => {
+                      const img = new Image()
+                      const t = setTimeout(() => resolve(false), 8000)
+                      img.onload = () => {
+                        clearTimeout(t)
+                        resolve(img.naturalWidth > 0)
+                      }
+                      img.onerror = () => {
+                        clearTimeout(t)
+                        resolve(false)
+                      }
+                      img.src = src
+                    }),
+                  faviconInfo.href,
+                )
+                .catch(() => false)
+              if (decoded) {
+                faviconResourceOk = true
+                faviconChecked = true
+                if (!faviconHttpStatus || faviconHttpStatus >= 400) faviconHttpStatus = 200
+              } else if ([401, 403, 429, 503].includes(faviconHttpStatus)) {
+                // Refused AND not decodable: likely the bot filter, not the
+                // site — inconclusive rather than a false "broken" defect.
+                faviconChecked = false
+              }
+            }
           }
         }
         faviconDeclared = faviconInfo.declared
 
-        const renderPage = await codeContext.newPage()
-        await renderPage.setContent(
-          `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
-        )
-        const codeBuffer = await renderPage.screenshot({ fullPage: false })
-        codeUrl = await uploadScreenshot(
-          codeBuffer,
-          `${runId}/${pageId}/favicon_code.png`,
-        )
+        try {
+          const renderPage = await codeContext.newPage()
+          await renderPage.setContent(
+            `<pre style="font-size: 14px; white-space: pre-wrap; word-wrap: break-word; padding: 20px; background: #f4f4f4;">${codeSnippet.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
+          )
+          const codeBuffer = await renderPage.screenshot({ fullPage: false })
+          codeUrl = await uploadScreenshot(
+            codeBuffer,
+            `${runId}/${pageId}/favicon_code.png`,
+          ).catch(() => "")
+        } catch {
+          // Code snippet evidence is optional.
+        }
       } finally {
-        await codeContext.close()
+        await codeContext.close().catch(() => {})
       }
     })()
 
@@ -1725,6 +2050,54 @@ export async function checkFavicon(
   ]
 }
 
+const GROWTH99_FORM_SRC = "widget-ui.growth99.com/assets/widgets/new-form.html"
+const GROWTH99_FORM_IFRAME = `iframe[src*="${GROWTH99_FORM_SRC}"]`
+
+/**
+ * Name the non-Growth99 contact form on the page, or null when there is none.
+ * Known form tools are named; otherwise any visible <form> that asks for an
+ * email/phone or has a message box counts (search and login forms don't).
+ */
+async function detectOtherContactForm(page: PlaywrightPage): Promise<string | null> {
+  return page
+    .evaluate(() => {
+      const known: [string, string][] = [
+        ["Contact Form 7", ".wpcf7, form.wpcf7-form"],
+        ["Gravity Forms", ".gform_wrapper, form[id^='gform_']"],
+        ["WPForms", ".wpforms-container, form.wpforms-form"],
+        ["Ninja Forms", ".nf-form-cont"],
+        ["Formidable Forms", ".frm_forms"],
+        ["Fluent Forms", ".fluentform, form.frm-fluent-form"],
+        ["Elementor", "form.elementor-form"],
+        ["Divi", ".et_pb_contact_form"],
+        ["HubSpot", ".hs-form, .hbspt-form, iframe[src*='hsforms' i]"],
+        ["Typeform", "iframe[src*='typeform.com' i], [data-tf-widget], [data-tf-live]"],
+        ["Jotform", "iframe[src*='jotform' i], form[action*='jotform' i]"],
+        ["Google Forms", "iframe[src*='docs.google.com/forms' i]"],
+        ["Squarespace", ".sqs-block-form, .form-block"],
+        ["Wix", "form[data-hook*='form' i], [data-testid*='form' i] form"],
+        ["Webflow", ".w-form"],
+        ["Shopify", "form[action*='/contact' i]"],
+      ]
+      for (const [name, sel] of known) {
+        try {
+          if (document.querySelector(sel)) return name
+        } catch {}
+      }
+      for (const form of Array.from(document.querySelectorAll("form"))) {
+        const r = form.getBoundingClientRect()
+        if (r.width === 0 || r.height === 0) continue
+        if (/search|login|signin|sign-in|password|cart/i.test(`${form.id} ${form.className} ${form.getAttribute("role") || ""} ${form.getAttribute("action") || ""}`))
+          continue
+        if (form.querySelector("input[type='password'], input[type='search']")) continue
+        if (form.querySelector("textarea, input[type='email'], input[type='tel'], input[name*='email' i], input[name*='phone' i]"))
+          return "website"
+      }
+      return null
+    })
+    .catch(() => null)
+}
+
 /**
  * =========================================================================
  * 8️⃣ CHECK 8: Growth99 Contact Form Check
@@ -1762,6 +2135,12 @@ export async function checkGrowth99ContactForm(
   let fillOk = false // the form's fields were present and fillable
   let submitOk = false // a submit control existed and was clicked
   let thankYouSeen = false // a thank-you/confirmation state appeared after submit
+  // Non-Growth99 sites: the form tool found instead (e.g. "Gravity Forms"),
+  // whether the site uses any Growth99 product, and why the page couldn't be
+  // read (then "not found" would be a guess → lapse instead).
+  let otherForm: string | null = null
+  let growth99Site = false
+  let loadProblem: string | null = null
   // "Contact Us" pages are where the form is expected to live. Used post-release
   // to avoid flagging "not found" on every non-contact page in a full crawl.
   const isContactPage = /contact/i.test(url)
@@ -1780,25 +2159,37 @@ export async function checkGrowth99ContactForm(
     sharedBrowser.contexts()[0].pages().length > 0
   ) {
     page = sharedBrowser.contexts()[0].pages()[0]
-  } else {
-    context = await browser.newContext()
-    page = await context.newPage()
   }
 
   try {
+    if (!page) {
+      context = await newRealContext(browser)
+      page = await context.newPage()
+    }
     if (onProgress)
       await onProgress(10, "Checking page source for contact form...")
 
     if (context) {
-      await page
-        .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-        .catch(() => {})
+      await gotoResilient(page, url, { timeout: 30000 })
     }
+    // Give a lazily-injected form a short chance to attach before reading the
+    // source (the Growth99 iframe or any other form/embed).
+    await page
+      .waitForSelector(`${GROWTH99_FORM_IFRAME}, form, iframe[src*="form" i]`, {
+        timeout: 5000,
+        state: "attached",
+      })
+      .catch(() => {})
     const content = await page.content().catch(() => "")
 
-    hasForm = content.includes(
-      "widget-ui.growth99.com/assets/widgets/new-form.html",
-    )
+    hasForm = content.includes(GROWTH99_FORM_SRC)
+    // Not the Growth99 widget: note any other contact form so a site built on
+    // another form tool isn't reported as having no form at all.
+    if (!hasForm) {
+      otherForm = await detectOtherContactForm(page)
+      growth99Site = /growth99/i.test(content)
+      if (!otherForm) loadProblem = await pageLoadProblem(page)
+    }
 
     if (hasForm) {
       // One test lead per run (see the submit coordinator). The in-memory
@@ -1835,20 +2226,14 @@ export async function checkGrowth99ContactForm(
         // Bounded to exactly 3 concurrent contexts (2 vCPU box).
         const vpShots = await Promise.all(
           viewports.map(async (vp) => {
-            const vpContext = await browser.newContext({
+            const vpContext = await newRealContext(browser, {
               viewport: { width: vp.width, height: vp.height },
             })
             try {
               const vpPage = await vpContext.newPage()
-              await vpPage
-                .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-                .catch(() => {})
+              await gotoResilient(vpPage, url, { timeout: 30000 })
 
-              const iframeLoc = vpPage
-                .locator(
-                  'iframe[src*="widget-ui.growth99.com/assets/widgets/new-form.html"]',
-                )
-                .first()
+              const iframeLoc = vpPage.locator(GROWTH99_FORM_IFRAME).first()
               if ((await iframeLoc.count()) > 0) {
                 await iframeLoc.scrollIntoViewIfNeeded().catch(() => {})
                 // Replace the blind 2s settle with the iframe's own load signal
@@ -1866,31 +2251,31 @@ export async function checkGrowth99ContactForm(
                 }
               }
 
-              const buffer = await vpPage.screenshot({ fullPage: false })
+              const buffer = await vpPage.screenshot({ fullPage: false, timeout: 15000 }).catch(() => null)
+              if (!buffer) return ""
               return await uploadScreenshot(
                 buffer,
                 `${runId}/${pageId}/contact_form_${vp.name}.png`,
-              )
+              ).catch(() => "")
+            } catch {
+              return "" // evidence only — never aborts the submit test
             } finally {
-              await vpContext.close()
+              await vpContext.close().catch(() => {})
             }
           }),
         )
-        for (const publicUrl of vpShots) screenshots.push(publicUrl)
+        for (const publicUrl of vpShots) if (publicUrl) screenshots.push(publicUrl)
 
         if (onProgress)
           await onProgress(70, "Submitting dummy data to the contact form...")
 
         submitAttempted = true
         const iframeElement = await page
-          .waitForSelector(
-            'iframe[src*="widget-ui.growth99.com/assets/widgets/new-form.html"]',
-            { timeout: 10000 },
-          )
+          .waitForSelector(GROWTH99_FORM_IFRAME, { timeout: 10000 })
           .catch(() => null)
         if (iframeElement) {
           await iframeElement.scrollIntoViewIfNeeded().catch(() => {})
-          const frame = await iframeElement.contentFrame()
+          const frame = await iframeElement.contentFrame().catch(() => null)
           if (frame) {
             // Dummy lead data, clearly labelled as a test so the client can
             // recognise/ignore it in their CRM. The word "test" is carried in
@@ -1944,12 +2329,14 @@ export async function checkGrowth99ContactForm(
               .then(() => true)
               .catch(() => false)
 
-            const thankYouBuffer = await page.screenshot({ fullPage: false })
-            const thankYouUrl = await uploadScreenshot(
-              thankYouBuffer,
-              `${runId}/${pageId}/contact_form_thankyou.png`,
-            )
-            screenshots.push(thankYouUrl)
+            const thankYouBuffer = await page.screenshot({ fullPage: false }).catch(() => null)
+            const thankYouUrl = thankYouBuffer
+              ? await uploadScreenshot(
+                  thankYouBuffer,
+                  `${runId}/${pageId}/contact_form_thankyou.png`,
+                ).catch(() => "")
+              : ""
+            if (thankYouUrl) screenshots.push(thankYouUrl)
           }
         }
       }
@@ -1966,8 +2353,8 @@ export async function checkGrowth99ContactForm(
       releaseContactFormSubmit(runId, fillOk && submitOk && thankYouSeen && !contactFormCheckError)
     // Homepage finished (form or not) → fallback pages may now attempt.
     if (isHomepage) markContactFormHomepageDone(runId)
-    if (context) await context.close()
-    if (!sharedBrowser) await browser.close()
+    if (context) await context.close().catch(() => {})
+    if (!sharedBrowser) await browser.close().catch(() => {})
   }
 
   // If the check crashed, do NOT fall through to the normal "Verify Contact
@@ -1988,6 +2375,22 @@ export async function checkGrowth99ContactForm(
     ]
   }
 
+  // The page never rendered / was bot-blocked and nothing form-like was seen:
+  // "no form" would be a guess, so report could-not-complete.
+  if (!hasForm && !otherForm && loadProblem) {
+    return [
+      {
+        check_factor: "contact_form",
+        title: "Contact Form Check Failed",
+        description: `Could not complete: ${loadProblem}, so the page could not be checked for a contact form.`,
+        context_text: `URL: ${url}`,
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
+
   const findingData = {
     url,
     hasForm,
@@ -1995,6 +2398,40 @@ export async function checkGrowth99ContactForm(
     fillOk,
     submitOk,
     thankYouSeen,
+    ...(otherForm ? { otherForm } : {}),
+  }
+
+  // A different form tool (Gravity Forms, CF7, HubSpot, Typeform, a plain
+  // <form>, ...) is on the page. On a site that uses Growth99 products the
+  // Growth99 form is still expected, so it stays "not found" (naming what was
+  // found instead). On any other site the page HAS a working contact form, so
+  // it is not a defect. We never submit a non-Growth99 form.
+  if (!hasForm && otherForm) {
+    if (growth99Site) {
+      if (isPostRelease && !isContactPage) return []
+      return [
+        {
+          check_factor: "contact_form",
+          title: "Contact Form Not Found",
+          description: `The Growth99 contact form was not found on this page; a ${otherForm} form is used instead.${isPostRelease ? " No automatic fix for this — check with the team whether to add the form or correct the embed code." : ""}`,
+          context_text: JSON.stringify(findingData),
+          screenshot_url: null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
+    return [
+      {
+        check_factor: "contact_form",
+        title: "Contact Form Verified",
+        description: `No contact form issues found. A ${otherForm} contact form is present on this page (not a Growth99 form, so it was not test-submitted).`,
+        context_text: JSON.stringify(findingData),
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
   }
   const shotUrl = screenshots.length > 0 ? screenshots.join(",") : null
   // Short, standing note appended to every contact-form failure: there is no
@@ -2160,16 +2597,17 @@ export async function checkChatbotAndConsultation(
     )
     .catch(() => {})
   // Small settle so the launcher finishes painting before the screenshot.
-  await page.waitForTimeout(1500)
+  await page.waitForTimeout(1500).catch(() => {})
   const shot = await page.screenshot().catch(() => null)
   let screenshotUrl: string | null = null
   if (shot && runId) {
-    const jpg = await sharp(shot).jpeg({ quality: 85 }).toBuffer()
-    screenshotUrl =
-      (await uploadScreenshot(jpg, `${runId}/chatbot_consultation_${Date.now()}.jpg`, {
-        bucket: "evidence",
-        isPublic: true,
-      }).catch(() => "")) || null
+    const jpg = await sharp(shot).jpeg({ quality: 85 }).toBuffer().catch(() => null)
+    screenshotUrl = jpg
+      ? (await uploadScreenshot(jpg, `${runId}/chatbot_consultation_${Date.now()}.jpg`, {
+          bucket: "evidence",
+          isPublic: true,
+        }).catch(() => "")) || null
+      : null
   }
 
   // 2 + 3. Three independent reads — the widget vision verdict, the page
@@ -2230,11 +2668,13 @@ export async function checkChatbotAndConsultation(
           if (r) {
             selfAssessmentOpened = r.opened
             if (r.opened && runId) {
-              const jpg2 = await sharp(shot2).jpeg({ quality: 85 }).toBuffer()
-              const u = await uploadScreenshot(jpg2, `${runId}/self_assessment_${Date.now()}.jpg`, {
-                bucket: "evidence",
-                isPublic: true,
-              }).catch(() => "")
+              const jpg2 = await sharp(shot2).jpeg({ quality: 85 }).toBuffer().catch(() => null)
+              const u = jpg2
+                ? await uploadScreenshot(jpg2, `${runId}/self_assessment_${Date.now()}.jpg`, {
+                    bucket: "evidence",
+                    isPublic: true,
+                  }).catch(() => "")
+                : ""
               if (u) screenshotUrl = screenshotUrl ? `${screenshotUrl},${u}` : u
             }
             break
@@ -2288,12 +2728,33 @@ export async function checkChatbotAndConsultation(
     ]
   }
 
+  // Name any third-party chat widget that IS on the page (Intercom, Tidio,
+  // HubSpot, ...), so the report doesn't read as "this site has no chat".
+  const OTHER_CHAT: [string, RegExp][] = [
+    ["Intercom", /widget\.intercom\.io|intercom-frame|intercomcdn/i],
+    ["Drift", /js\.driftt\.com|drift-frame/i],
+    ["Tawk.to", /embed\.tawk\.to/i],
+    ["Tidio", /code\.tidio\.co/i],
+    ["LiveChat", /cdn\.livechatinc\.com/i],
+    ["Zendesk", /static\.zdassets\.com|zopim/i],
+    ["HubSpot chat", /js\.usemessages\.com|hubspot-messages/i],
+    ["Crisp", /client\.crisp\.chat/i],
+    ["Olark", /static\.olark\.com/i],
+    ["Podium", /connect\.podium\.com/i],
+    ["Birdeye", /birdeye\.com\/embed|widget\.birdeye/i],
+    ["Wix chat", /wix-chat|chat-widget\.wix/i],
+  ]
+  const otherChat = OTHER_CHAT.filter(([, re]) => re.test(source)).map(([n]) => n)
+  const otherChatNote = otherChat.length
+    ? ` A different chat widget is on the page (${otherChat.join(", ")}), but it is not the Growth99 chatbot.`
+    : ""
+
   // No integration script in source → not implemented.
   return [
     {
       check_factor: factor,
       title: "Chatbot & Virtual Consultation not installed",
-      description: `The Cliff Hanger integration script (${INTEGRATION}) was not found in the page source, so the chatbot and virtual consultation are not installed. No automatic fix — first confirm with the client's requirement whether the chatbot and virtual consultation are meant to be added for this client; if they are required, add the Cliff Hanger + Virtual Consultation codes from Basecamp.${verdict ? ` Vision: buttons ${buttonsVisible ? "visible" : "not visible"}, chatbot ${chatbotVisible ? "visible" : "not visible"}.` : ""}`,
+      description: `The Cliff Hanger integration script (${INTEGRATION}) was not found in the page source, so the chatbot and virtual consultation are not installed. No automatic fix — first confirm with the client's requirement whether the chatbot and virtual consultation are meant to be added for this client; if they are required, add the Cliff Hanger + Virtual Consultation codes from Basecamp.${otherChatNote}${verdict ? ` Vision: buttons ${buttonsVisible ? "visible" : "not visible"}, chatbot ${chatbotVisible ? "visible" : "not visible"}.` : ""}`,
       context_text: ctx,
       screenshot_url: screenshotUrl,
       status: "open",
@@ -2319,29 +2780,37 @@ export async function checkTextShareMetadata(
 
   try {
     const metaTags = await page.evaluate(() => {
-      const ogTitle = document.querySelector(
-        'meta[property="og:title"]',
-      ) as HTMLMetaElement
-      const ogSiteName = document.querySelector(
-        'meta[property="og:site_name"]',
-      ) as HTMLMetaElement
-      const twitterTitle = document.querySelector(
-        'meta[name="twitter:title"]',
-      ) as HTMLMetaElement
+      // Most sites use property="og:*"; some builders/SPAs emit name="og:*"
+      // (and twitter:* as property) — accept either spelling.
+      const content = (key: string): string | null => {
+        const el = document.querySelector(
+          `meta[property="${key}"], meta[name="${key}"]`,
+        ) as HTMLMetaElement | null
+        const v = el ? (el.getAttribute("content") || "").trim() : ""
+        return v || null
+      }
       return {
-        ogTitle: ogTitle ? ogTitle.content : null,
-        ogSiteName: ogSiteName ? ogSiteName.content : null,
-        twitterTitle: twitterTitle ? twitterTitle.content : null,
+        href: location.href,
+        hasHead: !!document.head && document.head.children.length > 0,
+        ogTitle: content("og:title"),
+        ogSiteName: content("og:site_name"),
+        twitterTitle: content("twitter:title"),
       }
     })
 
+    // The shared page never navigated (about:blank / error page): there are no
+    // tags to judge, and "missing og:title" would be a false defect.
+    if (!/^https?:/i.test(metaTags.href) || !metaTags.hasHead) {
+      throw new Error("the page did not load, so its share metadata could not be read")
+    }
+
+    // Default/placeholder titles across platforms: WordPress/Elementor
+    // boilerplate, Wix "My Site", "Untitled", template "Site Title".
+    const PLACEHOLDER_TITLE =
+      /wordpress|elementor|my blog|\bmy (site|website)\b|^untitled\b|\bsite title\b/i
+
     if (metaTags.ogTitle) {
-      const titleLower = metaTags.ogTitle.toLowerCase()
-      if (
-        titleLower.includes("wordpress") ||
-        titleLower.includes("elementor") ||
-        titleLower.includes("my blog")
-      ) {
+      if (PLACEHOLDER_TITLE.test(metaTags.ogTitle.trim())) {
         findings.push({
           check_factor: "text_share",
           title: "Text Share Metadata - Default WordPress Value Found",
@@ -2362,11 +2831,7 @@ export async function checkTextShareMetadata(
     }
 
     if (metaTags.ogSiteName) {
-      const siteNameLower = metaTags.ogSiteName.toLowerCase()
-      if (
-        siteNameLower.includes("wordpress") ||
-        siteNameLower.includes("my website")
-      ) {
+      if (/wordpress|\bmy (site|website)\b|\bsite title\b/i.test(metaTags.ogSiteName)) {
         findings.push({
           check_factor: "text_share",
           title: "Text Share Metadata - Default Site Name",
@@ -2420,7 +2885,7 @@ export async function checkCallnowLinks(
   let page: any = null
   try {
     const browser = sharedBrowser || (ownBrowser = await chromium.launch({ headless: true }))
-    context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+    context = await newRealContext(browser, { viewport: { width: 1440, height: 900 } })
     page = await context.newPage()
 
     if (onProgress) await onProgress(20, "Loading the page to look for a Call Now button...")
@@ -2431,24 +2896,70 @@ export async function checkCallnowLinks(
     await gotoStable(page, url, { waitUntil: "load", timeout: 45000 })
 
     // Collect every tel: link on the page (case-insensitive), with its number.
-    const tels: { href: string; number: string }[] = await page
-      .evaluate(() => {
-        const out: { href: string; number: string }[] = []
-        const seen = new Set<string>()
-        for (const a of Array.from(document.querySelectorAll("a"))) {
-          const href = (a.getAttribute("href") || "").trim()
-          if (!/^tel:/i.test(href) || seen.has(href)) continue
-          const s = getComputedStyle(a as HTMLElement)
-          if (s.display === "none" || s.visibility === "hidden") continue
-          seen.add(href)
-          out.push({ href, number: href.replace(/^tel:/i, "").trim() })
-        }
-        return out
-      })
-      .catch(() => [])
+    // Besides <a href="tel:">, builders wire call buttons as
+    // onclick="location.href='tel:…'" or data-href="tel:…".
+    const collectTels = (): Promise<{ href: string; number: string }[]> =>
+      page
+        .evaluate(() => {
+          const out: { href: string; number: string }[] = []
+          const seen = new Set<string>()
+          const els = Array.from(
+            document.querySelectorAll("a[href], [onclick*='tel:' i], [data-href^='tel:' i]"),
+          )
+          for (const a of els) {
+            const raw =
+              a.getAttribute("href") ||
+              a.getAttribute("data-href") ||
+              (a.getAttribute("onclick") || "").match(/tel:[^'"\s)]+/i)?.[0] ||
+              ""
+            const href = raw.trim()
+            if (!/^tel:/i.test(href) || seen.has(href)) continue
+            const s = getComputedStyle(a as HTMLElement)
+            if (s.display === "none" || s.visibility === "hidden") continue
+            seen.add(href)
+            let number = href.replace(/^tel:/i, "").trim()
+            try {
+              number = decodeURIComponent(number)
+            } catch {}
+            out.push({ href, number })
+          }
+          return out
+        })
+        .catch(() => [])
+    let tels = await collectTels()
 
     // A real call link must carry an actual phone number (≥7 digits).
-    const valid = tels.filter((t) => t.number.replace(/\D/g, "").length >= 7)
+    const isValid = (t: { number: string }) => t.number.replace(/\D/g, "").length >= 7
+    let valid = tels.filter(isValid)
+
+    // Many sites show the call button only on phones (sticky "Call Now" bar,
+    // tap-to-call header icon) and hide it on desktop. Re-check at phone width
+    // before calling it absent.
+    if (!valid.length) {
+      await page.setViewportSize({ width: 375, height: 812 }).catch(() => {})
+      await page.waitForTimeout(1000).catch(() => {})
+      tels = await collectTels()
+      valid = tels.filter(isValid)
+      // Screenshot the view where the button was found; else back to desktop.
+      if (!valid.length) await page.setViewportSize({ width: 1440, height: 900 }).catch(() => {})
+    }
+
+    // Nothing found AND the page never rendered / was bot-blocked: we can't
+    // say the site has no call button — could not complete.
+    const loadProblem = valid.length ? null : await pageLoadProblem(page)
+    if (loadProblem) {
+      return [
+        {
+          check_factor: "callnow_links",
+          title: "Call Now Check Failed",
+          description: `Could not complete: ${loadProblem}, so the page could not be checked for a Call Now button.`,
+          context_text: `URL: ${url}`,
+          screenshot_url: null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
 
     const buffer = await page.screenshot({ fullPage: false }).catch(() => null)
     const shot = buffer
@@ -2905,44 +3416,18 @@ export async function checkSocialShareHeading(
   let browser
   try {
     browser = sharedBrowser || (await chromium.launch({ headless: true }))
-    const context = await browser.newContext({
+    const context = await newRealContext(browser, {
       viewport: { width: 1920, height: 1080 },
     })
     const page = await context.newPage()
 
-    if (onProgress)
-      await onProgress(10, "Navigating to social share preview tool...")
-
-    await page.goto("https://socialsharepreview.com/", {
-      waitUntil: "networkidle",
-      timeout: 45000,
-    })
-
-    // Fill the URL and hit enter
-    const inputLocator = page
-      .locator('input[type="url"], input[type="text"]')
-      .first()
-    await inputLocator.fill(url)
-    await inputLocator.press("Enter")
-    if (onProgress) await onProgress(30, "Generating social share previews...")
-
-    // Wait for the preview result to render instead of a blind 6 s. The
-    // socialsharepreview.com tabs (Facebook / X / LinkedIn) only appear once the
-    // preview has generated, so their presence is the real "ready" signal. Cap
-    // at the original 6 s and swallow — a timeout just falls through to today's
-    // behaviour (screenshot whatever is there).
-    await page
-      .waitForSelector(".tabs-component-tab-a", { timeout: 6000 })
-      .catch(() => {})
-
     // The meta-tags capture is fully independent of the socialsharepreview tab
     // screenshots — it opens its OWN context, navigates to the target URL, and
-    // renders a snippet, never touching `page`. Kick it off now so it runs
+    // renders a snippet, never touching `page`. Kick it off first so it runs
     // concurrently with the serial per-tab captures below. Its `.catch` records
     // the error and resolves to "" so there is never an unhandled rejection; we
     // re-throw after awaiting it, preserving the original "a meta-tags failure
     // fails the whole check" semantics.
-    if (onProgress) await onProgress(95, "Capturing meta tags source code...")
     let metaTagsError: any = null
     // The parsed Open Graph / Twitter values, filled by the capture task below.
     // Gate 1 of the pass/fail verdict reads these deterministically.
@@ -2956,15 +3441,16 @@ export async function checkSocialShareHeading(
       twImage: string | null
     } | null = null
     const metaTagsTask: Promise<string> = (async () => {
-      const codeContext = await browser.newContext({
-        userAgent:
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      })
+      const codeContext = await newRealContext(browser)
       try {
         const codePage = await codeContext.newPage()
-        await codePage
-          .goto(url, { waitUntil: "networkidle", timeout: 30000 })
-          .catch(() => {})
+        // "load", not "networkidle": meta tags are in the head long before a
+        // chat/analytics-heavy page goes idle (which it often never does).
+        await gotoResilient(codePage, url, { timeout: 30000 })
+        // Without the real page every tag would read "missing" — a false
+        // defect. Fail the capture instead (→ could not complete).
+        const loadProblem = await pageLoadProblem(codePage)
+        if (loadProblem) throw new Error(`could not read the page's meta tags: ${loadProblem}`)
 
         const parsed = await codePage.evaluate(() => {
           const content = (sel: string): string | null => {
@@ -2986,9 +3472,12 @@ export async function checkSocialShareHeading(
           return {
             snippet,
             values: {
-              ogTitle: content('meta[property="og:title"]'),
-              ogDesc: content('meta[property="og:description"]'),
-              ogImage: content('meta[property="og:image"]'),
+              // og:* is normally property=; some builders emit name=.
+              ogTitle: content('meta[property="og:title"]') || content('meta[name="og:title"]'),
+              ogDesc:
+                content('meta[property="og:description"]') ||
+                content('meta[name="og:description"]'),
+              ogImage: content('meta[property="og:image"]') || content('meta[name="og:image"]'),
               twCard:
                 content('meta[name="twitter:card"]') ||
                 content('meta[property="twitter:card"]'),
@@ -3023,48 +3512,86 @@ export async function checkSocialShareHeading(
       return ""
     })
 
-    // Per-tab wait after a click: the tabs are client-rendered and may lazy-load
-    // the preview image, so wait for the network to settle instead of a blind
-    // 2 s. Capped at the original 2 s and swallowed — worst case matches today.
-    const settleTab = () =>
-      page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {})
+    // The share-preview tool (socialsharepreview.com) is a third-party site we
+    // don't control. If it is down, slow or changes its markup, the meta-tag
+    // gate below still gives a real verdict — so its failure is not fatal.
+    let fbBuffer: Buffer | null = null
+    let xBuffer: Buffer | null = null
+    let lnBuffer: Buffer | null = null
+    let previewError = ""
+    try {
+      if (onProgress)
+        await onProgress(10, "Navigating to social share preview tool...")
 
-    // Capture Facebook tab
-    if (onProgress) await onProgress(50, "Capturing Facebook preview...")
-    const fbTab = page
-      .locator('.tabs-component-tab-a:has-text("Facebook")')
-      .first()
-    if ((await fbTab.count()) > 0) await fbTab.click()
-    await settleTab()
-    const fbBuffer = await page.screenshot()
-    facebookUrl = await uploadScreenshot(
-      fbBuffer,
-      `${runId}/${pageId}/social_fb.png`,
-    )
+      const nav = await gotoResilient(page, "https://socialsharepreview.com/", { timeout: 45000 })
+      if (!nav.ok) throw new Error(nav.error || "share-preview tool did not load")
 
-    // Capture X tab
-    if (onProgress) await onProgress(70, "Capturing X (Twitter) preview...")
+      // Fill the URL and hit enter
+      const inputLocator = page
+        .locator('input[type="url"], input[type="text"]')
+        .first()
+      await inputLocator.fill(url, { timeout: 10000 })
+      await inputLocator.press("Enter", { timeout: 5000 })
+      if (onProgress) await onProgress(30, "Generating social share previews...")
 
-    const xTab = page.locator('.tabs-component-tab-a:has-text("X")').first()
-    if ((await xTab.count()) > 0) await xTab.click()
-    await settleTab()
-    const xBuffer = await page.screenshot()
-    xUrl = await uploadScreenshot(xBuffer, `${runId}/${pageId}/social_x.png`)
+      // Wait for the preview result to render instead of a blind 6 s. The
+      // socialsharepreview.com tabs (Facebook / X / LinkedIn) only appear once the
+      // preview has generated, so their presence is the real "ready" signal. Cap
+      // at the original 6 s and swallow — a timeout just falls through to today's
+      // behaviour (screenshot whatever is there).
+      await page
+        .waitForSelector(".tabs-component-tab-a", { timeout: 6000 })
+        .catch(() => {})
 
-    // Capture LinkedIn tab
-    if (onProgress) await onProgress(90, "Capturing LinkedIn preview...")
+      // Per-tab wait after a click: the tabs are client-rendered and may lazy-load
+      // the preview image, so wait for the network to settle instead of a blind
+      // 2 s. Capped at the original 2 s and swallowed — worst case matches today.
+      const settleTab = () =>
+        page.waitForLoadState("networkidle", { timeout: 2000 }).catch(() => {})
 
-    const lnTab = page
-      .locator('.tabs-component-tab-a:has-text("LinkedIn")')
-      .first()
+      // Capture Facebook tab
+      if (onProgress) await onProgress(50, "Capturing Facebook preview...")
+      const fbTab = page
+        .locator('.tabs-component-tab-a:has-text("Facebook")')
+        .first()
+      if ((await fbTab.count()) > 0) await fbTab.click({ timeout: 5000 }).catch(() => {})
+      await settleTab()
+      fbBuffer = await page.screenshot().catch(() => null)
+      if (fbBuffer)
+        facebookUrl = await uploadScreenshot(
+          fbBuffer,
+          `${runId}/${pageId}/social_fb.png`,
+        ).catch(() => "")
 
-    if ((await lnTab.count()) > 0) await lnTab.click()
-    await settleTab()
-    const lnBuffer = await page.screenshot()
-    linkedinUrl = await uploadScreenshot(
-      lnBuffer,
-      `${runId}/${pageId}/social_ln.png`,
-    )
+      // Capture X tab
+      if (onProgress) await onProgress(70, "Capturing X (Twitter) preview...")
+
+      const xTab = page.locator('.tabs-component-tab-a:has-text("X")').first()
+      if ((await xTab.count()) > 0) await xTab.click({ timeout: 5000 }).catch(() => {})
+      await settleTab()
+      xBuffer = await page.screenshot().catch(() => null)
+      if (xBuffer)
+        xUrl = await uploadScreenshot(xBuffer, `${runId}/${pageId}/social_x.png`).catch(() => "")
+
+      // Capture LinkedIn tab
+      if (onProgress) await onProgress(90, "Capturing LinkedIn preview...")
+
+      const lnTab = page
+        .locator('.tabs-component-tab-a:has-text("LinkedIn")')
+        .first()
+
+      if ((await lnTab.count()) > 0) await lnTab.click({ timeout: 5000 }).catch(() => {})
+      await settleTab()
+      lnBuffer = await page.screenshot().catch(() => null)
+      if (lnBuffer)
+        linkedinUrl = await uploadScreenshot(
+          lnBuffer,
+          `${runId}/${pageId}/social_ln.png`,
+        ).catch(() => "")
+    } catch (e: any) {
+      previewError = String(e?.message || e)
+      logger.warn({ url, error: previewError }, "Social share: preview tool unavailable")
+    }
 
     // Join the concurrent meta-tags capture and preserve its failure semantics.
     metaTagsUrl = await metaTagsTask
@@ -3128,14 +3655,20 @@ export async function checkSocialShareHeading(
     ) as Buffer[]
     const visionPrompt =
       'These images are social-share preview cards for the SAME web page — Facebook, X (Twitter) and LinkedIn — from a share-preview tool. Decide whether the page\'s social share is configured CORRECTLY: each card should show a meaningful title and description AND a real, fully-loaded share image (NOT a broken/blank/placeholder image, NOT a generic default, NOT just the bare URL). Answer with JSON only: {"configured": true|false, "reason": "one short sentence"}.'
-    const vision = await describeImageResult(visionBuffers, visionPrompt)
+    const vision = visionBuffers.length
+      ? await describeImageResult(visionBuffers, visionPrompt)
+      : { ok: false, text: "", error: `share-preview tool unavailable: ${previewError || "no preview captured"}` }
 
-    if (!sharedBrowser) await browser.close()
+    await context.close().catch(() => {})
+    if (!sharedBrowser) await browser.close().catch(() => {})
 
-    // Gate 2 unavailable (no key / every provider errored) → we cannot confirm
-    // the preview, so keep the historical "please verify" review behaviour
-    // rather than invent a verdict.
-    if (!vision.ok) {
+    // Gate 2 unavailable (no key / every provider errored / the preview tool
+    // was down) and gate 1 already failed: the missing tags are a real,
+    // deterministic defect — report them (handled by the !metaOk branch below).
+    // Gate 2 unavailable and the tags are fine → we cannot confirm the
+    // preview, so keep the historical "please verify" review behaviour rather
+    // than invent a verdict.
+    if (!vision.ok && metaOk) {
       return [
         {
           check_factor: "social_share_heading",
@@ -3154,7 +3687,7 @@ export async function checkSocialShareHeading(
 
     let visionOk = false
     let visionReason = ""
-    try {
+    if (vision.ok) try {
       const j = JSON.parse(
         (vision.text || "").match(/\{[\s\S]*\}/)?.[0] || "{}",
       )
@@ -3188,7 +3721,7 @@ export async function checkSocialShareHeading(
     // FAIL — required tags missing / placeholder. The title names the exact
     // tags so applySeoOgGitops can backfill them.
     if (!metaOk) {
-      const previewNote = visionOk
+      const previewNote = visionOk || !vision.ok
         ? ""
         : ` The AI preview check also did not confirm the share cards render correctly${visionReason ? ` (${visionReason})` : ""}.`
       return [
@@ -3302,24 +3835,81 @@ export async function checkLogoOnChatbot(
   let context: any = null
   try {
     browser = sharedBrowser || (await chromium.launch({ headless: true }))
-    context = await browser.newContext({
-      viewport: { width: 1920, height: 1080 },
-      userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    })
+    context = await newRealContext(browser, { viewport: { width: 1920, height: 1080 } })
     const page = await context.newPage()
 
     if (onProgress) await onProgress(10, "Loading homepage for chatbot logo check...")
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {})
-    // The launcher waitFor below (12 s, visible) is the real "widget mounted"
-    // signal, so the blind 6 s that used to sit here was redundant on top of it.
+    await gotoResilient(page, url, { waitUntil: "domcontentloaded", timeout: 30000 })
+    // The launcher wait below (12 s) is the real "widget mounted" signal, so
+    // the blind 6 s that used to sit here was redundant on top of it.
+
+    // A page that never rendered (or a bot challenge) has no launcher to find:
+    // could not complete, not "No chatbot logo found".
+    const loadProblem = await pageLoadProblem(page)
+    if (loadProblem) {
+      return [
+        {
+          check_factor: CHECK_FACTOR,
+          title: "Logo on Chatbot Check Failed",
+          description: `Could not complete: ${loadProblem}, so the chatbot toggle could not be checked.`,
+          context_text: `Homepage: ${url}`,
+          screenshot_url: null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
 
     if (onProgress) await onProgress(40, "Locating the chatbot toggle...")
-    const launcher = page.locator(LAUNCHER_SELECTOR).first()
-    const found = await launcher
-      .waitFor({ state: "visible", timeout: 12000 })
+    // `.first()` of the selector list can be a hidden element (or a "Chat with
+    // us" nav link) while the real launcher is a later match. Pick the visible,
+    // launcher-sized match, preferring one pinned in a bottom corner, and mark
+    // it. Third-party launchers rendered inside an iframe are matched by the
+    // iframe itself. Polls until it mounts (capped at 12 s).
+    const LAUNCHER_MARK = "data-qacc-launcher"
+    const found = await page
+      .waitForFunction(
+        ({ sel, mark }: { sel: string; mark: string }) => {
+          let list: Element[] = []
+          try {
+            list = Array.from(
+              document.querySelectorAll(
+                `${sel}, iframe[title*='chat' i], iframe[id*='chat' i], iframe[name*='chat' i], iframe[class*='launcher' i]`,
+              ),
+            )
+          } catch {
+            return false
+          }
+          const vw = window.innerWidth
+          const vh = window.innerHeight
+          const sized = list.filter((el) => {
+            const r = el.getBoundingClientRect()
+            const cs = getComputedStyle(el)
+            return (
+              r.width >= 16 &&
+              r.height >= 16 &&
+              r.width <= 420 &&
+              r.height <= 420 &&
+              cs.display !== "none" &&
+              cs.visibility !== "hidden" &&
+              Number(cs.opacity || "1") > 0.05
+            )
+          })
+          if (!sized.length) return false
+          const corner = sized.find((el) => {
+            const r = el.getBoundingClientRect()
+            return r.bottom > vh * 0.6 && r.bottom <= vh + 5 && (r.left < vw * 0.25 || r.right > vw * 0.75)
+          })
+          document.querySelectorAll(`[${mark}]`).forEach((e) => e.removeAttribute(mark))
+          ;(corner || sized[0]).setAttribute(mark, "1")
+          return true
+        },
+        { sel: LAUNCHER_SELECTOR, mark: LAUNCHER_MARK },
+        { timeout: 12000, polling: 500 },
+      )
       .then(() => true)
       .catch(() => false)
+    const launcher = page.locator(`[${LAUNCHER_MARK}]`).first()
 
     // No toggle → FAIL, with a bottom-corner homepage thumbnail as evidence.
     if (!found) {
@@ -3369,6 +3959,9 @@ export async function checkLogoOnChatbot(
       "header a[href='/'] img, header a[href$='/'] img",
       "[role='banner'] img[alt*='logo' i], header img[alt*='logo' i]",
       "img[class*='logo' i], [class*='logo' i] img",
+      // Inline-SVG and home-link logos (Webflow, Squarespace, Wix, SPAs).
+      "header [class*='logo' i] svg, [class*='logo' i] svg, header a[href='/'] svg",
+      "a[aria-label*='home' i] img, a[href='/'] img, a[class*='brand' i] img, [class*='brand' i] img",
       "header img, [role='banner'] img, .site-header img, #masthead img, nav img",
     ]
     let headerBuf: Buffer | null = null

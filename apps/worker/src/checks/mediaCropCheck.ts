@@ -1,5 +1,6 @@
 import { Browser } from "playwright"
 import { Finding } from "@qacc/shared"
+import { DESKTOP_UA, TABLET_UA, MOBILE_UA, realContextOptions, launchStealthBrowser, gotoResilient, looksBlocked } from "../lib/browserContext"
 
 /**
  * QA Media Crop — images & videos cut off at desktop / tablet / mobile
@@ -39,9 +40,6 @@ const MIN_NATURAL = 100
 const MAX_CANDIDATES = 80
 const MAX_FLAGGED_PER_VIEWPORT = 8
 
-const DESKTOP_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-
 export const VIEWPORTS: {
   name: "desktop" | "tablet" | "mobile"
   label: string
@@ -57,7 +55,7 @@ export const VIEWPORTS: {
     width: 768,
     height: 1024,
     mobile: true,
-    ua: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    ua: TABLET_UA,
   },
   {
     name: "mobile",
@@ -65,7 +63,7 @@ export const VIEWPORTS: {
     width: 390,
     height: 844,
     mobile: true,
-    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    ua: MOBILE_UA,
   },
 ]
 
@@ -164,6 +162,13 @@ function collectMediaFacts(args: {
     ".wp-block-cover__image-background",
     ".wp-block-cover__video-background",
     ".wp-block-cover__background",
+    // Other builders / platforms' section-background media.
+    ".et_pb_section_video_bg",
+    ".fl-bg-video",
+    ".w-background-video",
+    ".section-background",
+    "[data-testid='bgMedia'], [id^='bgMedia'], [class*='bgLayers']",
+    "[class*='video-background' i], [class*='background-video' i], [class*='bg-video' i]",
   ].join(",")
   const SLIDER_SEL = [
     ".swiper",
@@ -179,6 +184,10 @@ function collectMediaFacts(args: {
     ".splide",
     ".glide",
     ".wp-block-jetpack-slideshow",
+    // Generic slider / carousel markup on any site.
+    "[aria-roledescription='carousel'], [aria-roledescription='slide']",
+    ".w-slider, .embla, .keen-slider, .flickity-viewport, .carousel",
+    "[class*='carousel' i], [class*='slider' i], [class*='slideshow' i]",
   ].join(",")
 
   // The device width, not window.innerWidth: mobile emulation widens the
@@ -188,6 +197,24 @@ function collectMediaFacts(args: {
   const out: MediaFacts[] = []
   const els = Array.from(document.querySelectorAll("img, video")) as (HTMLImageElement | HTMLVideoElement)[]
   let idx = 0
+  // Background media built without a known class: absolutely positioned and
+  // filling a parent that also shows text over it (a section/hero background,
+  // Next.js `<Image fill>`, Squarespace/Wix section images). It is meant to
+  // crop to whatever shape the section takes, so it is not a defect.
+  const isLayeredBackground = (el: Element, cs: CSSStyleDeclaration, r: DOMRect): boolean => {
+    if (cs.position !== "absolute" && cs.position !== "fixed") return false
+    let host = el.parentElement
+    for (let d = 0; host && d < 3; d++, host = host.parentElement) {
+      const hr = host.getBoundingClientRect()
+      if (hr.width < 1 || hr.height < 1) continue
+      const covers = (r.width * r.height) / (hr.width * hr.height)
+      if (covers < 0.85) continue
+      const text = (host.textContent || "").replace(/\s+/g, " ").trim()
+      if (text.length >= 3) return true
+    }
+    return false
+  }
+
   for (const el of els) {
     if (out.length >= args.max) break
     if (el.closest(BACKGROUND_SEL)) continue
@@ -195,6 +222,7 @@ function collectMediaFacts(args: {
     if (cs.display === "none" || cs.visibility === "hidden" || Number(cs.opacity) === 0) continue
     const r = el.getBoundingClientRect()
     if (r.width < args.minW || r.height < args.minH || r.width * r.height < args.minArea) continue
+    if (isLayeredBackground(el, cs, r)) continue
 
     const isVideo = el.tagName === "VIDEO"
     let src = ""
@@ -305,36 +333,39 @@ export async function checkMediaCrop(
   let mediaSeen = 0
 
   try {
-    if (!browser) {
-      const { chromium } = require("playwright")
-      ownBrowser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] })
-    }
+    if (!browser) ownBrowser = await launchStealthBrowser()
 
     for (let v = 0; v < VIEWPORTS.length; v++) {
       const vp = VIEWPORTS[v]
       const base = 5 + v * 30
       let context: any = null
       try {
-        context = await (browser || ownBrowser).newContext({
-          viewport: { width: vp.width, height: vp.height },
-          userAgent: vp.ua,
-          ...(vp.mobile ? { isMobile: true, hasTouch: true } : {}),
-        })
+        context = await (browser || ownBrowser).newContext(
+          realContextOptions({
+            viewport: { width: vp.width, height: vp.height },
+            userAgent: vp.ua,
+            ...(vp.mobile ? { isMobile: true, hasTouch: true } : {}),
+          }),
+        )
         const page = await context.newPage()
         context.on("page", (p: any) => (p === page ? null : p.close().catch(() => {})))
 
         if (onProgress) await onProgress(base, `Loading page at ${vp.label} width...`)
-        let status = 0
-        try {
-          const resp = await page.goto(pageUrl, { waitUntil: "load", timeout: 60000 })
-          status = resp?.status() || 0
-        } catch (e: any) {
-          if (!/Timeout|aborted|closed/i.test(e?.message || "")) throw e
-          failed.push(`${vp.label}: page load timed out`)
+        // A "load" timeout is not fatal — the page is usually rendered and a
+        // chat widget / beacon just never finishes. A real navigation failure,
+        // an HTTP error or a bot-challenge page means this width can't be judged.
+        const nav = await gotoResilient(page, pageUrl, { timeout: 60000 })
+        const status = nav.status || 0
+        if (!nav.ok) {
+          failed.push(`${vp.label}: page did not load`)
           continue
         }
         if (status >= 400) {
           failed.push(`${vp.label}: HTTP ${status}`)
+          continue
+        }
+        if (await looksBlocked(page)) {
+          failed.push(`${vp.label}: blocked by bot protection`)
           continue
         }
 
@@ -343,7 +374,8 @@ export async function checkMediaCrop(
           await page.evaluate(async () => {
             const step = Math.max(400, Math.floor(window.innerHeight * 0.8))
             const deadline = Date.now() + 20000
-            for (let y = 0; y < document.body.scrollHeight && Date.now() < deadline; y += step) {
+            const height = () => (document.body ? document.body.scrollHeight : 0)
+            for (let y = 0; y < height() && Date.now() < deadline; y += step) {
               window.scrollTo(0, y)
               await new Promise((r) => setTimeout(r, 200))
             }

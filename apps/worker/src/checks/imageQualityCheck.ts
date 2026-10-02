@@ -3,6 +3,7 @@ import { Finding, aiFailureReason } from "@qacc/shared"
 import { describeImageResult } from "../lib/aiFallback"
 import pLimit from "p-limit"
 import { createHash } from "crypto"
+import { newRealContext, gotoResilient, looksBlocked } from "../lib/browserContext"
 
 /**
  * QA Image Quality — watermark & blur (per-image)
@@ -31,9 +32,85 @@ const MAX_ISSUES = 30
 
 interface ImgInfo {
   src: string
-  naturalWidth: number
+  naturalWidth: number // 0 = not known yet (lazy image never decoded)
   naturalHeight: number
   outerHTML: string
+}
+
+/**
+ * Runs in the page. Every content image, whatever the site builder:
+ *   • <img>/<picture> — src/currentSrc, then lazy-load attributes
+ *     (data-src, data-lazy-src, data-srcset …) when src is still a placeholder;
+ *   • CSS background images — only used when the page has no usable <img>
+ *     (Squarespace/Wix-style hero blocks), so WP results are unchanged.
+ * Plain JS only (no TS helpers are visible in there).
+ */
+function collectImages(minDim: number): { imgs: ImgInfo[]; bgs: ImgInfo[] } {
+  const abs = (u: string) => {
+    try {
+      return new URL(u, document.baseURI).href
+    } catch {
+      return ""
+    }
+  }
+  const largestFromSrcset = (ss: string): string => {
+    let best = ""
+    let bestW = 0
+    for (const part of (ss || "").split(",")) {
+      const [u, d] = part.trim().split(/\s+/)
+      const w = parseFloat(d || "0") || 1
+      if (u && w >= bestW) {
+        best = u
+        bestW = w
+      }
+    }
+    return best
+  }
+  const isPlaceholder = (u: string) => !u || /^data:/i.test(u) || /^about:/i.test(u)
+  const imgs: ImgInfo[] = []
+  for (const img of Array.from(document.querySelectorAll("img")).slice(0, 2000) as HTMLImageElement[]) {
+    // src first (same file the WP path always used), currentSrc for <picture>.
+    let src = img.src || img.currentSrc || ""
+    let lazy = false
+    if (isPlaceholder(src) || !img.naturalWidth) {
+      const alt =
+        img.getAttribute("data-src") ||
+        img.getAttribute("data-lazy-src") ||
+        img.getAttribute("data-original") ||
+        largestFromSrcset(
+          img.getAttribute("data-srcset") || img.getAttribute("data-lazy-srcset") || img.getAttribute("srcset") || "",
+        )
+      if (alt && !isPlaceholder(alt)) {
+        lazy = true
+        src = alt
+      }
+    }
+    src = isPlaceholder(src) ? "" : abs(src)
+    // A lazy image that never decoded has no natural size: judge it by its box
+    // (or let the download decide, below) instead of dropping it.
+    const r = img.getBoundingClientRect()
+    const nw = lazy ? 0 : img.naturalWidth || 0
+    const nh = lazy ? 0 : img.naturalHeight || 0
+    if (!nw && r.width && r.height && (r.width < minDim || r.height < minDim)) continue
+    imgs.push({ src, naturalWidth: nw, naturalHeight: nh, outerHTML: (img.outerHTML || "").substring(0, 300) })
+  }
+  const bgs: ImgInfo[] = []
+  const all = document.body ? Array.from(document.body.querySelectorAll("*")).slice(0, 6000) : []
+  for (const el of all) {
+    if (bgs.length >= 30) break
+    const r = el.getBoundingClientRect()
+    if (r.width < minDim || r.height < minDim) continue
+    const bg = getComputedStyle(el).backgroundImage
+    const m = bg && bg !== "none" ? bg.match(/url\(["']?([^"')]+)["']?\)/) : null
+    if (!m || isPlaceholder(m[1])) continue
+    bgs.push({
+      src: abs(m[1]),
+      naturalWidth: Math.round(r.width),
+      naturalHeight: Math.round(r.height),
+      outerHTML: `<${el.tagName.toLowerCase()} style="background-image">`,
+    })
+  }
+  return { imgs, bgs }
 }
 
 export async function checkImageQuality(
@@ -91,55 +168,87 @@ export async function checkImageQuality(
 
   try {
     const { chromium } = require("playwright")
-    context = await (browser || (await chromium.launch({ headless: true }))).newContext({
-      viewport: { width: 1440, height: 900 },
-    })
+    // Real browser UA + tolerant TLS: a bare context sends "HeadlessChrome",
+    // which Cloudflare-fronted sites answer with a 403 challenge page.
+    context = await newRealContext(browser || (await chromium.launch({ headless: true })))
     page = await context.newPage()
 
     if (onProgress) await onProgress(10, "Loading page for image quality...")
-    let loadOk = true
-    try {
-      await page.goto(pageUrl, { waitUntil: "load", timeout: 60000 })
-    } catch (e: any) {
-      if (
-        !(
-          e.message?.includes("Timeout") ||
-          e.message?.includes("aborted") ||
-          e.message?.includes("closed")
-        )
-      ) {
-        throw e
-      }
-      // Page did not finish loading. Remember this so we never emit a clean
-      // "no issues" pass over a page that never rendered.
-      loadOk = false
-    }
+    // gotoResilient never throws. A timeout still leaves a usable page, but we
+    // remember it so we never emit a clean "no issues" pass over a page that
+    // never rendered; a hard navigation error (DNS, refused) is the same.
+    const nav = await gotoResilient(page, pageUrl, { timeout: 60000 })
+    const loadOk = nav.ok && !nav.error
+    if (!nav.ok) throw new Error(nav.error || "page could not be loaded")
     await page.waitForTimeout(500)
 
-    // Enumerate images (same pattern as imageComplianceCheck / heroMediaCheck).
-    const imgs: ImgInfo[] = await page.evaluate(() =>
-      Array.from(document.querySelectorAll("img")).map((img: any) => ({
-        src: img.src,
-        naturalWidth: img.naturalWidth,
-        naturalHeight: img.naturalHeight,
-        outerHTML: (img.outerHTML || "").substring(0, 300),
-      })),
-    )
+    // A bot-challenge page has no content images; "no issues" there is false.
+    if (await looksBlocked(page)) {
+      const text: string = await page.evaluate(() => document.body?.innerText || "").catch(() => "")
+      if (text.length < 3000) {
+        return [
+          {
+            check_factor: CHECK_FACTOR,
+            title: "Image Quality Check Failed",
+            description:
+              "Could not complete: the site served a bot-protection page to the QACC browser, so its images could not be checked. Process aborted gracefully.",
+            context_text: `Page: ${pageUrl}\nSystem Error: bot protection`,
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding,
+        ]
+      }
+    }
+
+    // Scroll through the page (bounded) so lazy-loaded images get real sources.
+    await page
+      .evaluate(async () => {
+        const step = Math.max(400, Math.floor(window.innerHeight * 0.8))
+        const deadline = Date.now() + 8000
+        const max = Math.min(document.body?.scrollHeight || 0, 30000)
+        for (let y = 0; y < max && Date.now() < deadline; y += step) {
+          window.scrollTo(0, y)
+          await new Promise((r) => setTimeout(r, 150))
+        }
+        window.scrollTo(0, 0)
+        const pending = Array.from(document.images).filter((i) => !i.complete)
+        await Promise.race([
+          Promise.all(pending.map((i) => new Promise((r) => ((i.onload = r), (i.onerror = r))))),
+          new Promise((r) => setTimeout(r, 3000)),
+        ])
+      })
+      .catch(() => {})
+
+    // Enumerate images; an evaluate that fails (page navigated itself, odd DOM)
+    // is retried once after the page settles.
+    let collected: { imgs: ImgInfo[]; bgs: ImgInfo[] }
+    try {
+      collected = await page.evaluate(collectImages, MIN_DIMENSION)
+    } catch {
+      await page.waitForTimeout(1500)
+      collected = await page.evaluate(collectImages, MIN_DIMENSION)
+    }
 
     // Filter to real content images: no data:/svg, big enough, deduped, capped.
-    const seen = new Set<string>()
-    const candidates = imgs
-      .filter(
-        (im) =>
-          im.src &&
-          !/^data:/i.test(im.src) &&
-          !/\.svg(\?|$)/i.test(im.src) &&
-          im.naturalWidth >= MIN_DIMENSION &&
-          im.naturalHeight >= MIN_DIMENSION,
-      )
-      .filter((im) => (seen.has(im.src) ? false : (seen.add(im.src), true)))
-      .sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight)
-      .slice(0, MAX_IMAGES)
+    // Unknown size (lazy, never decoded) is kept here and judged after download.
+    const usable = (list: ImgInfo[]) => {
+      const seen = new Set<string>()
+      return list
+        .filter(
+          (im) =>
+            im.src &&
+            /^https?:/i.test(im.src) &&
+            !/\.svg(\?|$)/i.test(im.src) &&
+            ((im.naturalWidth >= MIN_DIMENSION && im.naturalHeight >= MIN_DIMENSION) ||
+              (!im.naturalWidth && !im.naturalHeight)),
+        )
+        .filter((im) => (seen.has(im.src) ? false : (seen.add(im.src), true)))
+        .sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight)
+        .slice(0, MAX_IMAGES)
+    }
+    let candidates = usable(collected.imgs)
+    if (candidates.length === 0) candidates = usable(collected.bgs)
 
     if (onProgress)
       await onProgress(30, `Downloading & checking ${candidates.length} image(s)...`)
@@ -169,12 +278,27 @@ export async function checkImageQuality(
     // Concurrency is capped at 3 (not all 15) to avoid holding many full image
     // buffers in memory at once on the 4 GB box.
     const dlLimit = pLimit(3)
+    // Lazy images whose real file turned out to be an icon/logo (not a failure).
+    let tooSmall = 0
     const buffers: (Buffer | null)[] = await Promise.all(
       candidates.map((im) =>
         dlLimit(async () => {
           try {
-            const resp = await context.request.get(im.src, { timeout: 20000 })
-            if (resp.ok()) return await resp.body()
+            // Referer: some image CDNs refuse hotlinked (no-referer) requests.
+            const resp = await context.request.get(im.src, {
+              timeout: 20000,
+              headers: { Referer: pageUrl },
+            })
+            if (!resp.ok() || /svg|html/i.test(resp.headers()["content-type"] || "")) return null
+            const body: Buffer = await resp.body()
+            if (im.naturalWidth) return body
+            // Size was unknown (lazy image): apply the icon/logo filter now.
+            const meta = await sharp(body).metadata().catch(() => null)
+            if (meta && ((meta.width || 0) < MIN_DIMENSION || (meta.height || 0) < MIN_DIMENSION)) {
+              tooSmall++
+              return null
+            }
+            return body
           } catch {
             return null
           }
@@ -272,7 +396,7 @@ export async function checkImageQuality(
         status: "open",
         ai_generated: false,
       } as Finding)
-    } else if (candidates.length > 0 && checked === 0) {
+    } else if (candidates.length - tooSmall > 0 && checked === 0) {
       // There were images to inspect but none could be downloaded/decoded —
       // reporting "no issues" here would be a false clean pass.
       findings.push({
@@ -284,7 +408,7 @@ export async function checkImageQuality(
         status: "open",
         ai_generated: false,
       } as Finding)
-    } else if (candidates.length === 0) {
+    } else if (candidates.length - tooSmall <= 0) {
       // Nothing to inspect — a page without content images is not a defect.
       findings.push({
         check_factor: CHECK_FACTOR,

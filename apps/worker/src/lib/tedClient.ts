@@ -66,6 +66,7 @@ async function fetchClientIndex(): Promise<ClientIndex | null> {
   try {
     const r = await fetch(`${TED_BASE}/clients`, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(30000),
     })
     if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) {
       return null
@@ -111,6 +112,8 @@ export async function getClient(
 
   const wantId = String(clientIdOrName).trim()
   const wantName = wantId.toLowerCase()
+  // An empty key would substring-match the FIRST client in the list.
+  if (!wantId) return null
   return (
     idx.byId.get(wantId) ||
     idx.byName.get(wantName) ||
@@ -348,6 +351,7 @@ async function tedGetJson(pathAndQuery: string): Promise<any | null> {
   try {
     const r = await fetch(`${TED_BASE}${pathAndQuery}`, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(30000),
     })
     if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) return null
     return await r.json()

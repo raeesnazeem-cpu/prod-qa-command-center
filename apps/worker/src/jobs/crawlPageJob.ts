@@ -36,6 +36,7 @@ import { checkBlogVerification } from "../checks/blogVerificationCheck"
 import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkImageRelevance } from "../checks/imageRelevanceCheck"
 import { checkMediaCrop } from "../checks/mediaCropCheck"
+import { checkBlogSidebar } from "../checks/blogSidebarCheck"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
 import { checkAccessibility } from "../checks/accessibilityCheck"
@@ -68,6 +69,7 @@ import {
 import { persistScanCheckResults } from "../lib/runResults"
 import type { ThemeType } from "../lib/themeType"
 import pLimit from "p-limit"
+import { gotoResilient, looksBlocked, newRealContext } from "../lib/browserContext"
 import pino from "pino"
 
 // How many browser-owning / HTTP checks may run at once on a single page.
@@ -109,6 +111,62 @@ function lapse(checkFactor: string) {
       },
     ]
   }
+}
+
+// Checks that only run on the homepage (see the HOMEPAGE-ONLY block below).
+const HOMEPAGE_ONLY_KEYS = new Set([
+  "hero_media", "privacy_policy", "footer_logo", "hamburger_menu", "blog_verification",
+  "top_bar_sticky", "favicon", "chatbot_consultation", "logo_chatbot", "text_share",
+  "callnow_links", "url_tab_compare", "verify_plugin_updates", "plugin_number",
+  "live_site_link", "page_speed", "backend_check", "review_reputation_check",
+  "gbp_check", "social_share_heading", "single_script", "gsr_check",
+])
+// Standalone API checks run as their own jobs, never per page.
+const NON_PAGE_KEYS = new Set(["project_plan", "paid_media", "video_recording"])
+
+const sameSiteUrl = (u: string) =>
+  String(u || "")
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/\/$/, "")
+    .toLowerCase()
+
+/**
+ * A page QACC could not load (DNS/connection error, or a bot-protection page).
+ * Instead of running every check against an error page — or recording nothing,
+ * which the report would show as a pass — write one "could not complete" row
+ * per check that would have run on this page, and mark the page done.
+ */
+async function recordUnscannablePage(
+  runId: string,
+  pageId: string,
+  pageUrl: string,
+  run: any,
+  enabledChecks: string[],
+  reason: string,
+): Promise<void> {
+  const isHomepage = sameSiteUrl(pageUrl) === sameSiteUrl(run.site_url)
+  const keys = enabledChecks.filter(
+    (k) =>
+      !NON_PAGE_KEYS.has(k) &&
+      (isHomepage || !HOMEPAGE_ONLY_KEYS.has(k)) &&
+      // image_relevance never runs on the homepage.
+      !(isHomepage && k === "image_relevance"),
+  )
+  const rows = keys.map((k) => ({
+    ...lapse(k)(new Error(`${reason} — ${pageUrl}`))[0],
+    page_id: pageId,
+    run_id: runId,
+  }))
+  if (rows.length > 0) {
+    const { error } = await supabase.from("findings").insert(rows)
+    if (error) logger.error({ pageId, error: error.message }, "Failed to record unscannable page")
+  }
+  await supabase
+    .from("pages")
+    .update({ status: "done", progress: 100, current_step: `Could not scan: ${reason}` })
+    .eq("id", pageId)
+  logger.warn({ runId, pageUrl, reason, checks: keys.length }, "Page not scannable; recorded as could-not-complete")
 }
 
 export async function processCrawlPageJob(job: Job) {
@@ -360,7 +418,9 @@ export async function processCrawlPageJob(job: Job) {
 
     try {
       if (!isOnlyFastScanChecks) {
-        context = await browser.newContext()
+        // Real UA + tolerant TLS: a bare context sends "HeadlessChrome", which
+        // Cloudflare and other bot filters block on many non-WordPress sites.
+        context = await newRealContext(browser)
         page = await context.newPage()
 
         // Console error check listener must be attached before goto
@@ -383,21 +443,34 @@ export async function processCrawlPageJob(job: Job) {
           10,
           "Navigating to website (this takes a moment)...",
         )
-        try {
-          await page.goto(pageUrl, { waitUntil: "load", timeout: 60000 })
-        } catch (e: any) {
-          if (
-            e.message.includes("Timeout") ||
-            e.message.includes("aborted") ||
-            e.message.includes("closed")
-          ) {
-            logger.warn(
-              { pageUrl, error: e.message },
-              "Page load timed out or was aborted, proceeding with checks anyway",
-            )
-          } else {
-            throw e
+        // Never throws: a timeout still leaves a usable page, and a hard load
+        // error gets one retry on domcontentloaded.
+        const nav = await gotoResilient(page, pageUrl, { timeout: 60000 })
+        if (!nav.ok) {
+          logger.warn({ pageUrl, error: nav.error }, "Page could not be loaded")
+        }
+
+        // A bot-challenge page (Cloudflare "Just a moment", captcha) is not the
+        // site. Give an automatic challenge a few seconds to clear first.
+        let blocked = nav.ok && (await looksBlocked(page))
+        if (blocked) {
+          await page.waitForTimeout(8000).catch(() => {})
+          blocked = await looksBlocked(page)
+        }
+
+        if (!nav.ok || blocked) {
+          const reason = blocked
+            ? "the site blocked the scanner (bot protection / captcha page)"
+            : `the page could not be loaded (${String(nav.error || "unknown error").split("\n")[0]})`
+          // Let BullMQ retry first; only the last attempt records the result.
+          const attempts = Number(job.opts?.attempts || 1)
+          if ((job.attemptsMade || 0) + 1 < attempts) {
+            throw new Error(`Page not scannable: ${reason}`)
           }
+          // Record the page as could-not-check for every check that would have
+          // run here, so the report says so instead of showing a silent pass.
+          await recordUnscannablePage(runId, pageId, pageUrl, run, job.data.overrideChecks || run?.enabled_checks || [], reason)
+          return
         }
         await updateProgress(15, "Website loaded, initializing checks...")
 
@@ -456,6 +529,20 @@ export async function processCrawlPageJob(job: Job) {
       ) => {
         checkPromises.push(
           sharedPageLane(() => timeCheck(runId, name, pageUrl, factory)),
+        )
+      }
+
+      // Blog sidebar — FULL SCAN ONLY, every page (silent unless the page is a
+      // blog post). Scheduled FIRST on the serial shared-page lane, so it reads
+      // the page exactly as crawled: no other check has clicked, submitted a
+      // form or navigated it yet. Read-only (one evaluate + a screenshot on
+      // fail), so it cannot disturb the checks queued behind it.
+      if (enabledChecks.includes("blog_sidebar") && run.run_type === "full_scan" && page) {
+        scheduleOnSharedPage("blog_sidebar", () =>
+          checkBlogSidebar(page, pageUrl, runId, pageId).catch((e) => {
+            logger.error("Blog sidebar check failed:", e)
+            return lapse("blog_sidebar")(e)
+          }),
         )
       }
 

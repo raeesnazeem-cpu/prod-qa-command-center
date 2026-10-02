@@ -43,7 +43,7 @@ export async function processStartRunJob(job: Job) {
   const { data: run, error: fetchError } = await supabase
     .from("qa_runs")
     .select(
-      "id, site_url, project_id, selected_urls, status, enabled_checks, ted_task_id, ted_subtask_map, ted_client_id",
+      "id, site_url, project_id, selected_urls, status, enabled_checks, ted_task_id, ted_subtask_map, ted_client_id, run_type",
     )
     .eq("id", runId)
     .single()
@@ -136,9 +136,12 @@ export async function processStartRunJob(job: Job) {
       .eq("id", run.project_id)
       .single()
     // Find the repo by the real TED client id (full scans have a synthetic
-    // project name that matches no client), else the project name.
+    // project name that matches no client), else the project name. A full scan
+    // is scan-only and runs on ANY url, so it never looks up a repo — the theme
+    // comes from the rendered site alone.
+    const isFullScan = run.run_type === "full_scan"
     const { themeType, source, repoKind } = await resolveThemeType({
-      clientKey: (run as any).ted_client_id || proj?.name || null,
+      clientKey: isFullScan ? null : (run as any).ted_client_id || proj?.name || null,
       siteUrl: run.site_url,
     })
     logger.info({ runId, themeType, source, repoKind }, "Resolved target theme type")
@@ -179,6 +182,7 @@ export async function processStartRunJob(job: Job) {
       "image_quality",
       "image_relevance",
       "media_crop",
+      "blog_sidebar",
       "grammar",
       "accessibility_check",
     ]
@@ -252,13 +256,17 @@ export async function processStartRunJob(job: Job) {
         const hasHeroMedia = run.enabled_checks?.includes("hero_media")
         if (hasHeroMedia || hasDeadLinks || hasLearnMoreButtons) {
           const homepage = run.site_url
-          const homepageNormalized = homepage.endsWith("/")
-            ? homepage.slice(0, -1)
-            : homepage
-          const hasHomepage = urls.some((url) => {
-            const u = url.endsWith("/") ? url.slice(0, -1) : url
-            return u.toLowerCase() === homepageNormalized.toLowerCase()
-          })
+          // Same match crawlPageJob uses to pick the homepage: ignore protocol,
+          // www and a trailing slash, so a sitemap listing https://www.x.com/
+          // for an entered http://x.com does not get the homepage twice.
+          const sameUrl = (u: string) =>
+            u
+              .replace(/^https?:\/\//i, "")
+              .replace(/^www\./i, "")
+              .replace(/\/+$/, "")
+              .toLowerCase()
+          const homepageNormalized = sameUrl(homepage)
+          const hasHomepage = urls.some((url) => sameUrl(url) === homepageNormalized)
           if (!hasHomepage) {
             logger.info(
               { runId, homepage },

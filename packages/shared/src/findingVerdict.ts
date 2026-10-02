@@ -30,7 +30,7 @@ export const VISION_VERDICT_CHECKS = new Set(["logo_chatbot", "footer_logo"])
  * other page, so zero rows means no service page was identified or reached —
  * nothing was verified, and a green "passed" would hide that.
  */
-export const NO_RESULT_IS_LAPSE_CHECKS = new Set([...VISION_VERDICT_CHECKS, "image_relevance"])
+export const NO_RESULT_IS_LAPSE_CHECKS = new Set([...VISION_VERDICT_CHECKS, "image_relevance", "blog_sidebar"])
 
 /**
  * Checks that emit a purely informational row every run (e.g. `plugin_number`
@@ -55,6 +55,16 @@ const IMAGE_RELEVANCE_PASS_TITLE = "No image relevance issues found"
 const IMAGE_RELEVANCE_LAPSE_TITLE = /^(image relevance )?check failed$/i
 
 export const AI_VERDICT_CHECKS = new Set(["grammar", "image_quality", "image_relevance", "project_plan"])
+
+/**
+ * blog_sidebar: one row per blog post, judged by exact titles (the description
+ * carries reasons and URLs, never matched as free text). Like the AI checks, a
+ * post that could not be read is unverified, so it blocks a pass; and zero
+ * rows (no post reached) is "could not complete" — see NO_RESULT_IS_LAPSE_CHECKS.
+ */
+const BLOG_SIDEBAR_PASS_TITLE = "No blog sidebar issues found"
+const BLOG_SIDEBAR_LAPSE_TITLE = /^(blog sidebar )?check failed$/i
+const LAPSE_BLOCKS_PASS_CHECKS = new Set([...AI_VERDICT_CHECKS, "blog_sidebar"])
 
 // The honest, specific reasons an AI-backed check could not complete. Checks
 // put one of these in their lapse description so the report can say WHY.
@@ -90,7 +100,7 @@ export function aiFailureReason(error: string): string {
  */
 export function aiLapseBlocksPass(checkFactor: string, findings: any[]): boolean {
   return (
-    AI_VERDICT_CHECKS.has(checkFactor) &&
+    LAPSE_BLOCKS_PASS_CHECKS.has(checkFactor) &&
     (findings || []).some(isToolLapseFinding) &&
     !(findings || []).some(isRealDefect)
   )
@@ -128,6 +138,8 @@ export function isToolLapseFinding(f: any): boolean {
   if (f?.check_factor === "gsr_check") return gsrVerdict(f) === "lapse"
   if (f?.check_factor === "image_relevance")
     return IMAGE_RELEVANCE_LAPSE_TITLE.test(String(f?.title || "").trim())
+  if (f?.check_factor === "blog_sidebar")
+    return BLOG_SIDEBAR_LAPSE_TITLE.test(String(f?.title || "").trim())
   const t = String(f?.title || "").toLowerCase()
   const d = String(f?.description || "").toLowerCase()
   const s = `${t} ${d}`
@@ -154,6 +166,8 @@ export function isCleanPassFinding(f: any): boolean {
   if (f?.check_factor === "gsr_check") return gsrVerdict(f) === "pass"
   if (f?.check_factor === "image_relevance")
     return String(f?.title || "").trim() === IMAGE_RELEVANCE_PASS_TITLE
+  if (f?.check_factor === "blog_sidebar")
+    return String(f?.title || "").trim() === BLOG_SIDEBAR_PASS_TITLE
   const t = String(f?.title || "").toLowerCase()
   const d = String(f?.description || "").toLowerCase()
   const s = `${t} ${d}`

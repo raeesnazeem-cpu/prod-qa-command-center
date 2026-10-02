@@ -1,5 +1,6 @@
 import { Browser } from "playwright"
 import { Finding } from "@qacc/shared"
+import { realContextOptions, gotoResilient, looksBlocked } from "../lib/browserContext"
 
 /**
  * False Breakpoint Check
@@ -97,28 +98,39 @@ export async function checkFalseBreakpoints(
   try {
     if (onProgress) await onProgress(5, "Opening isolated viewport sweep...")
 
-    context = await browser.newContext({
-      viewport: { width: COARSE_WIDTHS[COARSE_WIDTHS.length - 1], height: VIEWPORT_HEIGHT },
-    })
+    // Real browser UA: a context without one sends "HeadlessChrome", which
+    // Cloudflare-fronted sites answer with a 403 challenge page.
+    context = await browser.newContext(
+      realContextOptions({
+        viewport: { width: COARSE_WIDTHS[COARSE_WIDTHS.length - 1], height: VIEWPORT_HEIGHT },
+      }),
+    )
     page = await context.newPage()
 
-    try {
-      await page.goto(pageUrl, { waitUntil: "load", timeout: 60000 })
-      loadOk = true
-    } catch (e: any) {
-      // Same tolerance as crawlPageJob: proceed on load timeout/abort — but a
-      // page that never loaded must NOT be reported as a clean pass. The sweep
-      // of an unloaded/empty document trivially has no overflow, which would
-      // fabricate a "No false breaking points detected" result.
-      if (
-        !(
-          e.message?.includes("Timeout") ||
-          e.message?.includes("aborted") ||
-          e.message?.includes("closed")
-        )
-      ) {
-        throw e
-      }
+    // Same tolerance as crawlPageJob: a load timeout is not fatal (chat widgets
+    // and beacons can keep "load" from firing on a fully rendered page). But a
+    // page that never rendered, or a bot-challenge page, must NOT be reported as
+    // a clean pass — the sweep of an empty document trivially has no overflow,
+    // which would fabricate a "No false breaking points detected" result.
+    const nav = await gotoResilient(page, pageUrl, { timeout: 60000 })
+    if (nav.ok && !(await looksBlocked(page))) {
+      loadOk = await page
+        .evaluate(() => !!document.body && document.body.querySelectorAll("*").length > 5)
+        .catch(() => false)
+    }
+    // Nothing rendered (or a bot-challenge page): sweeping it would only
+    // measure the challenge page. Report the lapse straight away.
+    if (!loadOk) {
+      return [
+        {
+          check_factor: CHECK_FACTOR,
+          title: "False Breakpoint Check Failed",
+          description: `The page did not load (${nav.error ? "navigation error" : "empty document or bot-protection page"}), so the viewport sweep could not run against a rendered layout. No pass/fail conclusion can be drawn — this check could not complete.`,
+          context_text: `URL: ${pageUrl}\nPage load: ${nav.error ? nav.error.slice(0, 200) : nav.status ? `HTTP ${nav.status}` : "not rendered"}`,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
     }
 
     // Measures horizontal overflow + culprit elements at a given width.
@@ -135,6 +147,9 @@ export async function checkFalseBreakpoints(
       collectCulprits = false,
     ): Promise<Measurement> => {
       await page.setViewportSize({ width, height: VIEWPORT_HEIGHT })
+      // A client-side redirect / SPA route change mid-sweep destroys the
+      // evaluate context. Wait for the new document once before measuring.
+      await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {})
       // PERF: replaced the fixed 120ms reflow wait with a double-requestAnimationFrame
       // barrier — layout is settled once two frames have been painted after the
       // resize, which is typically far faster than a flat 120ms. The synchronous
@@ -216,6 +231,8 @@ export async function checkFalseBreakpoints(
           if (st.display === "none" || st.visibility === "hidden" || parseFloat(st.opacity || "1") === 0)
             return false
           const r = el.getBoundingClientRect()
+          // Off-canvas mobile menus sit parked outside the viewport — not shown.
+          if (r.right <= 0 || r.left >= vw) return false
           return r.width > 0 && r.height > 0
         }
         // Nearest ancestor Elementor element id (so the fix can target the widget).
@@ -252,6 +269,9 @@ export async function checkFalseBreakpoints(
           "header#masthead",
           ".site-header",
           "header",
+          "[role='banner']",
+          // Builders / platforms that emit no <header> element.
+          "#header, .header, [class*='site-header' i], [class*='navbar' i]",
         ]) {
           const el = document.querySelector(s)
           if (el) {
@@ -262,25 +282,41 @@ export async function checkFalseBreakpoints(
 
         let hdr: HeaderMetricsInPage = { present: false }
         if (header) {
-          const toggle = header.querySelector(
+          // Known WP / Elementor toggles first, then any-site patterns (other
+          // builders, Webflow, Squarespace, Shopify, Bootstrap, React headers).
+          // Several candidates may exist (a hidden desktop one and a visible
+          // mobile one), so ANY visible match counts.
+          const TOGGLE_SEL = [
             '.elementor-menu-toggle, [class*="menu-toggle"], button.menu-toggle, button[aria-label*="menu" i], [aria-label*="menu" i][role="button"]',
-          )
-          const hamburgerVisible = vis(toggle)
+            ".wp-block-navigation__responsive-container-open, .navbar-toggler, .w-nav-button, .header-burger-btn, .mobile_menu_bar, .fl-menu-mobile-toggle",
+            '[class*="hamburger" i], [class*="burger" i], [class*="nav-toggle" i], [class*="navbar-toggle" i], header-drawer summary',
+            'button[aria-label*="navigation" i], button[aria-controls][aria-expanded]:not(nav button)',
+          ].join(", ")
+          const toggleCands = Array.from(header.querySelectorAll(TOGGLE_SEL))
+          // Some headers render the toggle outside the <header> element (a
+          // fixed button in the top band) — accept a visible one there too.
+          if (!toggleCands.some(vis))
+            for (const t of Array.from(document.querySelectorAll(TOGGLE_SEL)))
+              if (vis(t) && t.getBoundingClientRect().top < 200) toggleCands.push(t)
+          const hamburgerVisible = toggleCands.some(vis)
 
           // Pick the DESKTOP menu = the candidate <ul> with the most VISIBLE
           // top-level items. A header often holds both a desktop and a hidden
           // mobile menu; choosing by visible-item count avoids grabbing the
           // hidden one. Works for Elementor and plain theme/Gutenberg headers.
+          // `nav` / [role=navigation] themselves are candidates too: React and
+          // static headers often render nav links as direct <a> children with
+          // no <ul>. An item is an <li>, an <a>, or a wrapper holding a link.
           const menuCands = Array.from(
             header.querySelectorAll(
-              ".elementor-nav-menu--main, ul.elementor-nav-menu, .elementor-nav-menu, nav ul, header ul",
+              ".elementor-nav-menu--main, ul.elementor-nav-menu, .elementor-nav-menu, nav ul, header ul, nav, [role='navigation']",
             ),
           )
           let menu: Element | null = null
           let visItems: Element[] = []
           for (const u of menuCands) {
             const lis = Array.from(u.children)
-              .filter((el) => el.tagName === "LI")
+              .filter((el) => el.tagName === "LI" || el.tagName === "A" || (el.tagName !== "UL" && !!el.querySelector(":scope > a")))
               .filter(vis)
             if (lis.length > visItems.length) {
               visItems = lis
@@ -513,7 +549,7 @@ export async function checkFalseBreakpoints(
           let headerShot: Buffer | null = null
           try {
             const handle = await page.$(
-              '[data-elementor-type="header"], .elementor-location-header, header',
+              '[data-elementor-type="header"], .elementor-location-header, header, [role="banner"]',
             )
             headerShot = handle ? await handle.screenshot() : await page.screenshot()
           } catch {
@@ -593,10 +629,16 @@ export async function checkFalseBreakpoints(
 
         // Secondary: a header with a desktop nav but NO hamburger at any small
         // width never switches to a mobile menu at all.
+        // The nav must actually still be showing at the NARROWEST width: a nav
+        // that disappears on small screens is collapsing into SOME mobile menu,
+        // even one whose toggle markup we do not recognise.
+        const narrowest = samples[0]?.m.header
         if (
           findings.filter((f) => /header/i.test(f.title)).length < MAX_HEADER_FINDINGS &&
           hamburgerMaxWidth === null &&
-          samples.some((s) => s.m.header?.present && s.m.header?.navVisible)
+          !!narrowest?.present &&
+          !!narrowest.navVisible &&
+          (narrowest.navItemCount ?? 0) >= 2
         ) {
           findings.push({
             check_factor: CHECK_FACTOR,

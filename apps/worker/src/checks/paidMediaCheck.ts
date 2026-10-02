@@ -30,6 +30,20 @@ const f = (
     ai_generated: false,
   }) as Finding
 
+// TED / HubSpot reads have no timeout of their own; a hung request must not
+// hang the job. Each read gets this budget, then counts as unreachable.
+const TED_READ_TIMEOUT_MS = 30000
+
+function withTimeout<T>(p: Promise<T>, what: string): Promise<T> {
+  let t: NodeJS.Timeout
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => {
+      t = setTimeout(() => reject(new Error(`${what} timed out after ${TED_READ_TIMEOUT_MS / 1000}s`)), TED_READ_TIMEOUT_MS)
+    }),
+  ]).finally(() => clearTimeout(t))
+}
+
 /**
  * Paid Media check — simple binary.
  *
@@ -45,6 +59,8 @@ const f = (
  * beta/website URL — so the plan/strategist come off the TED client page.
  *
  * Decision:
+ *   no TED client / TED unreachable -> SKIPPED (could not run; e.g. a full scan
+ *                                       of a URL that is not a TED client)
  *   details found     -> PASS, post the details (plan / strategist / campaigns)
  *   no details found  -> FAIL, "no details found — no fix possible, add manually"
  */
@@ -56,31 +72,48 @@ export async function checkPaidMedia(
   let client: any
   let tasks: TedTask[]
   let hs: Awaited<ReturnType<typeof resolveHubspotClientData>> = null
-  // The handle used for every TED read: prefer the real ted_client_id, else name.
+  // The handle used for every TED read: prefer the real ted_client_id, else
+  // name. An empty key must not reach getClient — its substring fallback would
+  // match the FIRST TED client for "".
   const clientKey =
     tedClientId != null && String(tedClientId).trim()
       ? String(tedClientId).trim()
-      : clientName
+      : (clientName || "").trim() || null
   try {
-    // resolveClient, getClientTimeline and getClientHubspotId are independent TED
-    // reads with no ordering dependency, so run them concurrently. Only
-    // resolveHubspotClientData depends on the resolved HubSpot ID, so it stays
-    // chained after. resolveClient falls back to a site-URL host match so
-    // URL-only full scans still land on the right client record.
-    const [clientResult, timeline, hubspotId] = await Promise.all([
-      resolveClient(clientKey, siteUrl),
-      getClientTimeline(clientKey),
-      getClientHubspotId(clientKey).catch(() => null),
-    ])
-    client = clientResult
+    // resolveClient falls back to a site-URL host match so URL-only full scans
+    // still land on the right client record. The timeline and HubSpot id are
+    // then read by the RESOLVED client's id (not the name), so a client found
+    // by URL gets its own timeline. Both are independent, so run concurrently.
+    client = await withTimeout(resolveClient(clientKey, siteUrl), "TED client lookup")
+    const key = client?.id ?? null
+    const [timeline, hubspotId] = key
+      ? await Promise.all([
+          withTimeout(getClientTimeline(key), "TED timeline lookup"),
+          withTimeout(getClientHubspotId(key), "TED HubSpot id lookup").catch(() => null),
+        ])
+      : [[] as TedTask[], null]
     tasks = timeline
-    hs = await resolveHubspotClientData(hubspotId, clientName).catch(() => null)
+    hs = await withTimeout(resolveHubspotClientData(hubspotId, clientName), "HubSpot lookup").catch(() => null)
   } catch (error: any) {
     logger.error({ error: error.message }, "TED read failed for paid media")
     return [
       f(
-        "Paid Media — could not reach TED",
-        `Failed to read client/timeline from TED for "${clientName}": ${error.message}`,
+        "Paid Media Check Skipped: could not reach TED",
+        `Failed to read client/timeline from TED for "${clientName}": ${error.message}. This is not a problem with the website.`,
+      ),
+    ]
+  }
+
+  // No TED client for this run (typical for a full scan of an arbitrary URL),
+  // or TED not configured: nothing to check, so not "details not found".
+  if (!client) {
+    return [
+      f(
+        process.env.TED_API_TOKEN
+          ? "Paid Media Check Skipped: no TED client record matches this site"
+          : "Paid Media Check Skipped: TED is not configured",
+        "The paid media details live on the TED client record, and no client was found for this run by id, name, or site URL, so they could not be checked. This is not a problem with the website.",
+        `Client: ${clientName || "none"} (id: ${clientKey ?? "none"}); site: ${siteUrl || "none"}`,
       ),
     ]
   }
@@ -90,9 +123,10 @@ export async function checkPaidMedia(
   const planField = getClientPlanField(client)
   const plan = parsePlan(planField || hs?.plan)
   const planFromTed = !!planField
+  // The TED field is an object ({ name }) or a plain string; never print an object.
+  const tedStrategist = client?.paidMediaStrategist
   const strategist =
-    client?.paidMediaStrategist?.name ||
-    client?.paidMediaStrategist ||
+    (typeof tedStrategist === "string" ? tedStrategist.trim() : tedStrategist?.name) ||
     hs?.paidSearchStrategist ||
     null
   const hasLeadGen = !!plan?.hasLeadGen || !!hs?.hasLeadGenFlag
@@ -103,9 +137,9 @@ export async function checkPaidMedia(
   let campaigns = pmTasks.filter((t) => strict.test(t.title))
   if (campaigns.length === 0) campaigns = pmTasks.filter((t) => loose.test(t.title))
 
-  const found = !!client && (hasLeadGen || !!strategist || campaigns.length > 0)
+  const found = (hasLeadGen || !!strategist || campaigns.length > 0)
 
-  const context = `Client: ${clientName} (id: ${clientKey}); plan: ${
+  const context = `Client: ${clientName} (id: ${client?.id ?? clientKey}); plan: ${
     plan?.raw || "none"
   } (${planFromTed ? "TED client page" : hs?.plan ? "HubSpot" : "none"}); strategist: ${
     strategist || "none"

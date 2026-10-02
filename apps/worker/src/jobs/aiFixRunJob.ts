@@ -652,6 +652,28 @@ export async function processAiFixRunJob(job: Job) {
       continue
     }
 
+    // --- blog_sidebar: scan only, no fix -------------------------------
+    // Adding a sidebar is a theme/template change, so it is never auto-edited
+    // or sent to AI triage.
+    if (f.check_factor === "blog_sidebar") {
+      analysis.push({
+        findingId: f.id ? String(f.id) : null,
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+        category: "manual",
+        fix: "No fix possible. Add a sidebar with a search bar, a Recent Posts section and a Categories section to this blog post.",
+        applied: false,
+        proposed: false,
+        noAutoFix: true,
+        suggestedFix: "Add a sidebar with a search bar, a Recent Posts section and a Categories section to this blog post",
+        lapse: false,
+        filesOffered: [],
+        filesChanged: [],
+      })
+      continue
+    }
+
     // --- media_crop: scan only, no fix ---------------------------------
     // Whether a crop is acceptable (and how to re-frame it) is a design call
     // per breakpoint, so it is never auto-edited or sent to AI triage.
