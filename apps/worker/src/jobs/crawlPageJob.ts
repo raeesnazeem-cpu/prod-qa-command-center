@@ -40,6 +40,7 @@ import { checkBlogSidebar } from "../checks/blogSidebarCheck"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
 import { checkAccessibility } from "../checks/accessibilityCheck"
+import { checkAccessibilityFeatures } from "../checks/accessibilityFeaturesCheck"
 import { checkUrlTabMatching } from "../checks/urlTabMatchingCheck"
 import {
   checkPrivacyPolicy,
@@ -861,6 +862,17 @@ export async function processCrawlPageJob(job: Job) {
             }),
           )
         }
+      }
+
+      // Accessibility for NON-Growth99 sites (full scan with no repo): real page
+      // accessibility rules instead of the UserWay widget. Every page.
+      if (enabledChecks.includes("accessibility_features")) {
+        scheduleOnSharedPage("accessibility_features", () =>
+          checkAccessibilityFeatures(page).catch((e) => {
+            logger.error("Accessibility features check failed:", e)
+            return lapse("accessibility_features")(e)
+          }),
+        )
       }
 
       if (enabledChecks.includes("image_quality")) {

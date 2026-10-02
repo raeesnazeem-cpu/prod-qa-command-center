@@ -185,6 +185,7 @@ export async function processStartRunJob(job: Job) {
       "blog_sidebar",
       "grammar",
       "accessibility_check",
+      "accessibility_features",
     ]
 
     const HOMEPAGE_ONLY_CHECKS = [

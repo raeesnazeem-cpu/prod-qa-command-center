@@ -912,6 +912,7 @@ export const FRIENDLY: Record<string, string> = {
   image_compliance: "Image Compliance",
   accessibility: "Accessibility",
   accessibility_check: "Full Accessibility",
+  accessibility_features: "Accessibility",
   visual_regression: "Visual Regression",
 }
 
@@ -951,6 +952,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   cross_browser: "Mention to review the SmartUI cross-browser diffs and fix the rendering differences",
   gsr_check: "Review the listed Google search result titles and snippets and correct the invalid characters at the source (page title / meta description)",
   accessibility_check: "Mention to install the correct-tier UserWay accessibility widget matching the HubSpot plan",
+  accessibility_features: "Mention to fix the listed accessibility problems (alt text, form labels, link/button names, headings, page language)",
   spelling: "Mention to correct the flagged misspelled words using the suggested spellings",
   grammar: "Mention to fix the flagged grammar and punctuation issues in the page copy per the suggestions",
   live_site_link: "Mention to confirm the site is live on the correct client domain over HTTPS and not on a gogroth staging host",

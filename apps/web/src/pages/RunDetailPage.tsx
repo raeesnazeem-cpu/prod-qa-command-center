@@ -1078,6 +1078,7 @@ export const RunDetailPage = () => {
         "gbp_check",
         "grammar",
         "accessibility_check",
+        "accessibility_features",
       ].includes(c),
     )
 
@@ -1869,6 +1870,7 @@ export const RunDetailPage = () => {
                     blog_sidebar: "Blog Post Sidebar",
                     grammar: "Grammar Check",
                     accessibility_check: "Accessibility Check",
+                    accessibility_features: "Accessibility Check",
                   }
                   const checkName =
                     checkNameMap[checkKey] ||

@@ -8,6 +8,7 @@ import { promisify } from "util"
 import { transitionRunStatus } from "../lib/runControl"
 import { isRealDefect } from "@qacc/shared"
 import { getCheckBreakdown } from "../lib/runCheckBreakdown"
+import { nonGrowth99Checks } from "../lib/fullScanChecks"
 
 const execFileAsync = promisify(execFile)
 
@@ -3730,6 +3731,16 @@ webhookRouter.post("/ted/full-scan", async (req: Request, res: Response) => {
       )
     }
 
+    // No repo on the TED client page (or no client) = not a Growth99 site, so
+    // the Growth99-only checks are skipped (see lib/fullScanChecks).
+    const scanRepo = clientId != null ? await resolveBetaSiteRepoFromTED(clientId) : null
+    const scanChecks = scanRepo ? FULL_SCAN_CHECKS : nonGrowth99Checks(FULL_SCAN_CHECKS)
+    if (!scanRepo) {
+      console.log(
+        `ℹ️ Full scan: no GitHub repo for client ${clientId ?? "(none)"} — non-Growth99 site, skipping Growth99-only checks.`,
+      )
+    }
+
     // Resolve the QACC project. Prefer the TED client name; otherwise key a
     // standalone project off the URL host so a URL-only scan still has a home.
     let hostName = scanUrl
@@ -3837,7 +3848,7 @@ webhookRouter.post("/ted/full-scan", async (req: Request, res: Response) => {
         project_id: project.id,
         run_type: "full_scan",
         site_url: scanUrl,
-        enabled_checks: FULL_SCAN_CHECKS,
+        enabled_checks: scanChecks,
         ted_subtask_map: {},
         device_matrix: ["desktop", "mobile"],
         status: "running",
