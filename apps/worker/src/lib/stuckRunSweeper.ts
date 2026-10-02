@@ -20,7 +20,17 @@
 // path uses, each isolated so one failure cannot block the others or crash the
 // interval. It runs in-process on the long-lived worker; prod runs a single
 // worker box, and the atomic RPC keeps it correct even if that ever changes.
+//
+// It also recovers ORPHANED runs: pages still pending/processing, but no job
+// left in the queue to ever finish them. That happens when BullMQ gives up on a
+// crawl_batch ("job stalled more than allowable limit" after two worker
+// restarts, or attempts exhausted). Without this the run sits in `running`
+// forever and TED never gets a report. A run counts as orphaned only when it has
+// had no update for ORPHAN_IDLE_MS (every finished page touches qa_runs) AND no
+// waiting/active/delayed job in the queue names it. Its leftover pages are then
+// marked failed, which makes it terminal for the reconcile below.
 import { supabase } from "./supabase"
+import { qaQueue } from "./queue"
 import { releaseRunSlot } from "./runSlot"
 import { persistScanCheckResults } from "./runResults"
 import { postFinalReportToTED } from "./tedSync"
@@ -44,14 +54,75 @@ const MIN_AGE_MS = Math.max(
   Number(process.env.STUCK_RUN_MIN_AGE_MS || 600_000), // 10 min
 )
 
+// A running run with unfinished pages and no update for this long, and no queue
+// job left for it, is orphaned. Well above one page's worst case (two 3-min
+// timed-out attempts), so a live run always touches qa_runs sooner.
+const ORPHAN_IDLE_MS = Math.max(
+  300_000,
+  Number(process.env.ORPHAN_RUN_IDLE_MS || 900_000), // 15 min
+)
+
+const LIVE_JOB_STATES = [
+  "waiting",
+  "active",
+  "delayed",
+  "prioritized",
+  "paused",
+  "waiting-children",
+] as const
+
+// runIds named by any job that can still run. Read once per sweep, lazily.
+async function liveRunIds(): Promise<Set<string>> {
+  const jobs = await qaQueue.getJobs([...LIVE_JOB_STATES], 0, -1)
+  return new Set(
+    jobs.map((j) => j?.data?.runId).filter((id): id is string => !!id),
+  )
+}
+
+// Mark an orphaned run's unfinished pages failed. Returns true when it did, so
+// the caller can reconcile the now-terminal run. Any doubt → leave it alone.
+async function failOrphanedPages(
+  run: { id: string; updated_at?: string | null },
+  live: () => Promise<Set<string>>,
+): Promise<boolean> {
+  const idleMs = Date.now() - new Date(run.updated_at ?? 0).getTime()
+  if (!run.updated_at || idleMs < ORPHAN_IDLE_MS) return false
+  if ((await live()).has(run.id)) return false
+
+  const { data: failed, error } = await supabase
+    .from("pages")
+    .update({
+      status: "failed",
+      current_step: "Could not finish: the worker lost this page's job",
+    })
+    .eq("run_id", run.id)
+    .not("status", "in", "(done,failed)")
+    .select("id")
+  if (error) {
+    logger.warn(
+      { runId: run.id, error: error.message },
+      "stuck-run sweep: failing orphaned pages failed",
+    )
+    return false
+  }
+  logger.warn(
+    { runId: run.id, idleMinutes: Math.round(idleMs / 60_000), pagesFailed: failed?.length ?? 0 },
+    "orphaned run: no queue job left for its unfinished pages; marked them failed",
+  )
+  return true
+}
+
 let timer: NodeJS.Timeout | null = null
 
-async function sweepOnce(): Promise<void> {
+export async function sweepOnce(): Promise<void> {
   try {
+    let liveCache: Promise<Set<string>> | null = null
+    const live = () => (liveCache ??= liveRunIds())
+
     const cutoff = new Date(Date.now() - MIN_AGE_MS).toISOString()
     const { data: runs, error } = await supabase
       .from("qa_runs")
-      .select("id, ted_task_id, run_type, pages_total, pages_processed, started_at")
+      .select("id, ted_task_id, run_type, pages_total, pages_processed, started_at, updated_at")
       .eq("status", "running")
       .gt("pages_total", 0)
       .lt("started_at", cutoff)
@@ -77,7 +148,12 @@ async function sweepOnce(): Promise<void> {
         )
         continue
       }
-      if ((doneCount ?? 0) < (run.pages_total ?? 0)) continue
+      // Not all pages terminal: a live mid-scan run, unless it is orphaned.
+      if (
+        (doneCount ?? 0) < (run.pages_total ?? 0) &&
+        !(await failOrphanedPages(run, live))
+      )
+        continue
 
       // Atomic, status-guarded complete. `true` only if THIS call won the flip.
       const { data: won, error: rErr } = await supabase.rpc(
