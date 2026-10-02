@@ -98,9 +98,12 @@ export async function processCheckPaidMediaJob(job: Job) {
   if (isApiOnly) await updateProgress(100, "Done")
 
   if (findings.length > 0) {
-    await supabase
+    const { error: insertError } = await supabase
       .from("findings")
       .insert(findings.map((f) => ({ ...f, page_id: pageId, run_id: runId })))
+    if (insertError) {
+      logger.error({ runId, error: insertError.message }, "Failed to insert paid media findings")
+    }
   }
 
   await supabase.channel(`run:${runId}`).send({

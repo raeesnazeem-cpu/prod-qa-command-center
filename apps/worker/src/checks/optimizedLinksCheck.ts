@@ -244,6 +244,7 @@ import got from "got"
 import pLimit from "p-limit"
 import pino from "pino"
 import * as cheerio from "cheerio"
+import { DESKTOP_UA } from "../lib/browserContext"
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -339,7 +340,7 @@ function isCloudflareChallenge(res: any): boolean {
 
 type Probe = { res: any | null; error: any | null }
 
-async function probe(url: string, method: "head" | "get", timeoutMs: number): Promise<Probe> {
+async function probe(url: string, method: "head" | "get", timeoutMs: number, insecure = false): Promise<Probe> {
   try {
     const res = await got(url, {
       method: method === "head" ? "HEAD" : "GET",
@@ -348,6 +349,7 @@ async function probe(url: string, method: "head" | "get", timeoutMs: number): Pr
       retry: { limit: 0 },
       followRedirect: true,
       throwHttpErrors: false,
+      https: { rejectUnauthorized: !insecure },
     })
     return { res, error: null }
   } catch (error: any) {
@@ -357,6 +359,13 @@ async function probe(url: string, method: "head" | "get", timeoutMs: number): Pr
 
 const isTimeout = (e: any) =>
   e?.name === "TimeoutError" || /ETIMEDOUT|ESOCKETTIMEDOUT|timeout/i.test(`${e?.code || ""} ${e?.message || ""}`)
+
+// Certificate problems (self-signed staging certs, missing intermediates).
+// Browsers often recover the chain where Node does not, so these are confirmed
+// with a non-verifying request and never reported as dead on their own.
+const isTlsError = (e: any) =>
+  /CERT|SSL|TLS|SELF_SIGNED|UNABLE_TO_VERIFY|UNABLE_TO_GET_ISSUER|ERR_TLS/i.test(String(e?.code || "")) ||
+  /certificate/i.test(String(e?.message || ""))
 
 /** Classify one link: healthy (null), broken, or unverified. */
 export async function checkLink(url: string): Promise<LinkCheckResult> {
@@ -390,6 +399,9 @@ export async function checkLink(url: string): Promise<LinkCheckResult> {
     const code = get.res.statusCode
     if (code < 400) return null
     if (code === 429) return { status: 429, reason: "Rate limited (429)", kind: "unverified" }
+    // The resource exists; it just refuses this method (e.g. WP xmlrpc.php,
+    // API endpoints that only take POST).
+    if (code === 405) return { status: 405, reason: "Method not allowed (405)", kind: "unverified" }
     if (code === 999) return { status: 999, reason: "Blocked automated check (999)", kind: "unverified" }
     if (isCloudflareChallenge(get.res))
       return { status: code, reason: `Cloudflare bot challenge (${code})`, kind: "unverified" }
@@ -400,18 +412,36 @@ export async function checkLink(url: string): Promise<LinkCheckResult> {
 
   const e = get.error
   if (isTimeout(e)) return { status: 0, reason: "Timed out", kind: "unverified" }
+  // Redirect loops for a cookie-less client (consent / geo / login walls that
+  // set a cookie and redirect) — a real browser gets through.
+  if (e?.name === "MaxRedirectsError" || /redirect/i.test(String(e?.message || "")))
+    return { status: 0, reason: "Redirect loop for automated check", kind: "unverified" }
+  if (isTlsError(e)) {
+    const insecure = await probe(url, "get", 15000, true)
+    const ic = insecure.res?.statusCode
+    if (ic && ic < 400)
+      return { status: 0, reason: `TLS certificate problem (${e?.code || "certificate"})`, kind: "unverified" }
+    if (ic === 404 || ic === 410) return { status: ic, reason: `Status ${ic}`, kind: "broken" }
+    return { status: ic || 0, reason: `TLS certificate problem (${e?.code || "certificate"})`, kind: "unverified" }
+  }
   const code = String(e?.code || "")
+  // Bot filters often drop the connection rather than answer with a status.
+  if (code === "ECONNRESET" || code === "EPIPE" || code === "EPROTO")
+    return { status: 0, reason: `Connection dropped (${code})`, kind: "unverified" }
   if (code === "ENOTFOUND" || code === "EAI_AGAIN")
     return { status: 0, reason: "Domain not found", kind: "broken" }
   return { status: 0, reason: code ? `Connection failed (${code})` : "Connection Failed", kind: "broken" }
 }
 
 const BROWSER_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  "User-Agent": DESKTOP_UA,
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
 }
+
+// Links probed per page. A mega-menu / footer-heavy page can carry thousands
+// of URLs; anchors come first, so the cap trims assets before page links.
+const MAX_LINKS_PER_PAGE = Math.max(50, Number(process.env.DEAD_LINKS_MAX_PER_PAGE || 600))
 
 interface ExtractedLink {
   url: string
@@ -441,6 +471,15 @@ function extractUrlsFromHTML(html: string, baseUrl: string): ExtractedLink[] {
     }
   })
 
+  // Lazy-loaded media keep the real file in a data attribute until scrolled
+  // into view (src is a placeholder) — check the real file.
+  $("[data-src], [data-lazy-src]").each((_, el) => {
+    const url = $(el).attr("data-src") || $(el).attr("data-lazy-src")
+    if (url && !linksMap.has(url)) {
+      linksMap.set(url, `[Image/Media]`)
+    }
+  })
+
   $("[href]:not(a)").each((_, el) => {
     if (HINT_RELS.test($(el).attr("rel") || "")) return
     const url = $(el).attr("href")
@@ -450,35 +489,25 @@ function extractUrlsFromHTML(html: string, baseUrl: string): ExtractedLink[] {
   })
 
   const absoluteUrls = new Map<string, string>()
-  const cleanBase = baseUrl.replace(/\/$/, "")
-  let baseOrigin: string
+  // Resolve like a browser does: against <base href> when present, else the
+  // page URL. ("page.html" on /a/b/ is /a/b/page.html, "../x" climbs a level.)
+  let base = baseUrl
   try {
-    baseOrigin = new URL(baseUrl).origin
-  } catch {
-    baseOrigin = cleanBase
-  }
+    const baseHref = $("base[href]").first().attr("href")
+    if (baseHref) base = new URL(baseHref, baseUrl).href
+  } catch {}
 
-  for (const [raw, text] of linksMap.entries()) {
+  for (const [rawUrl, text] of linksMap.entries()) {
+    const raw = rawUrl.trim()
+    // In-page anchors, non-web schemes (mailto, tel, sms, whatsapp, data …)
+    // and unrendered template placeholders ({{url}}, ${href}) are not links.
+    if (!raw || raw.startsWith("#") || /\{\{|\$\{|%7B%7B/i.test(raw)) continue
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^https?:/i.test(raw)) continue
     try {
-      let absolute: string
-      if (raw.startsWith("http://") || raw.startsWith("https://")) {
-        absolute = raw
-      } else if (raw.startsWith("//")) {
-        absolute = "https:" + raw
-      } else if (raw.startsWith("/")) {
-        absolute = baseOrigin + raw
-      } else if (
-        raw.startsWith("data:") ||
-        raw.startsWith("mailto:") ||
-        raw.startsWith("tel:") ||
-        raw.startsWith("javascript:")
-      ) {
-        continue
-      } else {
-        absolute = cleanBase + "/" + raw
-      }
-
-      absolute = absolute.split("#")[0]
+      const u = new URL(raw, base)
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue
+      u.hash = ""
+      const absolute = u.href
       if (absolute && !absoluteUrls.has(absolute)) {
         absoluteUrls.set(absolute, text)
       }
@@ -516,17 +545,50 @@ export async function checkOptimizedLinks(
     }
   }
 
+  // The browser-rendered DOM of the crawled page, when it is still on this
+  // URL. Used when the raw HTML can't be fetched (bot wall answering plain
+  // HTTP clients) or carries no links (client-rendered SPA). Read-only.
+  const renderedHtml = async (): Promise<string> => {
+    try {
+      if (!page || typeof page.content !== "function") return ""
+      const norm = (u: string) => (u || "").replace(/[?#].*$/, "").replace(/\/+$/, "").toLowerCase()
+      if (norm(page.url()) !== norm(pageUrl)) return ""
+      return (await page.content()) || ""
+    } catch {
+      return ""
+    }
+  }
+  const anchorCount = (links: ExtractedLink[]) => links.filter((l) => !/^\[(Image\/Media|Resource)\]$/.test(l.text)).length
+
   let extractedLinks: ExtractedLink[] = []
   try {
     try {
       if (onProgress) await onProgress(10, "Extracting links from page HTML...")
-      const response = await got.get(pageUrl, {
-        headers: BROWSER_HEADERS,
-        timeout: { request: 15000 },
-        retry: { limit: 2 },
-      })
+      let fetchError: any = null
+      try {
+        const response = await got.get(pageUrl, {
+          headers: BROWSER_HEADERS,
+          timeout: { request: 15000 },
+          retry: { limit: 2 },
+          https: { rejectUnauthorized: false },
+        })
+        extractedLinks = extractUrlsFromHTML(response.body, response.url || pageUrl)
+      } catch (e: any) {
+        fetchError = e
+      }
 
-      extractedLinks = extractUrlsFromHTML(response.body, pageUrl)
+      if (fetchError || anchorCount(extractedLinks) === 0) {
+        const html = await renderedHtml()
+        if (html) {
+          const fromDom = extractUrlsFromHTML(html, pageUrl)
+          const seen = new Set(extractedLinks.map((l) => l.url))
+          for (const l of fromDom) if (!seen.has(l.url)) extractedLinks.push(l)
+          if (fetchError)
+            logger.warn({ pageUrl, error: fetchError.message }, "Raw HTML fetch failed; using rendered DOM for links")
+          fetchError = null
+        }
+      }
+      if (fetchError) throw fetchError
 
       logger.info(
         { pageUrl, linkCount: extractedLinks.length },
@@ -554,6 +616,15 @@ export async function checkOptimizedLinks(
     }
 
     if (extractedLinks.length === 0) return []
+    const totalFound = extractedLinks.length
+    if (extractedLinks.length > MAX_LINKS_PER_PAGE) {
+      // Page links first, then assets — the cap drops assets before pages.
+      const isAsset = (l: ExtractedLink) => /^\[(Image\/Media|Resource)\]$/.test(l.text)
+      extractedLinks = [...extractedLinks.filter((l) => !isAsset(l)), ...extractedLinks.filter(isAsset)].slice(
+        0,
+        MAX_LINKS_PER_PAGE,
+      )
+    }
     if (onProgress)
       await onProgress(
         40,
@@ -632,7 +703,7 @@ export async function checkOptimizedLinks(
     )
     await Promise.all(checkPromises)
 
-    const countLine = `URLs extracted from this page: ${extractedLinks.length} | Total URLs checked in run so far: ${runTotalExtractedLinks.get(runId)}`
+    const countLine = `URLs extracted from this page: ${totalFound}${totalFound > extractedLinks.length ? ` (first ${extractedLinks.length} checked)` : ""} | Total URLs checked in run so far: ${runTotalExtractedLinks.get(runId)}`
     const unverifiedLine = unverifiedLinks.length
       ? `\n${UNVERIFIED_LINKS_MARKER} ${JSON.stringify(unverifiedLinks)}`
       : ""

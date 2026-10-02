@@ -1,5 +1,6 @@
 import { Finding } from "@qacc/shared"
 import pLimit from "p-limit"
+import { DESKTOP_UA, gotoResilient, looksBlocked, newRealContext } from "../lib/browserContext"
 
 /**
  * Concurrent plugin lookups. Each slug costs two independent requests (the
@@ -58,7 +59,13 @@ async function fetchText(url: string, timeoutMs = 15000): Promise<string | null>
     const res = await fetch(url, {
       signal: controller.signal,
       redirect: "follow",
-      headers: { "User-Agent": "QACC-PostRelease/1.0" },
+      // A real browser UA: Cloudflare and similar WAFs 403 bot-looking agents,
+      // which used to read as "0 plugins" on a perfectly healthy site.
+      headers: {
+        "User-Agent": DESKTOP_UA,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
     })
     clearTimeout(t)
     if (!res.ok) return null
@@ -103,10 +110,16 @@ async function discoverPluginSlugs(baseUrl: string): Promise<string[]> {
 }
 
 async function discoverPluginSlugsUncached(baseUrl: string): Promise<string[]> {
-  const html = await fetchText(baseUrl)
+  return slugsFromHtml(await fetchText(baseUrl))
+}
+
+/** Plugin slugs referenced by `/wp-content/plugins/<slug>/` paths in the HTML. */
+function slugsFromHtml(raw: string | null): string[] {
   const slugs = new Set<string>()
-  if (html) {
-    const re = /\/wp-content\/plugins\/([^/'"?\s)]+)/g
+  if (raw) {
+    // Inline JSON (wp_localize_script, block data) escapes slashes as "\/".
+    const html = raw.replace(/\\\//g, "/")
+    const re = /\/wp-content\/plugins\/([^/'"?\s)\\]+)/g
     let m: RegExpExecArray | null
     while ((m = re.exec(html)) !== null) {
       const slug = m[1].trim()
@@ -185,6 +198,37 @@ async function readLatestVersion(slug: string): Promise<string | null> {
   return result
 }
 
+// Markers that a page is WordPress-rendered (assets, generator tag, REST link).
+const WP_SIGNAL =
+  /\/wp-content\/|\/wp-includes\/|<meta[^>]+generator[^>]+wordpress|api\.w\.org|\/wp-json\//i
+const BOT_CHALLENGE =
+  /just a moment|attention required|access denied|verify you are human|checking your browser|cf-chl|captcha/i
+
+/** True when `<base>/wp-json/` answers with the WordPress REST index. */
+async function hasWpRestApi(baseUrl: string): Promise<boolean> {
+  const body = await fetchText(`${normalizeBase(baseUrl)}/wp-json/`, 10000)
+  return !!body && /"namespaces"\s*:/.test(body)
+}
+
+/**
+ * Homepage HTML as a real browser renders it (real UA, JS run), for sites
+ * whose bot filter refuses a plain fetch. Never throws; null on failure.
+ */
+async function renderedHtml(browser: any, url: string): Promise<string | null> {
+  let context: any = null
+  try {
+    context = await newRealContext(browser)
+    const page = await context.newPage()
+    const nav = await gotoResilient(page, url, { timeout: 30000 })
+    if (!nav.ok || (await looksBlocked(page))) return null
+    return await page.content()
+  } catch {
+    return null
+  } finally {
+    if (context) await context.close().catch(() => {})
+  }
+}
+
 /**
  * =========================================================================
  * CHECK: Verify total number of plugins (plugin_number)
@@ -200,7 +244,47 @@ export async function checkPluginCount(
 ): Promise<Finding[]> {
   try {
     if (onProgress) await onProgress(20, "Scanning front-end for plugin assets...")
-    const slugs = await discoverPluginSlugs(url)
+    let slugs = await discoverPluginSlugs(url)
+
+    // No plugin paths found. Before reporting "0 plugins", work out why: the
+    // homepage may not have loaded (or was a bot challenge) — then read it
+    // with a real browser — or the site simply isn't WordPress, where a plugin
+    // count means nothing and must not read as a finding about the site.
+    if (slugs.length === 0) {
+      let html = await fetchText(url)
+      if ((!html || BOT_CHALLENGE.test(html.slice(0, 5000))) && _sharedBrowser) {
+        html = (await renderedHtml(_sharedBrowser, url)) ?? html
+        slugs = slugsFromHtml(html)
+      }
+      if (!html) {
+        return [
+          {
+            check_factor: "plugin_number",
+            title: "Plugin Count Check Skipped",
+            description:
+              "Could not complete: the homepage could not be loaded, so installed plugins could not be counted.",
+            context_text: `URL: ${url}`,
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding,
+        ]
+      }
+      if (slugs.length === 0 && !(WP_SIGNAL.test(html) || (await hasWpRestApi(url)))) {
+        return [
+          {
+            check_factor: "plugin_number",
+            title: "Plugin count not applicable (not a WordPress site)",
+            description:
+              "This site does not appear to run WordPress (no /wp-content/, /wp-includes/, WordPress generator tag or /wp-json/ REST API was found), so there are no WordPress plugins to count.",
+            context_text: `URL: ${url}\nWordPress detected: No`,
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding,
+        ]
+      }
+    }
     if (onProgress) await onProgress(90, "Counting plugins...")
 
     const list = slugs.length

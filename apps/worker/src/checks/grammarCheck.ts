@@ -1,6 +1,43 @@
 import { Page as PlaywrightPage } from "playwright"
 import { Finding, aiFailureReason, AI_REASON_UNREADABLE } from "@qacc/shared"
 import { completeText } from "../lib/aiFallback"
+import { looksBlocked } from "../lib/browserContext"
+
+/**
+ * The page's copy, without site chrome. Runs in the page. Prefers the main
+ * content region (any builder: <main>, <article>, role=main, WP/Elementor
+ * content wrappers), else the whole body; header/nav/footer/cookie-banner
+ * text is subtracted either way so the 4000-char AI budget goes to real copy,
+ * not the same menu on every page.
+ */
+function extractCopy(): string {
+  const norm = (s: string) => (s || "").replace(/\s+/g, " ").trim()
+  const body = document.body
+  if (!body) return ""
+  // In priority order. Several <article>s = a listing of cards, not one page body.
+  const CONTENT = ["main", "[role='main']", "article", ".entry-content", ".elementor-location-single", "#content", ".site-content"]
+  let root: HTMLElement = body
+  pick: for (const sel of CONTENT) {
+    const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[]
+    if (sel === "article" && els.length > 1) continue
+    for (const el of els) {
+      if (norm(el.innerText).length >= 200) {
+        root = el
+        break pick
+      }
+    }
+  }
+  let text = norm(root.innerText)
+  const CHROME =
+    "header, nav, footer, [role='banner'], [role='navigation'], [role='contentinfo'], [id*='cookie'], [class*='cookie'], [class*='consent']"
+  for (const el of Array.from(root.querySelectorAll(CHROME)).slice(0, 50) as HTMLElement[]) {
+    // An <header class="entry-header"> inside the article is content.
+    if (el.closest("article") && el.tagName === "HEADER") continue
+    const t = norm(el.innerText)
+    if (t.length >= 20) text = text.split(t).join(" ")
+  }
+  return norm(text)
+}
 
 /**
  * Grammar Check (all pages). Extracts the page's visible text and asks the
@@ -13,9 +50,35 @@ export async function checkGrammar(
 ): Promise<Finding[]> {
   const pageUrl = page.url()
   try {
-    const text: string = await page.evaluate(() =>
-      (document.body?.innerText || "").replace(/\s+/g, " ").trim(),
-    )
+    const read = async (): Promise<string> => {
+      try {
+        return String((await page.evaluate(extractCopy)) || "")
+      } catch {
+        // Re-rendered mid-read (SPA hydration / client redirect): retry once.
+        await page.waitForTimeout(1500).catch(() => {})
+        return String((await page.evaluate(extractCopy)) || "")
+      }
+    }
+    let text = await read()
+    // Client-rendered pages may still be filling in: give them a moment.
+    if (text.length < 40) {
+      await page.waitForTimeout(3000).catch(() => {})
+      text = await read()
+    }
+    if (text.length < 3000 && (await looksBlocked(page))) {
+      return [
+        {
+          check_factor: "grammar",
+          title: "Grammar Check Failed",
+          description:
+            "Could not complete: the site served a bot-protection page to the QACC browser, so its copy could not be read. Process aborted gracefully.",
+          context_text: `URL: ${pageUrl}`,
+          screenshot_url: null,
+          status: "open",
+          ai_generated: false,
+        } as Finding,
+      ]
+    }
     if (!text || text.length < 40) return []
     const snippet = text.slice(0, 4000)
 

@@ -4,6 +4,7 @@ import { completeTextIsolated, describeImageResult } from "../lib/aiFallback"
 import { slugFromUrl, stripBrand } from "./urlTabMatchingCheck"
 import pLimit from "p-limit"
 import pino from "pino"
+import { DESKTOP_UA, newRealContext, gotoResilient } from "../lib/browserContext"
 
 const logger = pino({ level: process.env.LOG_LEVEL || "info" })
 
@@ -63,9 +64,7 @@ const MIN_RENDER_H = 100
 const MIN_RENDER_AREA = 20000
 const MIN_NATURAL = 150
 
-// Real desktop UA — Cloudflare-fronted staging sites 403 "HeadlessChrome".
-const DESKTOP_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+// Real desktop UA (shared) — Cloudflare-fronted sites 403 "HeadlessChrome".
 
 // ---------------------------------------------------------------------------
 // Page classification (pure, unit-tested)
@@ -547,8 +546,14 @@ function collectPageFacts(): PageFacts {
     for (const trigger of Array.from(mr.querySelectorAll("a, span, button, .e-n-menu-title"))) {
       const label = txt(trigger.textContent)
       if (!label || label.length > 40 || !MENU_LABEL.test(label)) continue
-      const item = trigger.closest("li, .e-n-menu-item, .menu-item")
-      if (!item) continue
+      // li/menu-item for WP; Webflow (.w-dropdown), Squarespace (folder) and
+      // generic dropdown wrappers for everything else.
+      const item = trigger.closest(
+        "li, .e-n-menu-item, .menu-item, .w-dropdown, [class*='folder'], [class*='dropdown'], [class*='submenu']",
+      )
+      // Never the whole menu: a wrapper that holds the menu root would turn
+      // every nav link into a "service" link.
+      if (!item || item === mr || item.contains(mr)) continue
       for (const a of Array.from(item.querySelectorAll("a[href]"))) {
         if (a === trigger) continue
         const href = abs(a.getAttribute("href") || "")
@@ -605,7 +610,9 @@ function collectPageFacts(): PageFacts {
   }
 
   // CSS background images (Elementor sections/columns, hero blocks, cards).
-  for (const el of Array.from(document.body.querySelectorAll("*"))) {
+  // Capped: a huge page can carry tens of thousands of elements, and each one
+  // costs a layout + style read.
+  for (const el of Array.from(document.body ? document.body.querySelectorAll("*") : []).slice(0, 8000)) {
     const r = el.getBoundingClientRect()
     if (r.width < 200 || r.height < 150 || r.width * r.height < 30000) continue
     const bg = getComputedStyle(el).backgroundImage
@@ -636,7 +643,7 @@ function collectPageFacts(): PageFacts {
 
   return {
     finalUrl: location.href,
-    bodyClasses: Array.from(document.body.classList),
+    bodyClasses: document.body ? Array.from(document.body.classList) : [],
     h1s,
     title: document.title || "",
     siteName,
@@ -809,7 +816,7 @@ export async function checkImageRelevance(
       const { chromium } = require("playwright")
       ownBrowser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] })
     }
-    context = await (browser || ownBrowser).newContext({
+    context = await newRealContext(browser || ownBrowser, {
       viewport: { width: 1440, height: 900 },
       userAgent: DESKTOP_UA,
     })
@@ -818,15 +825,15 @@ export async function checkImageRelevance(
     context.on("page", (p: any) => (p === page ? null : p.close().catch(() => {})))
 
     if (onProgress) await onProgress(10, "Loading page for image relevance...")
-    let loadOk = true
-    let status = 0
-    try {
-      const resp = await page.goto(pageUrl, { waitUntil: "load", timeout: 60000 })
-      status = resp?.status() || 0
-    } catch (e: any) {
-      if (!/Timeout|aborted|closed/i.test(e?.message || "")) throw e
-      loadOk = false
-    }
+    // gotoResilient never throws: a timeout leaves a usable (partly loaded)
+    // page; a hard failure (DNS, refused, TLS) means nothing rendered.
+    const nav = await gotoResilient(page, pageUrl, { timeout: 60000 })
+    const loadOk = nav.ok && !nav.error
+    const status = nav.status || 0
+    if (!nav.ok)
+      return byUrl.kind === "service"
+        ? [lapseRow(pageUrl, service, "the page could not be loaded", `Navigation failed: ${String(nav.error || "").slice(0, 200)}.`)]
+        : []
 
     if (status >= 400) {
       // A URL that is clearly a service page but errors cannot be verified; an
@@ -842,7 +849,7 @@ export async function checkImageRelevance(
       await page.evaluate(async () => {
         const step = Math.max(400, Math.floor(window.innerHeight * 0.8))
         const deadline = Date.now() + 25000
-        for (let y = 0; y < document.body.scrollHeight && Date.now() < deadline; y += step) {
+        for (let y = 0; y < (document.body?.scrollHeight || 0) && Date.now() < deadline; y += step) {
           window.scrollTo(0, y)
           await new Promise((r) => setTimeout(r, 250))
         }
@@ -856,7 +863,15 @@ export async function checkImageRelevance(
     } catch {}
     await page.waitForTimeout(500)
 
-    const facts: PageFacts = await page.evaluate(collectPageFacts)
+    // A page that re-renders or soft-navigates (SPA hydration, client redirect)
+    // can destroy the evaluate's context; retry once after it settles.
+    let facts: PageFacts
+    try {
+      facts = await page.evaluate(collectPageFacts)
+    } catch {
+      await page.waitForTimeout(2000)
+      facts = await page.evaluate(collectPageFacts)
+    }
 
     if (facts.blocked)
       return byUrl.kind === "service"

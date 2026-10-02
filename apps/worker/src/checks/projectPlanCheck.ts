@@ -1,4 +1,4 @@
-import { chromium } from "playwright"
+import { gotoResilient, launchStealthBrowser, looksBlocked, newRealContext } from "../lib/browserContext"
 import { Finding, aiFailureReason } from "@qacc/shared"
 import { describeImageResult } from "../lib/aiFallback"
 import sharp from "sharp"
@@ -35,6 +35,33 @@ const WIDGET_WAIT_MS = 8000
 
 const VISION_PROMPT =
   "This is a screenshot of a medical/aesthetic practice website's reviews page. Does the page display a customer REVIEWS or TESTIMONIALS widget — e.g. star ratings, review cards, patient testimonials, or an embedded reviews feed? Answer strictly with a single word: YES or NO."
+
+// TED / HubSpot reads have no timeout of their own; a hung request must not
+// hang the job. Each read gets this budget, then counts as unreachable.
+const TED_READ_TIMEOUT_MS = 30000
+
+function withTimeout<T>(p: Promise<T>, what: string): Promise<T> {
+  let t: NodeJS.Timeout
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => {
+      t = setTimeout(() => reject(new Error(`${what} timed out after ${TED_READ_TIMEOUT_MS / 1000}s`)), TED_READ_TIMEOUT_MS)
+    }),
+  ]).finally(() => clearTimeout(t))
+}
+
+// A plan check that could not run (no TED client for this URL, TED down, no
+// site URL). "Skipped" marks it as could-not-run in the shared verdict — a full
+// scan of an arbitrary URL has no client record, and that is not a site defect.
+const skipped = (reason: string, context?: string): Finding =>
+  ({
+    check_factor: "project_plan",
+    title: `Project Plan Check Skipped: ${reason}`,
+    description: `Could not complete: ${reason}. The plan could not be checked. This is not a problem with the website.`,
+    context_text: context,
+    status: "open",
+    ai_generated: false,
+  }) as Finding
 
 /** True when "somewhat equal to" the Accelerator plan (fuzzy, case-insensitive). */
 function isAcceleratorPlan(plan: string): boolean {
@@ -93,29 +120,38 @@ export async function checkProjectPlan(
   let hs: Awaited<ReturnType<typeof resolveHubspotClientData>> = null
   // The handle used for every TED read: prefer the real ted_client_id, fall back
   // to the (possibly synthetic) project/client name.
+  // An empty key must not reach getClient — its substring fallback would match
+  // the FIRST TED client for "".
   const clientKey =
     tedClientId != null && String(tedClientId).trim()
       ? String(tedClientId).trim()
-      : clientName
+      : (clientName || "").trim() || null
+  let client: any = null
   try {
     // 1. TED client record `plan` — the main-page value on the client dashboard.
     //    Resolve the client by id/name, else by a host match against the record's
     //    beta/website URL (covers URL-only full scans where the name is synthetic).
-    const client = await resolveClient(clientKey, pageRecord?.siteUrl)
+    client = await withTimeout(resolveClient(clientKey, pageRecord?.siteUrl), "TED client lookup")
     planRaw = getClientPlanField(client)
     if (planRaw) planSource = "TED client page"
 
+    // Later reads use the resolved record's id, so a client found by site URL
+    // is the one whose HubSpot id / notes are read.
+    const key = client?.id ?? clientKey
+
     // 2. HubSpot, by the HubSpot ID on the TED client page.
-    const hubspotId = await getClientHubspotId(clientKey).catch(() => null)
-    hs = await resolveHubspotClientData(hubspotId, clientName).catch(() => null)
+    const hubspotId = client
+      ? await withTimeout(getClientHubspotId(key), "TED HubSpot id lookup").catch(() => null)
+      : null
+    hs = await withTimeout(resolveHubspotClientData(hubspotId, clientName), "HubSpot lookup").catch(() => null)
     if (!planRaw && hs?.plan) {
       planRaw = hs.plan
       planSource = "HubSpot"
     }
 
     // 3. The "Growth99 Plan:" line in TED notes.
-    if (!planRaw) {
-      const notes = await getClientNotesText(clientKey)
+    if (!planRaw && client) {
+      const notes = await withTimeout(getClientNotesText(key), "TED notes lookup")
       const m = notes.match(/Growth99\s+Plan:\s*([^\n\r<]+)/i)
       if (m && m[1]) {
         planRaw = m[1].trim()
@@ -125,13 +161,23 @@ export async function checkProjectPlan(
   } catch (error: any) {
     logger.error({ error: error.message }, "TED read failed for project plan")
     return [
-      {
-        check_factor: "project_plan",
-        title: "Project Plan — could not reach TED",
-        description: `Failed to read the plan from TED for client "${clientName}": ${error.message}`,
-        status: "open",
-        ai_generated: false,
-      } as Finding,
+      skipped(
+        "could not reach TED",
+        `Failed to read the plan from TED for client "${clientName}": ${error.message}`,
+      ),
+    ]
+  }
+
+  // No TED client record for this run at all (typical for a full scan of an
+  // arbitrary URL), or TED not configured. Nothing to check — not "plan not set".
+  if (!client && !planRaw) {
+    return [
+      skipped(
+        process.env.TED_API_TOKEN
+          ? "no TED client record matches this site"
+          : "TED is not configured (TED_API_TOKEN missing)",
+        `Client: ${clientName || "none"} (id: ${clientKey ?? "none"}); site: ${pageRecord?.siteUrl || "none"} — no TED client found by id, name, or site URL.`,
+      ),
     ]
   }
 
@@ -143,7 +189,7 @@ export async function checkProjectPlan(
         title: "Project Plan not set",
         description:
           "No record for the project plan was found. NO fix possible — plan not available to check. Please set the plan on the TED client page.",
-        context_text: `Client: ${clientName} (id: ${clientKey}) — checked the TED client page \`plan\` field, HubSpot growth99_plan (by HubSpot ID), and the "Growth99 Plan:" line in client notes.`,
+        context_text: `Client: ${clientName} (id: ${client?.id ?? clientKey}) — checked the TED client page \`plan\` field, HubSpot growth99_plan (by HubSpot ID), and the "Growth99 Plan:" line in client notes.`,
         status: "open",
         ai_generated: false,
       } as Finding,
@@ -203,27 +249,43 @@ export async function checkProjectPlan(
   let screenshotUrl: string | null = pageRecord?.desktopUrl || null
   let reviewsUrl = ""
 
-  if (pageRecord?.siteUrl) {
-    const base = pageRecord.siteUrl.replace(/\/$/, "")
+  // No site URL: the /reviews page cannot be checked, so "widget missing" would
+  // be a false defect.
+  if (!pageRecord?.siteUrl) {
+    return [skipped("no site URL to check the reviews page on", `${ctx}`)]
+  }
+
+  let pageLoadError = ""
+  {
+    const base = (() => {
+      try {
+        return new URL(pageRecord.siteUrl).origin
+      } catch {
+        return pageRecord.siteUrl.replace(/\/$/, "")
+      }
+    })()
     reviewsUrl = `${base}/reviews`
     // Reuse a caller-supplied browser when present; otherwise cold-launch our
     // own. Skipping the launch saves the ~1-2s chromium cold start per
     // Accelerator run. Behavior-identical: same page/probe logic either way,
     // and we only close what we launched (below).
-    const browser =
-      sharedBrowser ||
-      (await chromium.launch({
-        headless: true,
-        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-      }))
+    let browser: any = null
+    // Own context with a real browser UA (bot filters block "HeadlessChrome");
+    // closed below even when the browser is shared.
+    let context: any = null
     try {
-      const page = await browser.newPage({ viewport: { width: 1920, height: 1080 } })
+      browser = sharedBrowser || (await launchStealthBrowser())
+      context = await newRealContext(browser, { viewport: { width: 1920, height: 1080 } })
+      const page = await context.newPage()
       page.setDefaultNavigationTimeout(25000)
-      try {
-        await page.goto(reviewsUrl, { waitUntil: "networkidle", timeout: 25000 })
-      } catch {
-        await page.goto(reviewsUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {})
-      }
+      // "load" rather than "networkidle": many sites never go network-idle. A
+      // load timeout still leaves a usable page.
+      const nav = await gotoResilient(page, reviewsUrl, { timeout: 30000 })
+      if (!nav.ok) pageLoadError = `the reviews page could not be loaded (${(nav.error || "navigation failed").slice(0, 120)})`
+      else if (nav.status !== null && nav.status >= 500) pageLoadError = `the reviews page returned HTTP ${nav.status}`
+      else if (nav.status === 403 || (await looksBlocked(page)))
+        pageLoadError = "the reviews page was blocked by bot protection"
+      if (pageLoadError) throw new Error(pageLoadError)
 
       // (a) Widget code present in the rendered markup.
       const html = await page.content().catch(() => "")
@@ -295,13 +357,31 @@ export async function checkProjectPlan(
       }
     } catch (e: any) {
       logger.warn({ error: e.message }, "reviews page probe failed (non-fatal)")
+      if (!pageLoadError && !codePresent) pageLoadError = `the reviews page probe failed (${String(e.message).slice(0, 120)})`
     } finally {
+      if (context) await context.close().catch(() => {})
       // Only tear down the browser we launched; a shared one is owned by the caller.
-      if (!sharedBrowser) await browser.close().catch(() => {})
+      if (browser && !sharedBrowser) await browser.close().catch(() => {})
     }
   }
 
   const sourceLine = reviewsUrl ? `\n\nURL: ${reviewsUrl}` : ""
+
+  // The reviews page never loaded (timeout, 5xx, bot challenge): its markup was
+  // not read, so "widget missing" would be a guess. Could not complete.
+  if (!codePresent && pageLoadError) {
+    return [
+      {
+        check_factor: "project_plan",
+        title: "Project Plan Check Failed",
+        description: `Could not complete: ${pageLoadError}. Plan "${planRaw}" is an Accelerator plan, so the reviews widget must be verified on the /reviews page. Process aborted gracefully.${sourceLine}`,
+        context_text: ctx,
+        screenshot_url: screenshotUrl,
+        status: "open",
+        ai_generated: false,
+      } as Finding,
+    ]
+  }
 
   // Scenario 3 — Accelerator plan, no widget code. FAIL + fix.
   if (!codePresent) {

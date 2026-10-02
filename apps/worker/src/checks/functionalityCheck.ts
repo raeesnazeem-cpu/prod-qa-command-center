@@ -1,5 +1,6 @@
 import { Browser } from "playwright"
 import { Finding } from "@qacc/shared"
+import { realContextOptions, gotoResilient, looksBlocked } from "../lib/browserContext"
 
 /**
  * QA Website Functionality Testing (bounded per page)
@@ -43,6 +44,11 @@ const INTERACTIVE_SELECTOR = [
   "a:not([href])",
 ].join(", ")
 
+// Console noise that is not a JavaScript error caused by the click: failed
+// network requests (ad / analytics beacons, blocked trackers) and CSP reports
+// fire on their own schedule on almost every site and would be mis-attributed.
+const NOISE_RE = /failed to load resource|net::err_|content security policy|refused to (load|connect|execute|frame)|third-party cookie|was preloaded using link preload/i
+
 export async function checkFunctionality(
   pageUrl: string,
   runId: string,
@@ -80,12 +86,15 @@ export async function checkFunctionality(
   }
 
   try {
-    context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+    // Real browser UA: no UA means "HeadlessChrome" and a Cloudflare 403.
+    context = await browser.newContext(realContextOptions({ viewport: { width: 1440, height: 900 } }))
     page = await context.newPage()
 
     // Collect JS errors as they happen.
     page.on("console", (msg: any) => {
-      if (msg.type() === "error" && consoleErrors.length < 100) consoleErrors.push(msg.text())
+      if (msg.type() !== "error" || consoleErrors.length >= 100) return
+      const text = String(msg.text() || "")
+      if (!NOISE_RE.test(text)) consoleErrors.push(text)
     })
     page.on("pageerror", (err: any) => {
       if (pageErrors.length < 100) pageErrors.push(err.message)
@@ -96,36 +105,43 @@ export async function checkFunctionality(
     })
 
     if (onProgress) await onProgress(10, "Loading page for functionality testing...")
-    let loadOk = true
-    try {
-      await page.goto(pageUrl, { waitUntil: "load", timeout: 60000 })
-    } catch (e: any) {
-      if (
-        !(
-          e.message?.includes("Timeout") ||
-          e.message?.includes("aborted") ||
-          e.message?.includes("closed")
-        )
-      ) {
-        throw e
-      }
-      // Page did not finish loading — never emit a "no errors" pass over it.
-      loadOk = false
-    }
+    // A "load" timeout alone is not fatal (beacons / chat widgets); a page that
+    // never navigated, never rendered or shows a bot-challenge is — never emit
+    // a "no errors" pass over it.
+    const nav = await gotoResilient(page, pageUrl, { timeout: 60000 })
     await page.waitForTimeout(500)
+    const loadOk =
+      nav.ok &&
+      !(await looksBlocked(page)) &&
+      (await page
+        .evaluate(() => !!document.body && document.body.querySelectorAll("*").length > 5)
+        .catch(() => false))
+    // Compare clicks against the URL the page actually settled on (after any
+    // http→https / trailing-slash / locale redirect), not the requested one —
+    // otherwise every click looks like a navigation and forces a reload.
+    const homeUrl = loadOk ? page.url() || pageUrl : pageUrl
+    const reloadHome = async () => {
+      await gotoResilient(page, homeUrl, { timeout: 30000 })
+      await page.waitForTimeout(300)
+    }
 
     const baselineOverflow = await measureOverflow()
 
-    // Enumerate candidate controls (bounded).
-    const handles = await page.$$(INTERACTIVE_SELECTOR)
-    const targets = handles.slice(0, MAX_INTERACTIONS)
+    // Enumerate candidate controls (bounded). Re-enumerated after every reload,
+    // since a reload detaches every handle taken before it.
+    let targets: any[] = loadOk ? (await page.$$(INTERACTIVE_SELECTOR).catch(() => [])).slice(0, MAX_INTERACTIONS) : []
+    const totalTargets = targets.length
+    const refreshTargets = async () => {
+      targets = (await page.$$(INTERACTIVE_SELECTOR).catch(() => [])).slice(0, MAX_INTERACTIONS)
+    }
     if (onProgress)
       await onProgress(30, `Exercising ${targets.length} interactive controls...`)
 
     let exercised = 0
-    for (let i = 0; i < targets.length; i++) {
+    for (let i = 0; i < totalTargets; i++) {
       if (findings.length >= MAX_FINDINGS) break
       const el = targets[i]
+      if (!el) continue
       try {
         // PERF: fold the previous three CDP round-trips (isVisible + isEnabled +
         // label evaluate) into ONE evaluate returning {visible, enabled, label}.
@@ -201,10 +217,10 @@ export async function checkFunctionality(
         let navigated = false
         try {
           const cur = page.url()
-          if (cur && cur.split("#")[0] !== pageUrl.split("#")[0]) {
+          if (cur && cur.split("#")[0] !== homeUrl.split("#")[0]) {
             navigated = true
-            await page.goto(pageUrl, { waitUntil: "load", timeout: 30000 }).catch(() => {})
-            await page.waitForTimeout(300)
+            await reloadHome()
+            await refreshTargets()
           }
         } catch {}
 
@@ -243,8 +259,8 @@ export async function checkFunctionality(
             ai_generated: false,
           } as Finding)
           // Reset by reloading so subsequent controls measure from baseline.
-          await page.goto(pageUrl, { waitUntil: "load", timeout: 30000 }).catch(() => {})
-          await page.waitForTimeout(300)
+          await reloadHome()
+          await refreshTargets()
         }
       } catch {
         // stale handle / detached node — skip this control
@@ -261,6 +277,19 @@ export async function checkFunctionality(
         title: "Functionality Check Failed",
         description: `The page did not finish loading, so interactive functionality could not be exercised. Process aborted gracefully; QACC will retry on the next run.`,
         context_text: `Page: ${pageUrl}\nSystem Error: page load timeout`,
+        screenshot_url: null,
+        status: "open",
+        ai_generated: false,
+      } as Finding)
+    } else if (findings.length === 0 && totalTargets === 0) {
+      // A rendered page with no interactive controls at all (a static page,
+      // e.g. plain HTML with only links) has nothing that can break on click.
+      // That is a determined result, not a lapse.
+      findings.push({
+        check_factor: CHECK_FACTOR,
+        title: "Functionality: no interaction errors or breaks",
+        description: `This page has no interactive controls (buttons, dropdowns, accordions, tabs or toggles) to exercise, so no interaction can trigger a JavaScript error or layout break.`,
+        context_text: `Page: ${pageUrl}\nControls found: 0`,
         screenshot_url: null,
         status: "open",
         ai_generated: false,

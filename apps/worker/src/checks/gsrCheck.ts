@@ -54,6 +54,14 @@ const MAX_SERP_PAGES = Math.max(1, Number(process.env.GSR_MAX_SERP_PAGES) || 1)
 // never has results and only burns ScraperAPI credits. GSR applies after release.
 const BETA_HOST = /(^|\.)gogroth\.com$/i
 
+// Hosts Google can never index (localhost, raw IPs, local/dev TLDs). A full
+// scan can be pointed at any URL, so skip these instead of spending credits.
+const isNonPublicHost = (host: string) =>
+  !host.includes(".") || // localhost, single-label intranet names
+  host.includes(":") || // IPv6 literal
+  /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ||
+  /\.(local|localhost|test|internal|lan)$/i.test(host)
+
 // Successful results per domain, kept for a day in this (long-lived) worker
 // process, so rescanning the same site does not spend credits again. Only
 // readable results are cached — a failure is always retried.
@@ -109,6 +117,15 @@ export async function checkGsr(
         couldNotRun(
           `Not applicable before release: ${domain} is a beta site hidden from search engines, so Google has no results for it. GSR runs on the live domain after release. ${NOT_SITE}`,
           `site:${domain} not searched (beta host)`,
+        ),
+      ]
+    }
+
+    if (isNonPublicHost(domain)) {
+      return [
+        couldNotRun(
+          `Not applicable: ${domain} is not a public domain, so Google has no results for it. Run GSR against the public live domain. ${NOT_SITE}`,
+          `site:${domain} not searched (non-public host)`,
         ),
       ]
     }
@@ -304,16 +321,22 @@ export async function checkGsr(
 
       if (nextUrl && pagesChecked < MAX_SERP_PAGES) {
         if (onProgress) await onProgress(85, `Loading next page...`)
-        await newPage.goto(scraperUrlFor(apiKey, nextUrl, usePremium), {
-          waitUntil: "domcontentloaded",
-          timeout: 60000,
-        })
+        // A failed later page must not throw away the results already read —
+        // stop paging and report what we have.
+        const ok = await newPage
+          .goto(scraperUrlFor(apiKey, nextUrl, usePremium), {
+            waitUntil: "domcontentloaded",
+            timeout: 60000,
+          })
+          .then((r: any) => !r || r.status() < 400)
+          .catch(() => false)
+        if (!ok) hasNextPage = false
       } else {
         hasNextPage = false
       }
     }
 
-    await newPage.close()
+    await newPage.close().catch(() => {})
 
     if (serps.length === 0) {
       const reason =

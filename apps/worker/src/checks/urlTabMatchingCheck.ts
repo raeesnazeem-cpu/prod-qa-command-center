@@ -63,6 +63,9 @@ function stem(w: string): string {
 
 function words(s: string): string[] {
   return (s || "")
+    // Accented titles ("Café Menu") compare against their ASCII slugs ("cafe-menu").
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/&amp;/g, "and")
     .split(/[^a-z0-9]+/)
@@ -78,13 +81,28 @@ function wordsMatch(a: string, b: string): boolean {
   return min >= 5 && (x.startsWith(y) || y.startsWith(x))
 }
 
+const safeDecode = (s: string) => {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
+}
+
 /** The slug that names the page: last meaningful path segment. */
 export function slugFromUrl(pageUrl: string): string {
   let segs: string[] = []
   try {
-    segs = new URL(pageUrl).pathname
+    const u = new URL(pageUrl)
+    let path = u.pathname
+    // Hash-routed SPAs ("/#/about-us", "/#!/services") keep the route in the hash.
+    if (path.replace(/\/+$/, "") === "" || /\/index\.(html?|php)$/i.test(path)) {
+      const m = u.hash.match(/^#!?(\/[^?]*)/)
+      if (m) path = m[1]
+    }
+    segs = path
       .split("/")
-      .map((s) => decodeURIComponent(s).replace(/\.(html?|php)$/i, ""))
+      .map((s) => safeDecode(s).replace(/\.(html?|php|aspx?|jsp)$/i, ""))
       .filter(Boolean)
   } catch {
     return ""
@@ -119,9 +137,15 @@ export type MatchVerdict =
   | { verdict: "fail"; reason: string }
   | { verdict: "ask_ai" }
 
+// Opaque ids carry no page meaning: UUIDs, hex hashes, mixed letter+digit
+// tokens ("/p/a8f3c9e2b1", "/item/x7k29qp4ma") from shops and app routers.
+const isIdWord = (w: string) =>
+  (/^[0-9a-f]{8,}$/i.test(w) && /\d/.test(w)) ||
+  (w.length >= 8 && (w.match(/\d/g) || []).length >= 3 && (w.match(/[a-z]/gi) || []).length >= 3)
+
 /** Deterministic part of the match. Exported for tests. */
 export function matchSlugToTitle(slug: string, pageName: string): MatchVerdict {
-  const slugWords = words(slug.replace(/[-_+]/g, " "))
+  const slugWords = words(slug.replace(/[-_+]/g, " ")).filter((w) => !isIdWord(w))
   const titleWords = words(pageName)
   if (!slugWords.length) return { verdict: "pass", how: "slug has no descriptive words to compare" }
   if (!titleWords.length) return { verdict: "fail", reason: "the tab title has no words describing the page" }

@@ -2,6 +2,7 @@ import axios from 'axios';
 import { XMLParser } from 'fast-xml-parser';
 import { chromium } from 'playwright';
 import { URL } from 'url';
+import { DESKTOP_UA, gotoResilient, newRealContext } from '../lib/browserContext';
 
 const MAX_URLS = 200;
 const FALLBACK_MAX_PAGES = 100;
@@ -10,7 +11,7 @@ const FALLBACK_MAX_DEPTH = 3;
 const IGNORED_EXTENSIONS = [
   '.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.ico',
   '.css', '.js', '.json', '.xml', '.txt', '.zip', '.rar', '.exe',
-  '.mp3', '.mp4', '.wav', '.avi', '.mov', '.doc', '.docx', '.xls', '.xlsx'
+  '.mp3', '.mp4', '.wav', '.avi', '.mov', '.doc', '.docx', '.xls', '.xlsx', '.md', '.rss', '.atom', '.gz'
 ];
 
 /**
@@ -67,19 +68,26 @@ async function fetchSitemapUrls(sitemapUrl: string, visited: Set<string> = new S
   visited.add(sitemapUrl);
 
   try {
-    const response = await axios.get(sitemapUrl, { 
+    const response = await axios.get(sitemapUrl, {
       timeout: 15000,
+      maxRedirects: 5,
+      responseType: 'text',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'User-Agent': DESKTOP_UA,
         'Accept': 'application/xml,text/xml,*/*'
       }
     });
-    
+
+    // Many sites answer /sitemap.xml with their HTML 404 or SPA shell (200).
+    // Only parse real XML.
+    const body = typeof response.data === 'string' ? response.data : String(response.data ?? '');
+    if (!/<(urlset|sitemapindex)[\s>]/i.test(body)) return [];
+
     const parser = new XMLParser({
       ignoreAttributes: false,
       attributeNamePrefix: "@_"
     });
-    const jsonObj = parser.parse(response.data);
+    const jsonObj = parser.parse(body);
 
     let urls: string[] = [];
 
@@ -90,8 +98,9 @@ async function fetchSitemapUrls(sitemapUrl: string, visited: Set<string> = new S
         : [jsonObj.sitemapindex.sitemap];
       
       for (const s of sitemaps) {
-        if (s.loc) {
-          const nestedUrls = await fetchSitemapUrls(s.loc, visited);
+        const loc = typeof s.loc === 'string' ? s.loc.trim() : s.loc?.['#text'];
+        if (loc) {
+          const nestedUrls = await fetchSitemapUrls(loc, visited);
           urls = [...urls, ...nestedUrls];
         }
       }
@@ -104,8 +113,9 @@ async function fetchSitemapUrls(sitemapUrl: string, visited: Set<string> = new S
         : [jsonObj.urlset.url];
       
       for (const entry of urlEntries) {
-        if (entry.loc) {
-          urls.push(entry.loc);
+        const loc = typeof entry.loc === 'string' ? entry.loc.trim() : entry.loc?.['#text'];
+        if (loc) {
+          urls.push(loc);
         }
       }
     }
@@ -121,13 +131,15 @@ async function fetchSitemapUrls(sitemapUrl: string, visited: Set<string> = new S
  * Fallback Playwright crawler
  */
 async function crawlWithPlaywright(siteUrl: string): Promise<string[]> {
-  const browser = await chromium.launch();
-  const context = await browser.newContext();
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+  });
+  // Real UA: a bare context sends "HeadlessChrome", which bot filters block.
+  const context = await newRealContext(browser);
   const foundUrls = new Set<string>();
   const queue: { url: string; depth: number }[] = [{ url: siteUrl, depth: 0 }];
   const visited = new Set<string>();
-
-  const baseDomain = new URL(siteUrl).hostname;
 
   try {
     while (queue.length > 0 && foundUrls.size < FALLBACK_MAX_PAGES) {
@@ -141,17 +153,21 @@ async function crawlWithPlaywright(siteUrl: string): Promise<string[]> {
 
       const page = await context.newPage();
       try {
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-        
+        // networkidle never settles on sites with chat widgets / beacons, so
+        // use load (gotoResilient never throws) and give SPAs a moment to
+        // render their links.
+        await gotoResilient(page, url, { timeout: 30000 });
+        await page.waitForTimeout(1500).catch(() => {});
+
         if (isValidUrl(url, siteUrl)) {
           foundUrls.add(normalized);
         }
 
         if (depth < FALLBACK_MAX_DEPTH) {
-          const links = await page.evaluate(() => {
+          const links: string[] = await page.evaluate(() => {
             return Array.from(document.querySelectorAll('a[href]'))
               .map(a => (a as HTMLAnchorElement).href);
-          });
+          }).catch(() => []);
 
           for (const link of links) {
             if (isValidUrl(link, siteUrl)) {
@@ -165,48 +181,113 @@ async function crawlWithPlaywright(siteUrl: string): Promise<string[]> {
       } catch (e) {
         console.error(`Error crawling ${url}:`, e);
       } finally {
-        await page.close();
+        await page.close().catch(() => {});
       }
     }
   } finally {
-    await browser.close();
+    await browser.close().catch(() => {});
   }
 
   return Array.from(foundUrls);
 }
 
 /**
+ * Follow redirects on the entered URL (http→https, bare→www, /→/en/) so the
+ * sitemap lookup and link filtering use the host the site actually serves.
+ */
+async function resolveFinalUrl(siteUrl: string): Promise<string> {
+  try {
+    const res = await axios.get(siteUrl, {
+      timeout: 15000,
+      maxRedirects: 5,
+      responseType: 'text',
+      headers: { 'User-Agent': DESKTOP_UA, 'Accept': 'text/html,*/*' },
+      validateStatus: () => true,
+    });
+    const final = (res.request as any)?.res?.responseUrl;
+    return typeof final === 'string' && /^https?:\/\//i.test(final) ? final : siteUrl;
+  } catch {
+    return siteUrl;
+  }
+}
+
+/** Sitemap URLs listed in robots.txt ("Sitemap: ..." lines). */
+async function sitemapsFromRobots(origin: string): Promise<string[]> {
+  try {
+    const res = await axios.get(`${origin}/robots.txt`, {
+      timeout: 10000,
+      responseType: 'text',
+      headers: { 'User-Agent': DESKTOP_UA },
+      validateStatus: () => true,
+    });
+    if (res.status !== 200 || typeof res.data !== 'string') return [];
+    return res.data
+      .split(/\r?\n/)
+      .map((l: string) => l.match(/^\s*sitemap:\s*(\S+)/i)?.[1])
+      .filter((u: string | undefined): u is string => !!u);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Main Crawler Function
+ *
+ * Works on any site, not just WordPress: robots.txt sitemaps first, then the
+ * common sitemap paths (WordPress, Yoast/RankMath, Shopify, Squarespace, Wix
+ * and Webflow all serve one of these), then a link crawl. Never throws — the
+ * caller falls back to the homepage when nothing is found.
  */
 export async function crawlSitemap(siteUrl: string): Promise<string[]> {
-  const baseUrl = siteUrl.endsWith('/') ? siteUrl.slice(0, -1) : siteUrl;
-  const potentialSitemaps = [
-    `${baseUrl}/sitemap.xml`,
-    `${baseUrl}/sitemap_index.xml`,
-    `${baseUrl}/wp-sitemap.xml`
+  const entered = siteUrl.endsWith('/') ? siteUrl.slice(0, -1) : siteUrl;
+  const finalUrl = await resolveFinalUrl(entered);
+  let origin = entered;
+  try {
+    origin = new URL(finalUrl).origin;
+  } catch {}
+
+  const robotsSitemaps = await sitemapsFromRobots(origin);
+  const commonSitemaps = [
+    `${origin}/sitemap.xml`,
+    `${origin}/sitemap_index.xml`,
+    `${origin}/wp-sitemap.xml`,
+    `${origin}/sitemap-index.xml`,
   ];
 
   let discoveredUrls: string[] = [];
+  const visited = new Set<string>();
 
-  // Try sitemaps first
-  for (const sitemapUrl of potentialSitemaps) {
-    const urls = await fetchSitemapUrls(sitemapUrl);
-    if (urls.length > 0) {
-      discoveredUrls = [...discoveredUrls, ...urls];
+  // robots.txt may list several sitemaps (pages, posts, products) — take all.
+  for (const sitemapUrl of robotsSitemaps) {
+    discoveredUrls.push(...(await fetchSitemapUrls(sitemapUrl, visited)));
+  }
+
+  // Otherwise the common paths. Stop at the first one that yields URLs — the
+  // others are usually the same list under another name.
+  if (discoveredUrls.length === 0) {
+    for (const sitemapUrl of commonSitemaps) {
+      const urls = await fetchSitemapUrls(sitemapUrl, visited);
+      if (urls.length > 0) {
+        discoveredUrls = urls;
+        break;
+      }
     }
   }
 
   // Fallback to Playwright link crawling
   if (discoveredUrls.length === 0) {
     console.log(`No sitemap found for ${siteUrl}, falling back to Playwright crawl...`);
-    discoveredUrls = await crawlWithPlaywright(siteUrl);
+    discoveredUrls = await crawlWithPlaywright(finalUrl).catch((e) => {
+      console.warn(`Playwright crawl failed for ${siteUrl}:`, e?.message || e);
+      return [] as string[];
+    });
   }
 
-  // Filter, deduplicate, and sort
+  // Filter against the served host (www/bare are treated as one), dedupe, sort.
   const cleanUrls = Array.from(new Set(
     discoveredUrls
-      .filter(url => isValidUrl(url, siteUrl))
-      .map(url => normalizeUrl(url, siteUrl))
+      .filter(url => isValidUrl(url, finalUrl))
+      .map(url => normalizeUrl(url, finalUrl))
   )).sort();
 
   return cleanUrls.slice(0, MAX_URLS);

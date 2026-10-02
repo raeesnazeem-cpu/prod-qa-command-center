@@ -16,6 +16,11 @@ import type { ThemeType } from "../lib/themeType"
  * screenshot and the video-timing pass can address them without fragile
  * selector strings.
  *
+ * Non-WordPress sites (Squarespace, Wix, Webflow, Shopify, SPAs, static HTML)
+ * fall through to generic section selectors and, last, to the first large
+ * image / video near the top of the page. A YouTube / Vimeo iframe hero counts
+ * as hero media too.
+ *
  * Honesty rule: this check runs on the homepage only, so "nothing found" is a
  * real signal, not a pass. It reports `medium` instead of silently succeeding.
  */
@@ -24,7 +29,7 @@ interface HeroProbe {
   regionFound: boolean
   regionSelector: string
   regionTag: string
-  media: "video" | "image" | "css-background" | "none"
+  media: "video" | "image" | "css-background" | "embed" | "none"
   isCoverBlock: boolean
   video: {
     src: string
@@ -41,6 +46,9 @@ interface HeroProbe {
   fallbackKind: string | null
   primaryImage: { src: string; loaded: boolean; outerHTML: string } | null
   cssBackground: { url: string; loaded: boolean } | null
+  // YouTube / Vimeo / Wistia iframe used as the hero video (Squarespace, Wix
+  // and many hand-built sites do this). Its playback can't be timed from here.
+  embed: { src: string } | null
   brokenImages: { src: string; outerHTML: string }[]
 }
 
@@ -93,8 +101,23 @@ const REGION_SELECTORS_ELEMENTOR = [
   ".e-con",
 ]
 
+// Any-site fallbacks, tried AFTER the theme lists above so a WordPress page
+// resolves exactly as before. They cover builders and platforms that never use
+// WP markup: the first section after the site header, Squarespace / Shopify /
+// Webflow section wrappers, banner and slider wrappers, then any top section.
+const REGION_SELECTORS_GENERIC = [
+  "header + section, header + div, [role='banner'] + section, [role='banner'] + div",
+  "main section",
+  ".page-section, .shopify-section, .w-section, [data-section-id]",
+  '[class*="banner" i], [class*="slider" i], [class*="carousel" i], [class*="slideshow" i]',
+  "section",
+]
+
 function regionSelectorsFor(themeType?: ThemeType): string[] {
-  return themeType === "classic" ? REGION_SELECTORS_CLASSIC : REGION_SELECTORS
+  return [
+    ...(themeType === "classic" ? REGION_SELECTORS_CLASSIC : REGION_SELECTORS),
+    ...REGION_SELECTORS_GENERIC,
+  ]
 }
 
 export async function checkHeroMedia(
@@ -153,7 +176,34 @@ export async function checkHeroMedia(
         if (region) break
       }
 
+      // Last resort for markup no selector knows: the first large image or video
+      // near the top of the page, widened to its biggest ancestor that is still
+      // about one screen tall (that box is the hero, whatever it is called).
+      if (!region) {
+        const media = Array.from(document.querySelectorAll("img, video, picture, iframe")).find((el) => {
+          if (!visible(el)) return false
+          const r = el.getBoundingClientRect()
+          return r.top + window.scrollY < MAX_TOP && r.width >= 320 && r.height >= MIN_HEIGHT
+        })
+        if (media) {
+          let box: Element = media
+          const maxH = Math.max(window.innerHeight * 1.5, 900)
+          while (
+            box.parentElement &&
+            box.parentElement !== document.body &&
+            box.parentElement.getBoundingClientRect().height <= maxH
+          )
+            box = box.parentElement
+          region = box
+          regionSelector = "first large media in the top viewport"
+        }
+      }
+
       const scope: Element = region || document.body
+      // With no region the whole body is the scope, so only media near the top of
+      // the page may count — never a footer logo or a blog thumbnail far below.
+      const nearTop = (el: Element): boolean =>
+        !!region || el.getBoundingClientRect().top + window.scrollY < MAX_TOP
       if (region) region.setAttribute("data-qacc-hero-region", "1")
 
       // Loads an image URL to find out whether it actually resolves.
@@ -185,9 +235,9 @@ export async function checkHeroMedia(
       ) as HTMLVideoElement | null
       let video: HTMLVideoElement | null = coverVideo
       if (!video) {
-        const vids = Array.from(
+        const vids = (Array.from(
           scope.querySelectorAll("video"),
-        ) as HTMLVideoElement[]
+        ) as HTMLVideoElement[]).filter(nearTop)
         // A hero/background video is decorative: autoplaying, muted, looping
         // and/or without controls. Prefer that over an embedded player.
         video =
@@ -204,9 +254,9 @@ export async function checkHeroMedia(
 
       let primaryImage: HTMLImageElement | null = coverImage
       if (!primaryImage) {
-        const imgs = Array.from(
+        const imgs = (Array.from(
           scope.querySelectorAll("img"),
-        ) as HTMLImageElement[]
+        ) as HTMLImageElement[]).filter(nearTop)
         // Ignore logos/icons — a hero image is large.
         primaryImage =
           imgs.find((im) => {
@@ -222,12 +272,36 @@ export async function checkHeroMedia(
         ? [region, ...Array.from(region.querySelectorAll("*")).slice(0, 60)]
         : []
       for (const el of bgCandidates) {
+        // Icon sprites and arrow backgrounds are not the hero background.
+        const br = el.getBoundingClientRect()
+        if (el !== region && (br.width < 200 || br.height < 100)) continue
         const u = bgUrlOf(el)
         if (u) {
           cssBackground = { url: u, loaded: await imageResolves(u) }
           break
         }
       }
+
+      // A lazy-loaded hero image may simply not have decoded yet when we probe.
+      // Only call it broken after actually trying to load its URL.
+      let primaryLoaded = !!primaryImage && primaryImage.complete && primaryImage.naturalWidth > 0
+      if (primaryImage && !primaryLoaded) {
+        const lazySrc =
+          primaryImage.currentSrc ||
+          primaryImage.getAttribute("data-src") ||
+          primaryImage.getAttribute("data-lazy-src") ||
+          primaryImage.src
+        primaryLoaded = await imageResolves(lazySrc)
+      }
+
+      // --- iframe video embed (YouTube / Vimeo / Wistia) --------------------
+      const embedEl = (Array.from(scope.querySelectorAll("iframe")) as HTMLIFrameElement[]).find((f) => {
+        const src = f.getAttribute("src") || f.getAttribute("data-src") || ""
+        if (!/youtube|youtu\.be|vimeo|wistia|player|video/i.test(src)) return false
+        const r = f.getBoundingClientRect()
+        return nearTop(f) && r.width >= 320 && r.height >= MIN_HEIGHT
+      })
+      const embed = embedEl ? { src: embedEl.getAttribute("src") || embedEl.getAttribute("data-src") || "" } : null
 
       // --- fallback image behind the video ----------------------------------
       let fallbackImage: string | null = null
@@ -260,7 +334,9 @@ export async function checkHeroMedia(
       const brokenImages = (
         Array.from(scope.querySelectorAll("img")) as HTMLImageElement[]
       )
-        .filter((im) => im.complete && im.naturalWidth === 0)
+        .filter(nearTop)
+        // An <img> with no src at all is a lazy placeholder, not a broken image.
+        .filter((im) => im.complete && im.naturalWidth === 0 && !!(im.currentSrc || im.getAttribute("src")))
         .slice(0, 10)
         .map((im) => ({
           src: im.currentSrc || im.src,
@@ -273,7 +349,9 @@ export async function checkHeroMedia(
           ? "image"
           : cssBackground
             ? "css-background"
-            : "none"
+            : embed
+              ? "embed"
+              : "none"
 
       return {
         regionFound: !!region,
@@ -305,11 +383,12 @@ export async function checkHeroMedia(
         primaryImage: primaryImage
           ? {
               src: primaryImage.currentSrc || primaryImage.src,
-              loaded: primaryImage.complete && primaryImage.naturalWidth > 0,
+              loaded: primaryLoaded,
               outerHTML: primaryImage.outerHTML.substring(0, 300),
             }
           : null,
         cssBackground,
+        embed,
         brokenImages,
       }
     }, { base: regionSelectors, elementor: REGION_SELECTORS_ELEMENTOR })
@@ -545,12 +624,14 @@ export async function checkHeroMedia(
           ? "Hero video loaded and played within benchmark"
           : probe.media === "image"
             ? "Hero image loaded successfully"
-            : "Hero background image loaded successfully"
+            : probe.media === "embed"
+              ? "Hero embedded video present"
+              : "Hero background image loaded successfully"
       findings.push({
         check_factor: "hero_media",
         title: what,
         description: `- <strong>Hero region</strong>: ${regionLabel}\n- <strong>Hero media</strong>: ${probe.media}\n- <strong>Fallback image</strong>: ${probe.fallbackImage ? `Present via ${probe.fallbackKind}` : probe.media === "video" ? "Absent" : "n/a"}\n\n${what}. No hero media issues detected on this page.`,
-        context_text: `Media: ${probe.media}\nRegion: ${probe.regionSelector || "n/a"}\nFallback: ${probe.fallbackImage || "n/a"}`,
+        context_text: `Media: ${probe.media}\nRegion: ${probe.regionSelector || "n/a"}\nFallback: ${probe.fallbackImage || "n/a"}${probe.embed ? `\nEmbed: ${probe.embed.src}` : ""}`,
         screenshot_url: screenshotUrl,
         status: "open",
         ai_generated: false,

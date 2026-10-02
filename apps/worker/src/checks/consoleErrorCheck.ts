@@ -1,5 +1,14 @@
 import { Page as PlaywrightPage } from 'playwright';
 import { Finding } from '@qacc/shared';
+import { looksBlocked } from '../lib/browserContext';
+
+// One error message can be a multi-KB stack or minified source line; keep the
+// report readable and the row small.
+const MAX_ERROR_CHARS = 500;
+const clip = (m: string) => {
+  const s = String(m ?? '').trim();
+  return s.length > MAX_ERROR_CHARS ? `${s.slice(0, MAX_ERROR_CHARS)}…` : s;
+};
 
 /**
  * Checks for console errors and critical page crashes.
@@ -28,9 +37,31 @@ export async function checkConsoleErrors(
     // Ignore — report whatever was captured so far.
   }
 
+  // A bot-challenge page (Cloudflare "Just a moment…") logs its own errors;
+  // they say nothing about the real site, and "0 errors" there is no pass
+  // either. Short body text guards against real pages that mention "captcha".
+  try {
+    if (await looksBlocked(page)) {
+      const textLen = await page.evaluate(() => (document.body?.innerText || '').length).catch(() => 0);
+      if (textLen < 3000) {
+        return [{
+          check_factor: 'console_errors',
+          title: 'Console Errors Check Failed',
+          description: 'Could not complete: the site served a bot-protection page to the QACC browser, so its console errors could not be checked. Process aborted gracefully.',
+          context_text: `URL: ${(() => { try { return page.url(); } catch { return ''; } })()}`,
+          screenshot_url: null,
+          status: 'open',
+          ai_generated: false
+        } as Finding];
+      }
+    }
+  } catch {
+    // Never fail the check over the bot-wall probe itself.
+  }
+
   // Dedupe while preserving order (the caller uses plain arrays, not Sets).
-  const uniqueCritical = Array.from(new Set(criticalErrors));
-  const uniqueConsole = Array.from(new Set(consoleErrors));
+  const uniqueCritical = Array.from(new Set((criticalErrors || []).map(clip).filter(Boolean)));
+  const uniqueConsole = Array.from(new Set((consoleErrors || []).map(clip).filter(Boolean)));
 
   const findings: Finding[] = [];
 
@@ -40,7 +71,7 @@ export async function checkConsoleErrors(
       title: `${uniqueCritical.length} Critical Runtime Errors`,
       description: `The page encountered critical JavaScript execution errors that may prevent it from functioning correctly:\n${uniqueCritical.join('\n')}`,
       context_text: uniqueCritical.join(' | '),
-      screenshot_url: pageRecord.desktopUrl,
+      screenshot_url: pageRecord?.desktopUrl ?? null,
       status: 'open',
       ai_generated: false
     });
@@ -52,7 +83,7 @@ export async function checkConsoleErrors(
       title: `${uniqueConsole.length} Console Errors Detected`,
       description: `JavaScript errors were logged to the console during the page session:\n${uniqueConsole.join('\n')}`,
       context_text: uniqueConsole.join(' | '),
-      screenshot_url: pageRecord.desktopUrl,
+      screenshot_url: pageRecord?.desktopUrl ?? null,
       status: 'open',
       ai_generated: false
     });

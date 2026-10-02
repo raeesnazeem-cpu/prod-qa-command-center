@@ -15,7 +15,9 @@ import { Finding } from "@qacc/shared"
  * Which pages: WordPress marks a single blog post with the `single-post` body
  * class (classic, block and Elementor theme-builder templates alike); a post
  * whose theme strips body classes is still recognised by core's `type-post`
- * class on its <article>. Every other page returns [] — silent, no row.
+ * class on its <article>. A non-WordPress post (Squarespace, Webflow, Shopify,
+ * Ghost, Next.js, static) is recognised by structured signals instead — see
+ * isNonWpPost below. Every other page returns [] — silent, no row.
  *
  * What counts as the sidebar: a region laid out BESIDE the post content at
  * desktop width, outside the header / footer / nav and outside the post body.
@@ -105,7 +107,7 @@ function collectSidebarFacts(): SidebarFacts {
   // post called "Access Denied", so it also must carry no WordPress assets.
   const title = (document.title || "").toLowerCase()
   if (
-    /just a moment|attention required|access denied|verify you are human/.test(title) &&
+    /just a moment|attention required|access denied|verify you are human|checking your browser/.test(title) &&
     !body.classList.contains("single-post") &&
     !document.querySelector('link[href*="/wp-content/"], script[src*="/wp-content/"], script[src*="/wp-includes/"]')
   ) {
@@ -121,7 +123,44 @@ function collectSidebarFacts(): SidebarFacts {
     !byBodyClass &&
     !NOT_POST.some((c) => cl.contains(c)) &&
     document.querySelectorAll("article.type-post").length === 1
-  if (!byBodyClass && !byArticle) return base
+  // Any-platform post: a single article page, proven by TWO independent
+  // signals so a marketing page with og:type=article (Yoast sets that on every
+  // page) is never mistaken for a post.
+  //   (1) structured data says it is an article: JSON-LD / microdata
+  //       BlogPosting / NewsArticle / Article, or og:type=article with an
+  //       article:published_time.
+  //   (2) the page looks like ONE dated article: a post-style URL
+  //       (/blog/<slug>, /news/<slug>, /posts/<slug>, /articles/<slug>,
+  //       /YYYY/MM/<slug>) or exactly one <article> holding a <time>.
+  // WordPress pages that WP itself marks as non-posts are never re-promoted.
+  const isNonWpPost = (): boolean => {
+    if (document.querySelector('link[href*="/wp-content/"], script[src*="/wp-includes/"]') && cl.length > 0)
+      return false // a WP page without single-post / type-post: WP said "not a post"
+    let structured = false
+    for (const s of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
+      const txt = s.textContent || ""
+      if (/"@type"\s*:\s*(\[[^\]]*)?"(BlogPosting|NewsArticle|Article|TechArticle)"/.test(txt)) {
+        structured = true
+        break
+      }
+    }
+    if (!structured && document.querySelector('[itemtype*="schema.org/BlogPosting" i], [itemtype*="schema.org/NewsArticle" i], [itemtype*="schema.org/Article" i]'))
+      structured = true
+    const ogType = (document.querySelector('meta[property="og:type"]')?.getAttribute("content") || "").toLowerCase()
+    if (!structured && ogType === "article" && document.querySelector('meta[property="article:published_time"]'))
+      structured = true
+    if (!structured) return false
+    const path = location.pathname.replace(/\/+$/, "")
+    // Listing pages (category / tag / author / pagination) are not a post.
+    if (/\/(category|categories|tag|tags|author|page)\//i.test(`${path}/`)) return false
+    const postUrl =
+      /\/(blog|blogs|news|posts?|articles?|journal|insights|stories)\/[^/]+(\/[^/]+)*$/i.test(path) ||
+      /\/(19|20)\d{2}\/\d{1,2}\/[^/]+$/.test(path)
+    const articles = document.querySelectorAll("article")
+    const datedArticle = articles.length === 1 && !!articles[0].querySelector("time")
+    return postUrl || datedArticle
+  }
+  if (!byBodyClass && !byArticle && !isNonWpPost()) return base
   base.isPost = true
 
   // Entrance animations (Elementor `elementor-invisible`, AOS, WOW) keep a
@@ -164,6 +203,11 @@ function collectSidebarFacts(): SidebarFacts {
     ".post-content",
     ".single-post-content",
     "article.type-post",
+    // Any-platform post bodies (schema.org, Squarespace, Webflow, Shopify,
+    // Ghost, generic class names), then a lone <article>.
+    "[itemprop='articleBody']",
+    ".blog-item-content, .w-richtext, .article-template__content, .gh-content, .article-content, .article-body, .post-body, .blog-post-content",
+    "article",
   ]
   // Per selector, the LARGEST visible match: a related-posts excerpt in the
   // sidebar may reuse `.entry-content`, but the post body dwarfs it.
@@ -215,8 +259,12 @@ function collectSidebarFacts(): SidebarFacts {
 
   // Search: any WP search form (core uses `s`) or a builder search widget,
   // with a real input.
-  for (const inp of Array.from(document.querySelectorAll('input[name="s"]:not([type="hidden"]), input[type="search"]'))) {
-    add("search", inp.closest("form, .widget, .wp-block-search, [class*='elementor-widget-search']") || inp)
+  for (const inp of Array.from(
+    document.querySelectorAll(
+      'input[name="s"]:not([type="hidden"]), input[type="search"], form[role="search"] input:not([type="hidden"]), input[name="q"]:not([type="hidden"]), input[name="query"]:not([type="hidden"]), input[placeholder*="search" i]',
+    ),
+  )) {
+    add("search", inp.closest("form, .widget, .wp-block-search, [class*='elementor-widget-search'], [role='search']") || inp)
   }
 
   const RECENT_SEL =
@@ -315,7 +363,7 @@ function collectSidebarFacts(): SidebarFacts {
   // An explicit sidebar container beside the post (possibly empty).
   if (!base.sidebarRegion) {
     const SIDEBAR_SEL =
-      "#secondary, #sidebar, .sidebar, aside, [role=complementary], .widget-area, .elementor-widget-sidebar"
+      "#secondary, #sidebar, .sidebar, aside, [role=complementary], .widget-area, .elementor-widget-sidebar, [class*='sidebar' i], [id*='sidebar' i]"
     for (const el of Array.from(document.querySelectorAll(SIDEBAR_SEL))) {
       if (inZone(el) || (content && (content.contains(el) || el.contains(content)))) continue
       if (visible(el) && besideContent(el)) {
@@ -380,7 +428,25 @@ export async function checkBlogSidebar(
   runId: string,
   pageId: string,
 ): Promise<Finding[]> {
-  const facts: SidebarFacts = await page.evaluate(collectSidebarFacts)
+  // One retry: a late client-side redirect or SPA hydration can destroy the
+  // evaluate context mid-read. A second failure is a real "could not read".
+  let facts: SidebarFacts
+  try {
+    facts = await page.evaluate(collectSidebarFacts)
+  } catch {
+    await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {})
+    try {
+      facts = await page.evaluate(collectSidebarFacts)
+    } catch (e: any) {
+      const f = buildFinding(
+        { kind: "lapse", reason: `the page could not be read (${String(e?.message || e).slice(0, 120)})` },
+        pageUrl,
+        pageUrl,
+        null,
+      )
+      return f ? [f] : []
+    }
+  }
   const verdict = decideSidebar(facts)
   if (verdict.kind === "skip") return []
 

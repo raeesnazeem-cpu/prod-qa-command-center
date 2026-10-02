@@ -3,9 +3,12 @@ import { Finding } from "@qacc/shared"
 import {
   detectUserwayInSource,
   resolveRequiredUserwayTier,
+  tierForAccount,
   USERWAY_ACCOUNTS,
+  type InstalledUserway,
   type UserwayTier,
 } from "../lib/userway"
+import { looksBlocked } from "../lib/browserContext"
 
 /**
  * Accessibility Check — UserWay widget + HubSpot plan cross-check.
@@ -27,6 +30,44 @@ import {
  */
 
 const tierLabel = (t: UserwayTier): string => (t === "pro" ? "Pro" : "Basic")
+
+/**
+ * Runtime fallback for when the HTML has no static widget.js <script>: the
+ * widget was injected by a tag manager, a Shopify/Wix/Squarespace app, or an
+ * inline loader (`s.setAttribute("data-account", …)`). Looks at what the
+ * browser actually loaded and rendered. Polls briefly — these loaders are async.
+ */
+async function detectUserwayAtRuntime(page: PlaywrightPage): Promise<InstalledUserway> {
+  const probe = () =>
+    page
+      .evaluate(() => {
+        const resources = (performance.getEntriesByType("resource") as PerformanceResourceTiming[])
+          .map((r) => r.name)
+          .filter((n) => /(^|\.)userway\.org\//i.test(n.replace(/^https?:\/\//, "")))
+        const script = Array.from(document.querySelectorAll("script[src*='userway.org']")) as HTMLScriptElement[]
+        const dom = !!document.querySelector(
+          ".uwy, #userwayAccessibilityIcon, .userway_buttons_wrapper, [class*='userway'], [id*='userway']",
+        )
+        const w = window as any
+        const account =
+          script.map((s) => s.getAttribute("data-account") || "").find(Boolean) ||
+          (w._userway_config && (w._userway_config.account || "")) ||
+          resources.map((r) => (r.match(/[?&]account=([A-Za-z0-9]+)/) || [])[1] || "").find(Boolean) ||
+          (Array.from(document.scripts)
+            .map((s) => (s.textContent || "").match(/data-account["']?\s*,\s*["']([A-Za-z0-9]+)/))
+            .find(Boolean) || [])[1] ||
+          ""
+        return { present: resources.length > 0 || script.length > 0 || dom || !!w.UserWay, account }
+      })
+      .catch(() => ({ present: false, account: "" }))
+  let r = await probe()
+  for (let i = 0; i < 3 && !r.present; i++) {
+    await page.waitForTimeout(2000).catch(() => {})
+    r = await probe()
+  }
+  const account = r.account || null
+  return { present: r.present, account, tier: r.present ? tierForAccount(account) : null }
+}
 
 export async function checkAccessibility(
   page: PlaywrightPage,
@@ -55,7 +96,34 @@ export async function checkAccessibility(
         planRaw: null as string | null,
       })),
     ])
-    const installed = detectUserwayInSource(html)
+    let installed = detectUserwayInSource(html)
+    if (!installed.present || !installed.account) {
+      const live = await detectUserwayAtRuntime(page)
+      if (live.present && (!installed.present || live.account)) installed = live
+    }
+
+    // A bot-challenge page (Cloudflare etc.) is not the site: "not installed"
+    // there would be a false failure. Short body text guards against real pages
+    // that merely mention "captcha" or "access denied".
+    if (!installed.present && (await looksBlocked(page))) {
+      const textLen = await page
+        .evaluate(() => (document.body?.innerText || "").length)
+        .catch(() => 0)
+      if (textLen < 3000) {
+        return [
+          {
+            check_factor: factor,
+            title: "Accessibility Check Failed",
+            description:
+              "Could not complete: the site served a bot-protection page to the QACC browser, so the UserWay widget could not be checked. Process aborted gracefully.",
+            context_text: `URL: ${pageUrl}`,
+            screenshot_url: null,
+            status: "open",
+            ai_generated: false,
+          } as Finding,
+        ]
+      }
+    }
 
     const ctxBase =
       `URL: ${pageUrl}\n` +

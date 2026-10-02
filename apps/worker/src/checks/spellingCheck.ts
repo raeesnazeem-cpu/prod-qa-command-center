@@ -1,5 +1,11 @@
 import { Page as PlaywrightPage } from 'playwright';
 import { Finding } from '@qacc/shared';
+import { looksBlocked } from '../lib/browserContext';
+
+// Work caps so a giant page (endless feed, 50k-node product grid) can't stall
+// the shared-page lane: elements inspected, and text collected.
+const MAX_ELEMENTS = 15000;
+const MAX_TEXT_CHARS = 200000;
 
 // Building an nspell instance parses the entire English hunspell dictionary —
 // tens of MB of work. It used to happen inside checkSpelling(), i.e. once per
@@ -56,24 +62,27 @@ function getSpeller(): Promise<any> {
 export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Promise<Finding[]> {
   const spell = await getSpeller();
 
-  const rawTexts = await page.evaluate(() => {
+  const collect = () => page.evaluate(({ maxEls, maxChars }) => {
     const texts: { text: string; extract: string }[] = [];
-    const elements = Array.from(document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, td, span, div'));
+    const elements = Array.from(document.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, td, span, div')).slice(0, maxEls);
+    let total = 0;
 
     const isHidden = (el: Element) => {
       const style = window.getComputedStyle(el);
       return style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
     };
 
+    // Code samples, form fields and screen-reader-hidden duplicates are not copy.
     const isInsideSkippedNode = (el: Element) => {
-      return el.closest('nav, footer, script, style, noscript, svg') !== null;
+      return el.closest('nav, footer, script, style, noscript, svg, code, pre, kbd, samp, textarea, [contenteditable="true"], [aria-hidden="true"]') !== null;
     };
 
     // Keep track to avoid duplicating text that has already been extracted
     const wordsSet = new Set<string>();
 
     for (const el of elements) {
-      if (isHidden(el) || isInsideSkippedNode(el)) continue;
+      if (total >= maxChars) break;
+      if (isInsideSkippedNode(el) || isHidden(el)) continue;
 
       let directText = '';
       for (const child of Array.from(el.childNodes)) {
@@ -85,6 +94,7 @@ export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Prom
       const trimmedText = directText.trim();
       if (trimmedText && !wordsSet.has(trimmedText)) {
         wordsSet.add(trimmedText);
+        total += trimmedText.length;
         texts.push({
           text: trimmedText,
           extract: trimmedText
@@ -92,7 +102,30 @@ export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Prom
       }
     }
     return texts;
-  });
+  }, { maxEls: MAX_ELEMENTS, maxChars: MAX_TEXT_CHARS });
+
+  let rawTexts: { text: string; extract: string }[];
+  try {
+    rawTexts = await collect();
+  } catch {
+    // The page re-rendered mid-read (SPA hydration / client redirect): retry once.
+    await page.waitForTimeout(1500).catch(() => {});
+    rawTexts = await collect();
+  }
+
+  // A bot-challenge page is not the site; "no misspellings" there is no pass.
+  const textLen = rawTexts.reduce((n, b) => n + b.text.length, 0);
+  if (textLen < 3000 && (await looksBlocked(page))) {
+    return [{
+      check_factor: 'spelling',
+      title: 'Spelling Check Failed',
+      description: 'Could not complete: the site served a bot-protection page to the QACC browser, so its text could not be checked. Process aborted gracefully.',
+      context_text: 'System Error: bot protection',
+      screenshot_url: null,
+      status: 'open',
+      ai_generated: false
+    } as Finding];
+  }
 
   const findings: Finding[] = [];
 
@@ -195,7 +228,7 @@ export async function checkSpelling(page: PlaywrightPage, pageRecord: any): Prom
           title: `Misspelled: ${word}`,
           description: suggestions.length > 0 ? `Suggestion: ${suggestions[0]}` : `No suggestions found for ${word}`,
           context_text: contextText,
-          screenshot_url: pageRecord.desktopUrl,
+          screenshot_url: pageRecord?.desktopUrl ?? null,
         } as Finding);
       }
     }

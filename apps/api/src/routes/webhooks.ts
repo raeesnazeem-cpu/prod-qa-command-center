@@ -3662,19 +3662,27 @@ webhookRouter.post("/ted/full-scan", async (req: Request, res: Response) => {
       payload.siteUrl ||
       payload.site_url ||
       null
-    const scanUrl =
+    // Operators often type a bare domain ("example.com") — assume https.
+    let scanUrl =
       typeof rawUrl === "string"
         ? rawUrl.trim().replace(/\/+$/, "")
         : null
-    if (!scanUrl || !/^https?:\/\//i.test(scanUrl)) {
+    if (scanUrl && !/^[a-z][a-z0-9+.-]*:\/\//i.test(scanUrl)) {
+      scanUrl = `https://${scanUrl.replace(/^\/+/, "")}`
+    }
+    let validHost = false
+    try {
+      validHost = !!scanUrl && /\./.test(new URL(scanUrl).hostname)
+    } catch {}
+    if (!scanUrl || !/^https?:\/\//i.test(scanUrl) || !validHost) {
       return res.status(400).json({
         error:
-          "Missing or invalid url. Provide the site URL to scan in trigger.url (must start with http(s)://).",
+          "Missing or invalid url. Provide the site URL to scan in trigger.url (e.g. https://example.com).",
       })
     }
 
     console.log(
-      `📥 Full-scan request | URL: ${scanUrl} | client: ${clientName || "?"} (#${task.clientId || "?"})`,
+      `📥 Full-scan request | URL: ${scanUrl} | client: ${clientName || "?"} (#${task.clientId ?? task.client_id ?? "?"})`,
     )
 
     // Audit the event (best-effort; never breaks processing).
@@ -3703,9 +3711,20 @@ webhookRouter.post("/ted/full-scan", async (req: Request, res: Response) => {
     // TED clientId (client-agnostic). A full scan reports here but NEVER touches
     // its status. If it can't be resolved, the run still happens — results live in
     // the QACC dashboard only.
-    if (task.clientId != null) {
+    // The scan needs only the URL — no repo, no client record. The client id
+    // only decides WHERE in TED the report goes; accept the common field names
+    // and, failing those, look it up by client name.
+    const rawClientId =
+      task.clientId ?? task.client_id ?? task.client?.id ?? payload.clientId ?? payload.client_id ?? null
+    const clientId =
+      rawClientId != null && String(rawClientId).trim() !== ""
+        ? String(rawClientId).trim()
+        : clientName
+          ? await findTedClientIdByName(clientName)
+          : null
+    if (clientId != null) {
       reportTaskId = await resolveTaskIdByTemplateKeyFromTED(
-        task.clientId,
+        clientId,
         POST_RELEASE_TARGET_TEMPLATE_KEY,
         /post-?release testing/i,
       )
@@ -3827,7 +3846,7 @@ webhookRouter.post("/ted/full-scan", async (req: Request, res: Response) => {
         // full scan — the worker's full_scan branch posts the report and stops.
         ted_task_id: reportTaskId ? String(reportTaskId) : null,
         // For the on-demand GitOps fix pass to resolve the client page GitHub repo.
-        ted_client_id: task.clientId ? String(task.clientId) : null,
+        ted_client_id: clientId,
         custom_name: `Full Scan — ${nowIso}`,
       })
       .select()

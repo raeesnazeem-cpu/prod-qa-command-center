@@ -1,4 +1,5 @@
 import { Finding } from "@qacc/shared"
+import { gotoResilient, launchStealthBrowser, looksBlocked, newRealContext } from "../lib/browserContext"
 
 /**
  * QA-Review & Reputation Check
@@ -21,6 +22,73 @@ import { Finding } from "@qacc/shared"
 
 const CHECK_FACTOR = "review_reputation_check"
 
+const SOCIAL_HOSTS = [
+  "facebook.com",
+  "instagram.com",
+  "twitter.com",
+  "x.com",
+  "linkedin.com",
+  "youtube.com",
+  "tiktok.com",
+  "pinterest.com",
+]
+
+/**
+ * Classify the page's links (and embedded map iframes) into the reputation
+ * signals this check looks for. Pure and exported for tests. Social links are
+ * matched on the parsed HOST, so "fedex.com" never counts as x.com.
+ */
+export function classifyReputationLinks(
+  hrefs: string[],
+  frameSrcs: string[] = [],
+): { tel: string[]; mail: string[]; social: string[]; google: string[] } {
+  const clean = hrefs.map((h) => (h || "").trim()).filter(Boolean)
+  const hostOf = (h: string) => {
+    try {
+      return new URL(h, "https://placeholder.invalid").hostname.toLowerCase().replace(/^www\./, "")
+    } catch {
+      return ""
+    }
+  }
+  const GOOGLE =
+    /google\.[a-z.]+\/maps|maps\.google\.|maps\.app\.goo\.gl|goo\.gl\/maps|g\.page|g\.co\/kgs|business\.google|search\.google\.com\/local|google\.[a-z.]+\/search\?[^#]*\b(ludocid|lrd)=|#lrd=/i
+  const uniq = (a: string[]) => Array.from(new Set(a))
+  return {
+    tel: uniq(clean.filter((h) => /^tel:/i.test(h))),
+    mail: uniq(clean.filter((h) => /^mailto:/i.test(h))),
+    social: uniq(
+      clean.filter((h) => {
+        const host = hostOf(h)
+        return SOCIAL_HOSTS.some((s) => host === s || host.endsWith(`.${s}`))
+      }),
+    ),
+    google: uniq([...clean, ...frameSrcs].filter((h) => GOOGLE.test(h))),
+  }
+}
+
+/** The site's own reviews/testimonials page linked from the page, or null. */
+async function findReviewsLink(page: any, origin: string): Promise<string | null> {
+  try {
+    await gotoResilient(page, origin, { timeout: 30000 })
+    const hrefs: string[] = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("a[href]")).map((a) => (a as HTMLAnchorElement).href),
+    )
+    const host = new URL(origin).hostname.replace(/^www\./, "")
+    for (const h of hrefs) {
+      let u: URL
+      try {
+        u = new URL(h)
+      } catch {
+        continue
+      }
+      if (u.hostname.replace(/^www\./, "") !== host) continue
+      if (/\/(reviews?|testimonials?|patient-reviews|client-reviews)(\/|$)/i.test(u.pathname))
+        return `${u.origin}${u.pathname}`
+    }
+  } catch {}
+  return null
+}
+
 export async function checkReviewReputation(
   url: string,
   runId: string,
@@ -28,7 +96,6 @@ export async function checkReviewReputation(
   sharedBrowser?: any,
   onProgress?: (progress: number, message: string) => Promise<void>,
 ): Promise<Finding[]> {
-  const { chromium } = require("playwright")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
 
   const origin = (() => {
@@ -38,7 +105,7 @@ export async function checkReviewReputation(
       return url.replace(/\/$/, "")
     }
   })()
-  const reviewsUrl = `${origin}/reviews`
+  let reviewsUrl = `${origin}/reviews`
 
   const findings: Finding[] = []
   let browser: any = null
@@ -55,23 +122,40 @@ export async function checkReviewReputation(
   }
 
   try {
-    browser = sharedBrowser || (await chromium.launch({ headless: true }))
-    context = await browser.newContext()
+    browser = sharedBrowser || (await launchStealthBrowser())
+    // Real browser UA + tolerant TLS: a bare context sends "HeadlessChrome",
+    // which Cloudflare-style filters block (403) on many non-WP hosts.
+    context = await newRealContext(browser, { viewport: { width: 1440, height: 900 } })
     const page = await context.newPage()
-    await page.setViewportSize({ width: 1440, height: 900 })
 
     if (onProgress) await onProgress(15, "Opening /reviews page...")
-    const resp = await page
-      .goto(reviewsUrl, { waitUntil: "networkidle", timeout: 45000 })
-      .catch(() => null)
-    const status = resp ? resp.status() : null
+    // "load", not "networkidle": chat widgets / analytics on many sites never go
+    // idle. A load timeout is not fatal — the page is usually usable.
+    let nav = await gotoResilient(page, reviewsUrl, { timeout: 45000 })
+    let status = nav.status
+
+    // No /reviews on this site: look for the site's own reviews/testimonials
+    // page in the homepage links before calling it missing (Squarespace, Wix,
+    // custom builds often use /testimonials or /patient-reviews).
+    if (status === 404) {
+      const alt = await findReviewsLink(page, origin)
+      const altNav = alt ? await gotoResilient(page, alt, { timeout: 45000 }) : null
+      if (alt && altNav && altNav.ok && (altNav.status === null || altNav.status < 400)) {
+        reviewsUrl = alt
+        nav = altNav
+        status = altNav.status
+      } else {
+        // Back to the 404 page so the screenshot below shows what was missing.
+        await gotoResilient(page, reviewsUrl, { timeout: 20000 })
+      }
+    }
 
     if (status === 404) {
       const s = await shot(page, "no_page")
       findings.push({
         check_factor: CHECK_FACTOR,
         title: "Reviews page not found (/reviews)",
-        description: `Requesting ${reviewsUrl} returned HTTP 404. The reviews & reputation page appears to be missing.`,
+        description: `Requesting ${reviewsUrl} returned HTTP 404, and the homepage links to no other reviews/testimonials page. The reviews & reputation page appears to be missing.`,
         context_text: `URL: ${reviewsUrl}\nHTTP: 404`,
         screenshot_url: s || null,
         status: "open",
@@ -85,13 +169,16 @@ export async function checkReviewReputation(
     // would fabricate "missing contact number / email / social / Google"
     // defects that assert the page lacks content it may well have. Treat this
     // as a check that could not complete, not a page full of defects.
-    if (!resp || status === null || status >= 400) {
+    // A bot-challenge page (Cloudflare "Just a moment...") is also not the
+    // real page. A load TIMEOUT with a usable page (nav.ok, no status) is fine.
+    const blocked = nav.ok && (await looksBlocked(page))
+    if (!nav.ok || (status !== null && status >= 400) || blocked) {
       const s = await shot(page, "load_error")
       findings.push({
         check_factor: CHECK_FACTOR,
         title: "Review & Reputation Check Failed",
-        description: `The reviews page could not be loaded${status ? ` (HTTP ${status})` : " (navigation failed)"}, so it could not be verified. Process aborted gracefully; QACC will retry on the next run.`,
-        context_text: `URL: ${reviewsUrl}\nHTTP: ${status ?? "no response"}`,
+        description: `The reviews page could not be loaded${blocked ? " (blocked by a bot-protection challenge)" : status ? ` (HTTP ${status})` : " (navigation failed)"}, so it could not be verified. Process aborted gracefully; QACC will retry on the next run.`,
+        context_text: `URL: ${reviewsUrl}\nHTTP: ${status ?? "no response"}${nav.error ? `\nError: ${nav.error.slice(0, 200)}` : ""}`,
         screenshot_url: s || null,
         status: "open",
         ai_generated: false,
@@ -103,26 +190,40 @@ export async function checkReviewReputation(
     if (onProgress) await onProgress(40, "Triggering the review popup...")
     let popupOpened = false
     try {
-      // Common triggers: a button/link whose text mentions "review".
-      const trigger = page
-        .locator(
-          'button:has-text("review"), a:has-text("review"), [class*="review" i] button, button:has-text("Write a Review"), button:has-text("Leave a Review")',
-        )
-        .first()
-      if ((await trigger.count()) > 0) {
-        await trigger.click({ timeout: 5000 }).catch(() => {})
-        // Wait for a dialog/modal/overlay to show.
-        await page
-          .waitForSelector(
-            '[role="dialog"], .modal, .modal.show, [class*="popup" i], [class*="modal" i]',
-            { state: "visible", timeout: 6000 },
-          )
-          .catch(() => {})
-        popupOpened =
-          (await page
-            .locator('[role="dialog"], .modal.show, [class*="popup" i]:visible')
-            .count()
-            .catch(() => 0)) > 0
+      // Common triggers: a button/link whose text mentions "review", tried in
+      // priority order (explicit buttons first). Clicking a plain link can
+      // navigate away (e.g. the nav item "Reviews" or a Google review link);
+      // when that happens, go back and try the next candidate.
+      const TRIGGERS = [
+        'button:has-text("Write a Review"), button:has-text("Leave a Review")',
+        'button:has-text("review"), [role="button"]:has-text("review"), [class*="review" i] button',
+        'a:has-text("review")',
+      ]
+      for (const sel of TRIGGERS) {
+        if (popupOpened) break
+        const candidates = page.locator(sel)
+        const n = Math.min(await candidates.count().catch(() => 0), 3)
+        for (let i = 0; i < n && !popupOpened; i++) {
+          const trigger = candidates.nth(i)
+          if (!(await trigger.isVisible().catch(() => false))) continue
+          await trigger.click({ timeout: 5000 }).catch(() => {})
+          // Wait for a dialog/modal/overlay to show.
+          await page
+            .waitForSelector(
+              '[role="dialog"], .modal, .modal.show, [class*="popup" i], [class*="modal" i]',
+              { state: "visible", timeout: 6000 },
+            )
+            .catch(() => {})
+          popupOpened =
+            (await page
+              .locator('[role="dialog"], .modal.show, [class*="popup" i]:visible')
+              .count()
+              .catch(() => 0)) > 0
+          const bare = (u: string) => u.split("#")[0].replace(/\/+$/, "")
+          if (!popupOpened && bare(page.url()) !== bare(reviewsUrl)) {
+            await gotoResilient(page, reviewsUrl, { timeout: 30000 })
+          }
+        }
       }
     } catch {
       // fall through — we still screenshot + scrape whatever is on the page
@@ -133,35 +234,13 @@ export async function checkReviewReputation(
     const popupShot = await shot(page, "popup")
 
     // --- Deterministic scrape (popup is in the DOM either way) ---
-    const data = await page.evaluate(() => {
-      const hrefs = Array.from(document.querySelectorAll("a[href]")).map((a) =>
-        (a.getAttribute("href") || "").trim(),
-      )
-      const tel = hrefs.filter((h) => /^tel:/i.test(h))
-      const mail = hrefs.filter((h) => /^mailto:/i.test(h))
-      const socialHosts = [
-        "facebook.com",
-        "instagram.com",
-        "twitter.com",
-        "x.com",
-        "linkedin.com",
-        "youtube.com",
-        "tiktok.com",
-      ]
-      const social = hrefs.filter((h) => socialHosts.some((s) => h.toLowerCase().includes(s)))
-      const google = hrefs.filter(
-        (h) =>
-          /google\.com\/maps|maps\.google|g\.page|business\.google|goo\.gl\/maps|search\.google\.com\/local/i.test(
-            h,
-          ),
-      )
-      return {
-        tel: Array.from(new Set(tel)),
-        mail: Array.from(new Set(mail)),
-        social: Array.from(new Set(social)),
-        google: Array.from(new Set(google)),
-      }
-    })
+    const raw = await page
+      .evaluate(() => ({
+        hrefs: Array.from(document.querySelectorAll("a[href]")).map((a) => a.getAttribute("href") || ""),
+        frames: Array.from(document.querySelectorAll("iframe[src]")).map((f) => f.getAttribute("src") || ""),
+      }))
+      .catch(() => ({ hrefs: [] as string[], frames: [] as string[] }))
+    const data = classifyReputationLinks(raw.hrefs, raw.frames)
 
     // --- If the popup never opened, flag it (with the screenshot). ---
     if (!popupOpened) {
@@ -169,7 +248,7 @@ export async function checkReviewReputation(
         check_factor: CHECK_FACTOR,
         title: "Review popup did not open",
         description:
-          "Could not detect a review popup/modal opening on the /reviews page. Verify the 'Write a Review' flow works. Screenshot attached for confirmation.",
+          "Could not detect a review popup/modal opening on the reviews page. Verify the 'Write a Review' flow works. Screenshot attached for confirmation.",
         context_text: `URL: ${reviewsUrl}`,
         screenshot_url: popupShot || null,
         status: "open",
