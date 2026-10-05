@@ -850,6 +850,7 @@ async function renderImageGrid(
   // the fetch/composite entirely (Task 12); otherwise it's built on the spot.
   inlineGrid?: InlineImg | null,
 ): Promise<string> {
+  if (budget.remaining <= 0) return ""
   const g = inlineGrid?.d
     ? { dataUri: inlineGrid.d, width: inlineGrid.w, height: inlineGrid.h }
     : await buildGridDataUri(rows)
@@ -1970,33 +1971,36 @@ export async function precomputeFindingMedia(runId: string): Promise<void> {
 // failing checks list their real defects (+ any applied fix), passing checks say
 // so, errored checks say they'll retry. Routes to subtasks when the task has
 // them, else to a single summary comment. Idempotent via `eventKeyPrefix`.
-export async function postSectionedReport(opts: {
+// The section-wise report, built but not posted: one HTML section per check,
+// plus the title and the test-case roll-up. postSectionedReport posts it to TED
+// tasks; persistRunReport (runReport.ts) stores it for TED's Site Audit page,
+// which shows every run's report, including full scans that post nowhere.
+export type SectionedReport = {
+  byCheck: Map<string, any[]>
+  sections: { factor: string; status: "failed" | "passed" | "errored"; html: string }[]
+  tally: { failed: number; passed: number; errored: number }
+  titleHtml: string
+  overview: string
+  reportCtx: { runType: string | null; clientDomain: string | null }
+}
+
+export async function buildSectionedReport(opts: {
   runId: string
-  tedTaskId: string
   findings: any[]
   runMeta: {
     enabled_checks?: string[] | null
     site_url?: string | null
     run_type?: string | null
-    ted_subtask_map?: Record<string, string | string[]> | null
     project_id?: string | null
   } | null
   fixMap?: Map<string, FixReportInfo>
-  summaryHeaderHtml?: string
-  // Per-subtask AI-fix banner. The count is computed PER CHECK inside this
-  // function (not run-wide), and the banner is omitted entirely for checks that
-  // had no fix — so e.g. "Website Functionality" never carries a fix line it
-  // didn't earn. `pushClause` describes where the fixes landed (branch/PR) — or,
-  // when there's no repo access, that they were not applied — with no count.
-  perTargetFix?: { pushClause: string }
-  // Per-page image-enhance outcomes (page_id → {enhanced, total, carousel url}),
-  // used to render the "AI Fix — enhanced N of M" line under each image page.
   imageFix?: Map<string, ImageFixInfo>
-  eventKeyPrefix: string
-}): Promise<{ failed: number; passed: number; errored: number }> {
-  const { runId, tedTaskId, findings, runMeta } = opts
+  // Bytes of inline (base64) images allowed. 0 = screenshots as links only.
+  imageBudgetBytes?: number
+}): Promise<SectionedReport> {
+  const { runId, findings, runMeta } = opts
   const fixMap = opts.fixMap || new Map<string, FixReportInfo>()
-  const imgBudget = { remaining: IMG_BUDGET_BYTES }
+  const imgBudget = { remaining: opts.imageBudgetBytes ?? IMG_BUDGET_BYTES }
 
   // Resolve the client's real domain once, so the client-facing copy can show
   // the gogroth/live host instead of the local fallback URL. Best-effort.
@@ -2109,6 +2113,44 @@ export async function postSectionedReport(opts: {
   const overview =
     `<p><strong>Test cases:</strong> ${tally.failed + tally.passed + shownErrored} total — ${tally.failed} failed, ${tally.passed} passed${shownErrored ? `, ${shownErrored} could not run` : ""}.</p>` +
     (rollupItems ? `<ul>${rollupItems}</ul>` : "")
+
+  return { byCheck, sections, tally, titleHtml, overview, reportCtx }
+}
+
+export async function postSectionedReport(opts: {
+  runId: string
+  tedTaskId: string
+  findings: any[]
+  runMeta: {
+    enabled_checks?: string[] | null
+    site_url?: string | null
+    run_type?: string | null
+    ted_subtask_map?: Record<string, string | string[]> | null
+    project_id?: string | null
+  } | null
+  fixMap?: Map<string, FixReportInfo>
+  summaryHeaderHtml?: string
+  // Per-subtask AI-fix banner. The count is computed PER CHECK inside this
+  // function (not run-wide), and the banner is omitted entirely for checks that
+  // had no fix — so e.g. "Website Functionality" never carries a fix line it
+  // didn't earn. `pushClause` describes where the fixes landed (branch/PR) — or,
+  // when there's no repo access, that they were not applied — with no count.
+  perTargetFix?: { pushClause: string }
+  // Per-page image-enhance outcomes (page_id → {enhanced, total, carousel url}),
+  // used to render the "AI Fix — enhanced N of M" line under each image page.
+  imageFix?: Map<string, ImageFixInfo>
+  eventKeyPrefix: string
+}): Promise<{ failed: number; passed: number; errored: number }> {
+  const { runId, tedTaskId, runMeta } = opts
+  const fixMap = opts.fixMap || new Map<string, FixReportInfo>()
+  const { byCheck, sections, tally, titleHtml, overview, reportCtx } =
+    await buildSectionedReport({
+      runId,
+      findings: opts.findings,
+      runMeta,
+      fixMap,
+      imageFix: opts.imageFix,
+    })
 
   const subtaskMap = runMeta?.ted_subtask_map || {}
   const hasSubtasks = Object.keys(subtaskMap).length > 0
