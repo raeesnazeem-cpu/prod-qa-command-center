@@ -4370,3 +4370,101 @@ webhookRouter.get(
     })
   },
 )
+
+// --- TED Site Audit: every run's full report ---
+// TED's Site Audit page shows full scans (which TED starts) AND pre/post-release
+// runs (which TED's task webhooks start, so TED never learns their run id).
+// GET /ted/runs lets TED pull the release runs that finished since a time;
+// GET /ted/runs/:runId/report returns the report the worker stored in
+// run_reports (lib/runReport.ts). Both use the shared TED webhook secret.
+function tedSecretOk(req: Request, res: Response): boolean {
+  const secret = req.headers["x-ted-webhook-secret"] || req.headers["x-webhook-secret"]
+  const expected = process.env.TED_WEBHOOK_SECRET
+  if (!expected) {
+    res.status(500).json({ error: "Server misconfigured" })
+    return false
+  }
+  if (secret !== expected) {
+    res.status(401).json({ error: "Unauthorized: Invalid secret" })
+    return false
+  }
+  return true
+}
+
+const RUN_TYPES = ["pre_release", "post_release", "full_scan"]
+
+webhookRouter.get("/ted/runs", async (req: Request, res: Response) => {
+  if (!tedSecretOk(req, res)) return
+  const since = new Date(String(req.query.since || ""))
+  if (Number.isNaN(since.getTime())) {
+    return res.status(400).json({ error: "since must be an ISO date-time." })
+  }
+  const types = String(req.query.types || "pre_release,post_release")
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => RUN_TYPES.includes(t))
+  if (!types.length) return res.status(400).json({ error: "No known run type in types." })
+  const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500)
+
+  // Finished runs only, oldest first, so TED can page by moving `since` to the
+  // last completedAt it received.
+  const { data, error } = await supabase
+    .from("qa_runs")
+    .select("id, run_type, status, site_url, ted_task_id, ted_client_id, started_at, created_at, completed_at")
+    .in("run_type", types)
+    .not("completed_at", "is", null)
+    .gt("completed_at", since.toISOString())
+    .order("completed_at", { ascending: true })
+    .limit(limit)
+  if (error) return res.status(500).json({ error: error.message })
+
+  const ids = (data || []).map((r: any) => r.id)
+  const counts = new Map<string, any>()
+  if (ids.length) {
+    const { data: reps } = await supabase.from("run_reports").select("run_id, phase, tally").in("run_id", ids)
+    for (const r of reps || []) {
+      // The fix report, when there is one, is the run's latest word.
+      if (!counts.has(r.run_id) || r.phase === "fix") counts.set(r.run_id, r.tally)
+    }
+  }
+  return res.json({
+    runs: (data || []).map((r: any) => ({
+      runId: r.id,
+      runType: r.run_type,
+      status: r.status,
+      siteUrl: r.site_url,
+      tedTaskId: r.ted_task_id ?? null,
+      tedClientId: r.ted_client_id ?? null,
+      startedAt: r.started_at || r.created_at,
+      completedAt: r.completed_at,
+      tally: counts.get(r.id) ?? null,
+    })),
+  })
+})
+
+webhookRouter.get("/ted/runs/:runId/report", async (req: Request, res: Response) => {
+  if (!tedSecretOk(req, res)) return
+  const runId = String(req.params.runId || "")
+  const { data: run } = await supabase
+    .from("qa_runs")
+    .select("id, run_type, status, site_url, completed_at")
+    .eq("id", runId)
+    .maybeSingle()
+  if (!run) return res.status(404).json({ error: `No run found with id ${runId}.` })
+
+  const { data: reps } = await supabase
+    .from("run_reports")
+    .select("phase, html, sections, tally, generated_at")
+    .eq("run_id", runId)
+  const toReport = (r: any) =>
+    r ? { html: r.html, sections: r.sections || [], tally: r.tally || null, generatedAt: r.generated_at } : null
+  return res.json({
+    runId: run.id,
+    runType: run.run_type,
+    status: run.status,
+    siteUrl: run.site_url,
+    completedAt: run.completed_at,
+    scan: toReport((reps || []).find((r: any) => r.phase === "scan")),
+    fix: toReport((reps || []).find((r: any) => r.phase === "fix")),
+  })
+})

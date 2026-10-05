@@ -68,6 +68,7 @@ import {
   saveTimingReport,
 } from "../lib/timingCollector"
 import { persistScanCheckResults } from "../lib/runResults"
+import { persistRunReport } from "../lib/runReport"
 import type { ThemeType } from "../lib/themeType"
 import pLimit from "p-limit"
 import { gotoResilient, looksBlocked, newRealContext } from "../lib/browserContext"
@@ -1591,6 +1592,10 @@ export async function finalizeRun(runId: string): Promise<void> {
   await precomputeFindingMedia(runId).catch((e) =>
     logger.error("Screenshot precompute failed:", e),
   )
+
+  // Store the full report for TED's Site Audit page — every run, with or
+  // without a TED task. Best-effort.
+  await persistRunReport(runId, "scan")
 
   // Post the final QA report back to TED (idempotent — see tedSync).
   if (run.ted_task_id) {

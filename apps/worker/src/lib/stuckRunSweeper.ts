@@ -33,6 +33,7 @@ import { supabase } from "./supabase"
 import { qaQueue } from "./queue"
 import { releaseRunSlot } from "./runSlot"
 import { persistScanCheckResults } from "./runResults"
+import { persistRunReport } from "./runReport"
 import { postFinalReportToTED } from "./tedSync"
 import pino from "pino"
 
@@ -187,6 +188,7 @@ export async function sweepOnce(): Promise<void> {
           "stuck-run sweep: persistScanCheckResults failed",
         ),
       )
+      await persistRunReport(run.id, "scan")
       if (run.ted_task_id) {
         await postFinalReportToTED(run.id, String(run.ted_task_id)).catch((e) =>
           logger.warn(

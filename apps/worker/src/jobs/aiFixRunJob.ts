@@ -34,6 +34,7 @@ import {
   logScanTimingRecap,
 } from "../lib/timingCollector"
 import { persistFixCheckResults } from "../lib/runResults"
+import { persistRunReport } from "../lib/runReport"
 import { countFixEligible, selectFixQueue, sortFindingsForFix } from "../lib/fixQueue"
 import { FixProgress, throttleTrailing } from "../lib/fixProgress"
 import {
@@ -2344,6 +2345,13 @@ export async function processAiFixRunJob(job: Job) {
     (fixesDone.length ? `<ul>${fixBullets}${moreFixes}</ul>` : "")
   // Prepend the summary so it heads the parent comment.
   summaryHeaderHtml = summaryBlock + summaryHeaderHtml
+
+  // The same report, with its fixes, for TED's Site Audit page. Best-effort.
+  await persistRunReport(runId, "fix", {
+    findings: reportFindings || findings || [],
+    fixMap,
+    summaryHeaderHtml,
+  })
 
   const reportTally = await postSectionedReport({
     runId,
