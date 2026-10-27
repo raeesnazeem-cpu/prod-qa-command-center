@@ -68,7 +68,7 @@ import toast from "react-hot-toast"
 import { useAiResultsStore } from "../store/aiResultsStore"
 import { SignOffTab } from "../components/SignOffTab"
 import { TasksTab } from "../components/TasksTab"
-import { supabase } from "../lib/supabase"
+import { TASKS_ENABLED } from "../lib/features"
 
 export const RunDetailPage = () => {
   const { id: projectId, runId } = useParams<{ id: string; runId: string }>()
@@ -1424,17 +1424,19 @@ export const RunDetailPage = () => {
               <ClipboardList size={14} />
               General Findings
             </button>
-            <button
-              onClick={() => handleTabChange("tasks")}
-              className={`flex items-center gap-2 px-4 py-2 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${
-                activeTab === "tasks"
-                  ? "bg-slate-50 dark:bg-[#1D2A31] text-slate-900 dark:text-slate-200 shadow-sm border border-slate-200 dark:border-slate-700"
-                  : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300 border border-transparent"
-              }`}
-            >
-              <CheckSquare size={14} />
-              Tasks
-            </button>
+            {TASKS_ENABLED && (
+              <button
+                onClick={() => handleTabChange("tasks")}
+                className={`flex items-center gap-2 px-4 py-2 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${
+                  activeTab === "tasks"
+                    ? "bg-slate-50 dark:bg-[#1D2A31] text-slate-900 dark:text-slate-200 shadow-sm border border-slate-200 dark:border-slate-700"
+                    : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300 border border-transparent"
+                }`}
+              >
+                <CheckSquare size={14} />
+                Tasks
+              </button>
+            )}
             <button
               onClick={() => handleTabChange("recordings")}
               className={`flex items-center gap-2 px-4 py-2 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all whitespace-nowrap ${
@@ -1752,7 +1754,8 @@ export const RunDetailPage = () => {
           </button>
         )}
 
-        {(isRecordingVideo ||
+        {TASKS_ENABLED &&
+          (isRecordingVideo ||
           (run as any)?.recording_status === "recording" ||
           (run as any)?.recording_status === "completed" ||
           (run as any)?.recording_video_urls) &&
@@ -3216,7 +3219,7 @@ export const RunDetailPage = () => {
         </div>
       )}
 
-      {activeTab === "tasks" && (
+      {TASKS_ENABLED && activeTab === "tasks" && (
         <TasksTab project={project as any} runId={runId!} />
       )}
 

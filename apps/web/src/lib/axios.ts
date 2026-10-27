@@ -5,6 +5,8 @@ export const api = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+  // Sends the qacc_session cookie (TED SSO); web and API are separate origins.
+  withCredentials: true,
 })
 
 // Interceptor to attach Clerk JWT token

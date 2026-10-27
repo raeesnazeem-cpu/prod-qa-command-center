@@ -2,13 +2,50 @@ import { useEffect, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { supabase } from "@/lib/supabase"
 import { QARun } from "../api/runs.api"
+import { REALTIME_ENABLED } from "@/lib/features"
+
+const POLL_MS = 4000
+
+// Same "still moving" test as useRun's refetchInterval.
+const isRunActive = (run: QARun | undefined) =>
+  run?.status === "running" ||
+  run?.status === "pending" ||
+  (run as any)?.recording_status === "recording" ||
+  !!run?.pages?.some(
+    (page) =>
+      page.status === "processing" ||
+      page.status === "pending" ||
+      Object.values((page as any).check_progress || {}).some(
+        (cp: any) => cp.status === "processing" || cp.status === "pending",
+      ),
+  )
 
 export const useRunRealtime = (runId: string) => {
   const queryClient = useQueryClient()
   const [isConnected, setIsConnected] = useState(false)
 
+  // No Realtime (AWS): useRun already re-polls the run itself while it is active.
+  // Here we refresh findings on the same cadence and fire "run-progress-done"
+  // when the run stops moving, which is what the broadcasts used to do.
   useEffect(() => {
-    if (!runId) return
+    if (REALTIME_ENABLED || !runId) return
+    let wasActive = isRunActive(queryClient.getQueryData<QARun>(["run", runId]))
+    const timer = setInterval(() => {
+      const active = isRunActive(queryClient.getQueryData<QARun>(["run", runId]))
+      if (active || wasActive) {
+        queryClient.invalidateQueries({ queryKey: ["findings"] })
+        queryClient.invalidateQueries({ queryKey: ["run-findings", runId] })
+      }
+      if (wasActive && !active) {
+        window.dispatchEvent(new CustomEvent("run-progress-done"))
+      }
+      wasActive = active
+    }, POLL_MS)
+    return () => clearInterval(timer)
+  }, [runId, queryClient])
+
+  useEffect(() => {
+    if (!REALTIME_ENABLED || !runId) return
 
     // 1. Subscribe to table changes for the specific run
     const runChannel = supabase

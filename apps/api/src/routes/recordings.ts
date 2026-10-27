@@ -1,4 +1,5 @@
 import { Router } from "express"
+import { clerkAuth } from "../middleware/clerkAuth"
 import { JobsClient } from "@google-cloud/run"
 import { supabase } from "../lib/supabase"
 import { logger } from "../lib/logger"
@@ -121,7 +122,7 @@ router.post("/start", async (req, res) => {
 })
 
 // Proxy a stored recording so the browser gets a clean download.
-router.get("/download", async (req, res) => {
+router.get("/download", clerkAuth, async (req, res) => {
   const videoUrl = req.query.url as string
   const filename = (req.query.filename as string) || "video.webm"
   if (!videoUrl) return res.status(400).json({ error: "Missing url parameter" })

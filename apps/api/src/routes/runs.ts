@@ -1062,7 +1062,7 @@ router.delete(
  * POST /api/runs/compare-urls-ai
  * Uses AI to intelligently compare dev vs live URLs
  */
-router.post("/compare-urls-ai", async (req, res) => {
+router.post("/compare-urls-ai", clerkAuth, async (req, res) => {
   try {
     const { devPages, livePages } = req.body
 
@@ -1163,7 +1163,7 @@ router.post("/compare-urls-ai", async (req, res) => {
  * POST /api/runs/verify-plugins-ai
  * Uses AI to analyze the plugins page screenshot and detect outdated plugins.
  */
-router.post("/verify-plugins-ai", async (req, res) => {
+router.post("/verify-plugins-ai", clerkAuth, async (req, res) => {
   try {
     const { screenshotUrl } = req.body
     if (!screenshotUrl) {
@@ -1250,7 +1250,7 @@ Return your findings as JSON in this exact structure:
  * POST /api/runs/verify-social-share-ai
  * Uses AI to analyze the social share screenshots and detect social share status.
  */
-router.post("/verify-social-share-ai", async (req, res) => {
+router.post("/verify-social-share-ai", clerkAuth, async (req, res) => {
   try {
     const { screenshotUrls } = req.body
     if (!screenshotUrls || !Array.isArray(screenshotUrls)) {
@@ -1375,7 +1375,7 @@ If there is evidence of correct configuration for a platform, mark it as "verifi
  * POST /api/runs/verify-favicon-ai
  * Uses AI to analyze the favicon screenshots and page source code.
  */
-router.post("/verify-favicon-ai", async (req, res) => {
+router.post("/verify-favicon-ai", clerkAuth, async (req, res) => {
   try {
     const { screenshotUrls } = req.body
     if (!screenshotUrls || !Array.isArray(screenshotUrls)) {

@@ -35,4 +35,21 @@ export GH_TOKEN_NUVO=
 export GIT_TOKEN_MCP_NUVO=
 export GIT_FIX_TOKEN_OVERRIDES=
 export AUTH_GATE_ENABLED=false
+
+# TED SSO with local-only secrets. To test the login gate: AUTH_GATE_ENABLED=true,
+# then open http://localhost:5173/sso?ted_sso=$(node infra/floci/ted-ticket.mjs you@example.com)
+export SSO_TED_ENABLED=true
+export TED_SSO_SECRET=local-ted-sso-secret-not-for-prod
+export QACC_SESSION_SECRET=local-qacc-session-secret-not-for-prod
+
+# Web (vite) build vars for the AWS shape: no Supabase, no realtime, no tasks.
+# Exported empties win over apps/web/.env.
+export VITE_API_URL=http://localhost:3001
+export VITE_SUPABASE_URL=
+export VITE_SUPABASE_ANON_KEY=
+export VITE_GOOGLE_CLIENT_ID=
+export VITE_CLERK_PUBLISHABLE_KEY=
+export VITE_CLOUDFLARE_PROXY_URL=
+export VITE_REALTIME_ENABLED=false
+export VITE_TASKS_ENABLED=false
 unset _jwt_secret _repo

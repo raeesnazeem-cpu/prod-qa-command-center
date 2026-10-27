@@ -5,7 +5,6 @@ import { Toaster } from "react-hot-toast"
 import { router } from "./routes"
 import { queryClient } from "./lib/queryClient"
 import { useEffect } from "react"
-import { GoogleLoginGate } from "./components/GoogleLoginGate"
 
 export const App = () => {
   useEffect(() => {
@@ -26,11 +25,10 @@ export const App = () => {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <GoogleLoginGate>
-        <RouterProvider router={router} future={{ v7_startTransition: true }} />
-        <Toaster position="top-right" />
-        {/* <ReactQueryDevtools initialIsOpen={false} /> */}
-      </GoogleLoginGate>
+      {/* TED SSO is the only login (ProtectedRoute + qacc_session). */}
+      <RouterProvider router={router} future={{ v7_startTransition: true }} />
+      <Toaster position="top-right" />
+      {/* <ReactQueryDevtools initialIsOpen={false} /> */}
     </QueryClientProvider>
   )
 }

@@ -30,6 +30,7 @@ import { projectsRouter } from "./routes/projects"
 import { tedCommentsRouter } from "./routes/tedComments"
 import { recordingsRouter } from "./routes/recordings"
 import { authRouter } from "./routes/auth"
+import { clerkAuth } from "./middleware/clerkAuth"
 import { createBullBoard } from "@bull-board/api"
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter"
 import { ExpressAdapter } from "@bull-board/express"
@@ -66,7 +67,8 @@ createBullBoard({
   queues: [new BullMQAdapter(qaQueue as any)],
   serverAdapter: serverAdapter,
 })
-app.use("/admin/queues", serverAdapter.getRouter())
+// Behind the TED session when the gate is on (public on AWS otherwise).
+app.use("/admin/queues", clerkAuth, serverAdapter.getRouter())
 
 // TED SSO login/logout/session endpoints — unauthenticated by definition
 // (this is where a session gets established or cleared in the first place).

@@ -1,12 +1,10 @@
 import { Outlet, NavLink } from "react-router-dom"
 import {
-  LayoutDashboard,
   FolderKanban,
   CheckSquare,
   BarChart2,
   Settings as SettingsIcon,
   Users,
-  History,
   ChevronLeft,
   ChevronRight,
   Sun,
@@ -14,7 +12,6 @@ import {
   ListTodo,
   Kanban,
   ListChecks,
-  Monitor,
   User,
   MessageSquare,
   X,
@@ -37,6 +34,7 @@ import { useWorkspaceUsers } from "../hooks/useProjects"
 import { useAppStore } from "../store/appStore"
 import { ActiveUsersDropdown } from "../components/ActiveUsersDropdown"
 import { ProfileMenu } from "../components/ProfileMenu"
+import { REALTIME_ENABLED } from "../lib/features"
 
 export const AppLayout = () => {
   const [isCollapsed, setIsCollapsed] = useState(false)
@@ -124,9 +122,6 @@ export const AppLayout = () => {
 
   const toggleDarkMode = () => setIsDarkMode(!isDarkMode)
 
-  // Initialize global real-time listeners
-  useRealtimeTasks()
-  useRealtimeNotifications()
 
   // Headless mode: there is no browser sign-in, no profile and no /onboarding
   // route, so the old onboarding redirect and the growth99.com/.net domain guard
@@ -135,22 +130,12 @@ export const AppLayout = () => {
   // Sign Out button was a no-op, and the redirect bounced /onboarding off the
   // catch-all route in a loop. TED owns access to this UI now.
 
-  const isDeveloper = role === "developer"
 
-  // Temporarily hidden from the sidebar for all roles/views (routes still exist,
-  // just no nav entry): All tasks, Monitor, Stats, Team, Queue History, Feedback.
-  // The /tasks item stays only in its "My Tasks" form (qa_engineer/developer);
-  // its "Monitor" variant (other roles) is what's being hidden.
+  // Only pages the router serves (TED-driven scope): Dashboard, My Tasks and
+  // Activity Logs had no route left and just bounced to /projects.
   const navItems = [
-    { to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
     { to: "/projects", label: "Projects", icon: FolderKanban },
-    ...(role === "qa_engineer" || role === "developer"
-      ? [{ to: "/tasks", label: "My Tasks", icon: Monitor }]
-      : []),
-    ...(!isDeveloper
-      ? [{ to: "/admin/activity-logs", label: "Activity Logs", icon: History }]
-      : []),
-    ...[{ to: "/settings", label: "Settings", icon: SettingsIcon }],
+    { to: "/settings", label: "Settings", icon: SettingsIcon },
   ]
 
   return (
@@ -419,7 +404,7 @@ export const AppLayout = () => {
                   : "No active runs"}
             </button>
 
-            <ActiveUsersDropdown />
+            {REALTIME_ENABLED && <ActiveUsersDropdown />}
 
             <button
               onClick={toggleDarkMode}
@@ -433,7 +418,12 @@ export const AppLayout = () => {
               )}
             </button>
 
-            <NotificationBell />
+            {REALTIME_ENABLED && (
+              <>
+                <RealtimeListeners />
+                <NotificationBell />
+              </>
+            )}
 
             <div className="flex items-center space-x-4">
               <ProfileMenu />
@@ -453,3 +443,11 @@ export const AppLayout = () => {
     </div>
   )
 }
+
+// Global real-time listeners, only mounted when Supabase Realtime exists.
+function RealtimeListeners() {
+  useRealtimeTasks()
+  useRealtimeNotifications()
+  return null
+}
+
