@@ -74,3 +74,80 @@ variable "postgrest_image_tag" {
   type        = string
   default     = "v12.2.12"
 }
+
+# --- Phase 6: services ------------------------------------------------------
+
+variable "image_tag" {
+  description = "Tag of the qacc-api / qacc-web / qacc-worker images in ECR"
+  type        = string
+}
+
+variable "vpc_id" {
+  description = "VPC for the ALB and tasks (floci: vpc-default-us-east-1; AWS: network.tf in Phase 8)"
+  type        = string
+}
+
+variable "public_subnet_ids" {
+  description = "Subnets for the ALB"
+  type        = list(string)
+}
+
+variable "private_subnet_ids" {
+  description = "Subnets for ECS tasks (no public IP; NAT for egress on AWS)"
+  type        = list(string)
+}
+
+# Data services, still created outside Terraform until Phase 8 (rds.tf, redis.tf, s3.tf).
+# The DB address lives in app_secrets.PGRST_DB_URI.
+variable "redis_url" {
+  description = "redis:// (floci) or rediss:// (ElastiCache in-transit encryption)"
+  type        = string
+}
+variable "media_bucket" {
+  type = string
+}
+variable "media_public_base_url" {
+  description = "Browser-facing base for stored media (CloudFront on AWS; floci S3 locally)"
+  type        = string
+}
+
+variable "web_host" {
+  description = "Host the ALB routes to web, e.g. qacc.<domain>"
+  type        = string
+}
+variable "api_host" {
+  description = "Host the ALB routes to api, e.g. api.qacc.<domain>"
+  type        = string
+}
+variable "alb_listener_port" {
+  description = "HTTP listener port (floci maps container :80 to host :8088). HTTPS+ACM comes in Phase 8."
+  type        = number
+  default     = 80
+}
+variable "public_web_url" {
+  description = "Browser URL of the web app (CORS + SSO return), e.g. https://qacc.<domain>"
+  type        = string
+}
+
+variable "system_org_id" {
+  type = string
+}
+variable "system_user_id" {
+  type = string
+}
+variable "ted_preview_only" {
+  description = "true = TED writes go to local ted_comments only"
+  type        = bool
+  default     = true
+}
+
+variable "app_secrets" {
+  description = <<-EOT
+    Values stored in Secrets Manager qacc/<env>/app and injected into containers:
+    PGRST_DB_URI, PGRST_JWT_SECRET, SUPABASE_SERVICE_ROLE_KEY (HS256 JWT role=service_role
+    signed with PGRST_JWT_SECRET), TED_SSO_SECRET, QACC_SESSION_SECRET, TED_WEBHOOK_SECRET,
+    X_API_KEY, TED_API_TOKEN. Extra keys (AI keys etc.) are injected too.
+  EOT
+  type        = map(string)
+  sensitive   = true
+}
