@@ -106,6 +106,16 @@ export async function transitionRunStatus(
       return { ok: false, code: "error", error: updateError.message }
     }
 
+    // A cancelled run must free the global run slot, or the next run waits until
+    // it goes stale (RUN_SLOT_STALE_SECONDS). The RPC only frees the slot if this
+    // run holds it. Best-effort, same as stop-all.
+    if (newStatus === "cancelled") {
+      await supabase.rpc("release_run_slot", { p_run_id: runId }).then(
+        () => {},
+        () => {},
+      )
+    }
+
     // 4. Resume trigger: paused -> running re-enqueues remaining work.
     //    Mirrors runs.ts:529-608 exactly.
     if (currentStatus === "paused" && newStatus === "running") {

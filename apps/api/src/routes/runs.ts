@@ -605,6 +605,15 @@ router.patch(
         .single()
 
       if (updateError) throw updateError
+
+      // Free the global run slot on cancel (mirrors lib/runControl.ts).
+      if (newStatus === "cancelled") {
+        await supabase.rpc("release_run_slot", { p_run_id: id }).then(
+          () => {},
+          () => {},
+        )
+      }
+
       // Target Resume Trigger: Re-enqueue remaining or discovery scans
       if (currentStatus === "paused" && newStatus === "running") {
         const { qaQueue } = require("../lib/queue")
