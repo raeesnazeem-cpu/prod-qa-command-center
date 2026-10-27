@@ -27,6 +27,24 @@ services:
     networks:
       - qacc
 
+  # PostgREST for running api/worker with `pnpm dev` against floci RDS (Phase 3).
+  # In ECS this runs as a sidecar instead. Local-only secrets; RDS proxy port may differ
+  # per instance — check `aws.sh rds describe-db-instances`.
+  postgrest:
+    image: postgrest/postgrest:v12.2.12
+    container_name: qacc-postgrest
+    profiles: ["dev"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      PGRST_DB_URI: postgres://authenticator:authpw123@floci:7001/qacc
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: local-floci-jwt-secret-at-least-32-chars!!
+      PGRST_DB_POOL: "10"
+    networks:
+      - qacc
+
 networks:
   qacc:
     name: qacc-floci
