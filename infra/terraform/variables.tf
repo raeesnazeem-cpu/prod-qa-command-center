@@ -151,3 +151,10 @@ variable "app_secrets" {
   type        = map(string)
   sensitive   = true
 }
+
+variable "extra_app_secrets" {
+  description = "More keys for the app secret (AI/TED/check keys). Kept out of app_secrets so a generated, gitignored *.auto.tfvars.json can supply them."
+  type        = map(string)
+  sensitive   = true
+  default     = {}
+}

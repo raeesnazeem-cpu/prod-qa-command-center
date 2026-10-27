@@ -301,5 +301,6 @@ infra/terraform/.terraform/
 infra/terraform/*.tfstate
 infra/terraform/*.tfstate.*
 infra/terraform/*.tfvars
+infra/terraform/*.tfvars.json
 !infra/terraform/*.tfvars.example
 infra/floci/.data/
