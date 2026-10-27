@@ -10,14 +10,20 @@ services:
     user: root
     ports:
       - "4566:4566"
+      # ALB listener sockets bind inside floci; HTTP :80 -> host :8088
+      - "8088:80"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./.data:/var/lib/floci
+      - ./.data:/app/data
     environment:
       FLOCI_STORAGE_MODE: persistent
       # Default RDS image has no pgvector; the embeddings table needs it.
       FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE: pgvector/pgvector:pg16
       FLOCI_HOSTNAME: floci
+      # Containers in one awsvpc task share a network namespace (sidecar on localhost),
+      # like real Fargate. Without this each container gets its own IP.
+      FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED: "true"
+      FLOCI_SERVICES_ECS_DOCKER_NETWORK: qacc-floci
     networks:
       - qacc
 

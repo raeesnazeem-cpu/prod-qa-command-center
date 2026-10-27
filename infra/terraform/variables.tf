@@ -9,6 +9,12 @@ variable "use_floci" {
   default     = false
 }
 
+variable "floci_endpoint" {
+  description = "floci URL (http://floci:4566 when Terraform runs on the floci Docker network)"
+  type        = string
+  default     = "http://localhost:4566"
+}
+
 variable "region" {
   type    = string
   default = "us-east-1"

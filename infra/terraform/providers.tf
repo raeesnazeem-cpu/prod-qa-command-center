@@ -8,10 +8,6 @@ terraform {
   }
 }
 
-locals {
-  floci_endpoint = "http://localhost:4566"
-}
-
 # One provider, two profiles: use_floci=true points every service at floci's single endpoint.
 provider "aws" {
   region = var.region
@@ -27,17 +23,17 @@ provider "aws" {
   dynamic "endpoints" {
     for_each = var.use_floci ? [1] : []
     content {
-      ec2            = local.floci_endpoint
-      ecs            = local.floci_endpoint
-      ecr            = local.floci_endpoint
-      elasticache    = local.floci_endpoint
-      elbv2          = local.floci_endpoint
-      iam            = local.floci_endpoint
-      logs           = local.floci_endpoint
-      rds            = local.floci_endpoint
-      s3             = local.floci_endpoint
-      secretsmanager = local.floci_endpoint
-      sts            = local.floci_endpoint
+      ec2            = var.floci_endpoint
+      ecs            = var.floci_endpoint
+      ecr            = var.floci_endpoint
+      elasticache    = var.floci_endpoint
+      elbv2          = var.floci_endpoint
+      iam            = var.floci_endpoint
+      logs           = var.floci_endpoint
+      rds            = var.floci_endpoint
+      s3             = var.floci_endpoint
+      secretsmanager = var.floci_endpoint
+      sts            = var.floci_endpoint
     }
   }
 
