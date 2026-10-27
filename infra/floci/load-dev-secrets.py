@@ -9,8 +9,11 @@ Only the allow-list below is copied. Safety switches (TED_PREVIEW_ONLY,
 AI_FIX_MODULE_ENABLED, auth) are NOT secrets and stay forced by Terraform;
 push-override tokens (GH_TOKEN_*, GIT_FIX_TOKEN_OVERRIDES) are never copied.
 
-Usage: python3 infra/floci/load-dev-secrets.py
+Usage: python3 infra/floci/load-dev-secrets.py [--git-token-from apps/worker/prod.env]
+  --git-token-from  take GIT_FIX_TOKEN (only that key) from another env file,
+                    e.g. when the dev .env holds a deliberately fake token.
 """
+import argparse
 import json
 import pathlib
 import urllib.error
@@ -69,9 +72,19 @@ def github_status(token: str) -> str:
         return f"error ({type(e).__name__})"
 
 
+ap = argparse.ArgumentParser()
+ap.add_argument("--git-token-from", type=pathlib.Path)
+args = ap.parse_args()
+
 merged: dict = {}
 for f in ENV_FILES:
     merged.update(parse_env(f))
+if args.git_token_from:
+    src = args.git_token_from if args.git_token_from.is_absolute() else REPO / args.git_token_from
+    token = parse_env(src).get("GIT_FIX_TOKEN")
+    if not token:
+        raise SystemExit(f"GIT_FIX_TOKEN not found in {src}")
+    merged["GIT_FIX_TOKEN"] = token
 
 secrets = {k: merged[k] for k in ALLOW if merged.get(k)}
 OUT.write_text(json.dumps({"extra_app_secrets": secrets}, indent=2) + "\n")
@@ -79,6 +92,8 @@ OUT.chmod(0o600)
 
 print(f"wrote {OUT.relative_to(REPO)}")
 print("copied:", ", ".join(sorted(secrets)) or "(none)")
+if args.git_token_from:
+    print("GIT_FIX_TOKEN taken from", args.git_token_from)
 print("missing:", ", ".join(k for k in ALLOW if k not in secrets) or "(none)")
 if "GIT_FIX_TOKEN" in secrets:
     print("GIT_FIX_TOKEN github /user status:", github_status(secrets["GIT_FIX_TOKEN"]))
