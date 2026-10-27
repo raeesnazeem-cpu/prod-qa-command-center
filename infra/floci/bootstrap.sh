@@ -2,7 +2,7 @@
 # Bring up QACC on floci (plan §5, Phase 6):
 #   1. start floci
 #   2. write infra/terraform/local.auto.tfvars (local-only test secrets + floci ids)
-#   3. create the ECR repos, push images, then apply everything else
+#   3. create the ECR repos, tag images with their ECR names, apply everything else
 #
 # Expects (until Phase 8 puts them in Terraform): floci RDS `qacc-db` with the schema
 # loaded (infra/db/load-schema.sh), ElastiCache `qacc-redis`, bucket qacc-media-local.
@@ -75,23 +75,18 @@ EOF
 
 tf init -input=false >/dev/null
 
-# --- ECR first, then push -----------------------------------------------------
+# --- ECR repos, then images -----------------------------------------------------
+# floci runs with FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR=prefer-cached, so tasks use
+# images already on this Docker daemon under their ECR name. Only tag them: pushing
+# would store a second copy (the worker alone is ~6.6 GB). Real AWS pushes to ECR.
 tf apply -input=false -auto-approve -target=aws_ecr_repository.this
 registry="000000000000.dkr.ecr.us-east-1.localhost:4566"
-aws ecr get-login-password | docker login --username AWS --password-stdin "$registry" >/dev/null
-push() { # <local image> <repo> <tag>; tags are immutable, so skip ones already there
-  if aws ecr describe-images --repository-name "$2" --image-ids imageTag="$3" >/dev/null 2>&1; then
-    echo "exists $2:$3"
-    return
-  fi
-  docker tag "$1" "$registry/$2:$3"
-  docker push -q "$registry/$2:$3" >/dev/null
-  echo "pushed $2:$3"
-}
-for app in api worker web; do push "qacc-$app:$tag" "qacc-$app" "$tag"; done
+for app in api worker web; do
+  docker tag "qacc-$app:$tag" "$registry/qacc-$app:$tag"
+done
 pgrst=$(sed -n 's/.*default *= *"\(v12[^"]*\)".*/\1/p' "$tf_dir/variables.tf")
 docker pull -q "postgrest/postgrest:$pgrst" >/dev/null
-push "postgrest/postgrest:$pgrst" postgrest "$pgrst"
+docker tag "postgrest/postgrest:$pgrst" "$registry/postgrest:$pgrst"
 
 # --- everything else -----------------------------------------------------------
 tf apply -input=false -auto-approve

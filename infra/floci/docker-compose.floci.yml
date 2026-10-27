@@ -26,6 +26,10 @@ services:
       # like real Fargate. Without this each container gets its own IP.
       FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED: "true"
       FLOCI_SERVICES_ECS_DOCKER_NETWORK: qacc-floci
+      # Use an image already on this Docker daemon (tagged with its ECR name) instead
+      # of pulling from floci's registry: the worker image is ~6.6 GB and a second
+      # copy in the registry doesn't fit on a laptop. Real AWS always pulls from ECR.
+      FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR: prefer-cached
     networks:
       - qacc
 
