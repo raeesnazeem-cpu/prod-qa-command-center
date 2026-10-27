@@ -4,6 +4,7 @@ import { qaQueue } from "./queue"
 import { releaseRunSlot } from "./runSlot"
 import pino from "pino"
 import sharp from "sharp"
+import { downloadStoredObject } from "./supabaseStorage"
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -640,6 +641,17 @@ const IMG_BUDGET_BYTES = 4 * 1024 * 1024 // ~4MB of base64 across the whole repo
 // Stored on findings.inline_media at scan time (see precomputeFindingMedia).
 type InlineImg = { d: string; w: number; h: number }
 
+// Our stored screenshots are read with storage credentials (S3 or Supabase), so
+// TED reports don't depend on the bucket being publicly reachable (S3 behind
+// CloudFront, floci inside ECS). Anything else, e.g. a site's own image, is a plain
+// fetch. null = not fetched.
+async function fetchImageBytes(url: string): Promise<Buffer | null> {
+  const stored = await downloadStoredObject(url).catch(() => null)
+  if (stored) return stored.buffer
+  const resp = await fetch(url)
+  return resp.ok ? Buffer.from(await resp.arrayBuffer()) : null
+}
+
 // Fetch → downscale → webp → base64 data-URI for ONE screenshot. Returns null on
 // any fetch/encode failure (caller falls back to a plain link). Extracted so the
 // post-time renderer and the scan-time precompute share ONE encoder.
@@ -647,12 +659,11 @@ async function buildThumbDataUri(
   url: string,
 ): Promise<{ dataUri: string; width: number; height: number } | null> {
   try {
-    const resp = await fetch(url)
-    if (!resp.ok) {
-      logger.warn({ url, status: resp.status }, "Screenshot fetch not OK; using link only.")
+    const srcBuf = await fetchImageBytes(url)
+    if (!srcBuf) {
+      logger.warn({ url }, "Screenshot fetch not OK; using link only.")
       return null
     }
-    const srcBuf = Buffer.from(await resp.arrayBuffer())
     const out = await sharp(srcBuf)
       .resize({ width: THUMB_WIDTH, withoutEnlargement: true })
       .webp({ quality: WEBP_QUALITY })
@@ -726,9 +737,8 @@ async function renderImageThumbs(
     let embedded = false
     if (budget.remaining > 0) {
       try {
-        const resp = await fetch(imgUrl)
-        if (resp.ok) {
-          const srcBuf = Buffer.from(await resp.arrayBuffer())
+        const srcBuf = await fetchImageBytes(imgUrl)
+        if (srcBuf) {
           const out = await sharp(srcBuf)
             .resize({ width: THUMB_WIDTH, withoutEnlargement: true })
             .webp({ quality: WEBP_QUALITY })
@@ -776,9 +786,8 @@ async function buildGridDataUri(
     const imgUrl = String(rows[i]?.thumb || rows[i]?.src || "").trim()
     if (!imgUrl) continue
     try {
-      const resp = await fetch(imgUrl)
-      if (!resp.ok) continue
-      const srcBuf = Buffer.from(await resp.arrayBuffer())
+      const srcBuf = await fetchImageBytes(imgUrl)
+      if (!srcBuf) continue
       const buf = await sharp(srcBuf)
         .resize({
           width: GRID_CELL,

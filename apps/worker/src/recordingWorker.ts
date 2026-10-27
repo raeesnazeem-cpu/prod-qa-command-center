@@ -284,23 +284,29 @@ async function run() {
 
     if (cloudProvider === "AWS") {
       console.log(`Uploading full project video to AWS S3: ${fileName}`)
-      // TODO: Implement AWS S3 upload logic here
-      // e.g. await s3Client.putObject({...})
+      // Shared media bucket, `recordings/` prefix (same layout as screenshots).
+      // No ACL: the bucket blocks public access; reads go via STORAGE_PUBLIC_BASE_URL
+      // (CloudFront on AWS, floci's S3 endpoint locally).
       const bucketName = process.env.AWS_S3_BUCKET_NAME || "my-agency-qa-videos"
-      
+      const key = `recordings/${fileName}`
+
       const { S3Client, PutObjectCommand } = await import("@aws-sdk/client-s3")
-      const s3Client = new S3Client({ region: process.env.AWS_REGION || "us-east-1" })
-      const fileStream = fs.createReadStream(videoFile)
-      
+      const s3Client = new S3Client({
+        region: process.env.AWS_REGION || "us-east-1",
+        forcePathStyle: !!process.env.AWS_ENDPOINT_URL,
+      })
+
       await s3Client.send(new PutObjectCommand({
         Bucket: bucketName,
-        Key: fileName,
-        Body: fileStream,
+        Key: key,
+        Body: fs.readFileSync(videoFile),
         ContentType: "video/webm",
-        ACL: "public-read"
       }))
 
-      publicUrl = `https://${bucketName}.s3.amazonaws.com/${fileName}`
+      const publicBase = (process.env.STORAGE_PUBLIC_BASE_URL || "").replace(/\/+$/, "")
+      publicUrl = publicBase
+        ? `${publicBase}/${key}`
+        : `https://${bucketName}.s3.amazonaws.com/${key}`
       console.log(`Video uploaded successfully to AWS S3: ${publicUrl}`)
     } else {
       console.log(`Uploading full project video to GCS: ${fileName}`)

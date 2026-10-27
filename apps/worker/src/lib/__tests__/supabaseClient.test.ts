@@ -26,7 +26,7 @@ describe("supabase client (AWS switches)", () => {
     }
   })
 
-  const load = async () => (await import("../supabase")).supabase
+  const load = async () => require("../supabase").supabase
 
   it("rewrites /rest/v1 to POSTGREST_URL", async () => {
     process.env.POSTGREST_URL = "http://127.0.0.1:3000/"

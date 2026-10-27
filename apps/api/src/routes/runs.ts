@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express"
 import { supabase } from "../lib/supabase"
+import { downloadStoredObject } from "../lib/supabaseStorage"
 import { clerkAuth } from "../middleware/clerkAuth"
 import { requireRole } from "../middleware/requireRole"
 import { zodValidate } from "../middleware/zodValidate"
@@ -1177,22 +1178,10 @@ router.post("/verify-plugins-ai", async (req, res) => {
     let mimeType = "image/png"
 
     try {
-      if (screenshotUrl.includes("/storage/v1/object/")) {
-        const urlObj = new URL(screenshotUrl)
-        const parts = urlObj.pathname.split("/")
-        const bucketIndex =
-          parts.findIndex((p) => p === "sign" || p === "public") + 1
-        const bucket = parts[bucketIndex]
-        const filePath = decodeURIComponent(
-          parts.slice(bucketIndex + 1).join("/"),
-        )
-
-        const { data, error } = await supabase.storage
-          .from(bucket)
-          .download(filePath)
-        if (error) throw error
-        imageBuffer = Buffer.from(await data.arrayBuffer())
-        mimeType = data.type || "image/png"
+      const stored = await downloadStoredObject(screenshotUrl)
+      if (stored) {
+        imageBuffer = stored.buffer
+        mimeType = stored.contentType
       } else {
         const axios = require("axios")
         const imageResponse = await axios.get(screenshotUrl, {
@@ -1279,22 +1268,10 @@ router.post("/verify-social-share-ai", async (req, res) => {
       let mimeType = "image/png"
 
       try {
-        if (url.includes("/storage/v1/object/")) {
-          const urlObj = new URL(url)
-          const parts = urlObj.pathname.split("/")
-          const bucketIndex =
-            parts.findIndex((p) => p === "sign" || p === "public") + 1
-          const bucket = parts[bucketIndex]
-          const filePath = decodeURIComponent(
-            parts.slice(bucketIndex + 1).join("/"),
-          )
-
-          const { data, error } = await supabase.storage
-            .from(bucket)
-            .download(filePath)
-          if (error) throw error
-          imageBuffer = Buffer.from(await data.arrayBuffer())
-          mimeType = data.type || "image/png"
+        const stored = await downloadStoredObject(url)
+        if (stored) {
+          imageBuffer = stored.buffer
+          mimeType = stored.contentType
         } else {
           const imageResponse = await axios.get(url, {
             responseType: "arraybuffer",
@@ -1414,22 +1391,10 @@ router.post("/verify-favicon-ai", async (req, res) => {
       let mimeType = "image/png"
 
       try {
-        if (url.includes("/storage/v1/object/")) {
-          const urlObj = new URL(url)
-          const parts = urlObj.pathname.split("/")
-          const bucketIndex =
-            parts.findIndex((p) => p === "sign" || p === "public") + 1
-          const bucket = parts[bucketIndex]
-          const filePath = decodeURIComponent(
-            parts.slice(bucketIndex + 1).join("/"),
-          )
-
-          const { data, error } = await supabase.storage
-            .from(bucket)
-            .download(filePath)
-          if (error) throw error
-          imageBuffer = Buffer.from(await data.arrayBuffer())
-          mimeType = data.type || "image/png"
+        const stored = await downloadStoredObject(url)
+        if (stored) {
+          imageBuffer = stored.buffer
+          mimeType = stored.contentType
         } else {
           const imageResponse = await axios.get(url, {
             responseType: "arraybuffer",

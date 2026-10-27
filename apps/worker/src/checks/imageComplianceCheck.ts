@@ -1,7 +1,7 @@
 import { Page as PlaywrightPage } from 'playwright';
 import { Finding } from '@qacc/shared';
 import { analyzeScreenshot } from '@qacc/ai';
-import { supabase } from '../lib/supabase';
+import { downloadStoredObject } from '../lib/supabaseStorage';
 
 export async function checkImageCompliance(page: PlaywrightPage, pageRecord: any): Promise<Finding[]> {
   const imageResults = await page.evaluate(() => {
@@ -82,32 +82,23 @@ export async function checkImageCompliance(page: PlaywrightPage, pageRecord: any
   // 5. AI-Vision Check (Check Factor 7 - Part 2)
   if (pageRecord.desktopUrl) {
     try {
-      // Extract path from URL (e.g., https://.../storage/v1/object/public/screenshots/run_id/page_id.png)
-      const url = new URL(pageRecord.desktopUrl);
-      const pathParts = url.pathname.split('/public/screenshots/');
-      if (pathParts.length === 2) {
-        const filePath = pathParts[1];
-        
-        // Download from Supabase Storage
-        const { data, error } = await supabase.storage
-          .from('screenshots')
-          .download(filePath);
+      // Download the stored desktop screenshot (Supabase or S3 URL)
+      const stored = await downloadStoredObject(pageRecord.desktopUrl);
 
-        if (!error && data) {
-          const buffer = Buffer.from(await data.arrayBuffer());
-          const aiIssues = await analyzeScreenshot(buffer);
-          
-          for (const issue of aiIssues) {
-            findings.push({
-              check_factor: 'image_compliance',
-              title: `AI Vision: ${issue.issue}`,
-              description: `AI detected a visual issue: ${issue.issue}. Affected area: ${issue.area}`,
-              context_text: `AI-Vision analysis of desktop screenshot.`,
-              screenshot_url: pageRecord.desktopUrl,
-              status: 'open',
-              ai_generated: true
-            });
-          }
+      if (stored) {
+        const buffer = stored.buffer;
+        const aiIssues = await analyzeScreenshot(buffer);
+        
+        for (const issue of aiIssues) {
+          findings.push({
+            check_factor: 'image_compliance',
+            title: `AI Vision: ${issue.issue}`,
+            description: `AI detected a visual issue: ${issue.issue}. Affected area: ${issue.area}`,
+            context_text: `AI-Vision analysis of desktop screenshot.`,
+            screenshot_url: pageRecord.desktopUrl,
+            status: 'open',
+            ai_generated: true
+          });
         }
       }
     } catch (err) {

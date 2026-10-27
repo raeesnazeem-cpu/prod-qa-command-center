@@ -11,6 +11,15 @@ export SUPABASE_URL=http://127.0.0.1:3000
 export POSTGREST_URL=http://127.0.0.1:3000
 export SUPABASE_SERVICE_ROLE_KEY="$(node "$_repo/infra/db/make-jwt.mjs" "$_jwt_secret" service_role)"
 export REALTIME_ENABLED=false
+
+# Storage -> floci S3 (one bucket, old Supabase buckets as prefixes)
+export STORAGE_BACKEND=s3
+export AWS_S3_BUCKET_NAME=qacc-media-local
+export STORAGE_PUBLIC_BASE_URL=http://localhost:4566/qacc-media-local
+export AWS_ENDPOINT_URL=http://localhost:4566
+export AWS_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
 export UPSTASH_REDIS_URL=redis://127.0.0.1:6380
 
 export FRONTEND_URL=http://localhost:5173
