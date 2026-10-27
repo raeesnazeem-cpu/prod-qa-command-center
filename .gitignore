@@ -294,3 +294,12 @@ skills-lock.json
 
 # Redis snapshot files (local dev)
 *.rdb
+
+# AWS / floci infra
+!infra/db/*.sql
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/*.tfvars
+!infra/terraform/*.tfvars.example
+infra/floci/.data/

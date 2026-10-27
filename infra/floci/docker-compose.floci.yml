@@ -1,0 +1,26 @@
+# Local AWS emulator for the QACC AWS move (docs/aws-floci-migration-plan.md §5).
+# Start:  docker compose -f infra/floci/docker-compose.floci.yml up -d
+# Fallback app containers (if floci can't run a piece) get added here, on the same network.
+name: qacc-floci
+
+services:
+  floci:
+    image: floci/floci:2.3.0
+    container_name: floci
+    user: root
+    ports:
+      - "4566:4566"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.data:/var/lib/floci
+    environment:
+      FLOCI_STORAGE_MODE: persistent
+      # Default RDS image has no pgvector; the embeddings table needs it.
+      FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE: pgvector/pgvector:pg16
+      FLOCI_HOSTNAME: floci
+    networks:
+      - qacc
+
+networks:
+  qacc:
+    name: qacc-floci
