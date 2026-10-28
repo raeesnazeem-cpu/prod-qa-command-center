@@ -6,6 +6,7 @@ import {
   postTedComment,
   postTedStatus,
   postQaccInternalNote,
+  parentHeldOpen,
 } from "../lib/tedSync"
 import {
   triggerFullProjectRecording,
@@ -378,7 +379,12 @@ async function finalizeRunCloseout(opts: {
   for (const subId of videoSubtaskIds) {
     await postTedStatus(subId, TED_STATUS_COMPLETED, runId).catch(() => {})
   }
-  // ...then the parent (main thread) is marked Completed — last of all.
+  // ...then the parent (main thread) is marked Completed — last of all — unless
+  // the report held it open because issues remain for a person.
+  if (tedTaskId && (await parentHeldOpen(runId, tedTaskId))) {
+    logger.info({ runId, tedTaskId }, "Open issues remain — parent left In Progress.")
+    return
+  }
   if (tedTaskId) {
     await postTedStatus(tedTaskId, TED_STATUS_COMPLETED, runId).catch(() => {})
   }

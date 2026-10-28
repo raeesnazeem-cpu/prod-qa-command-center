@@ -1196,22 +1196,18 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
     if (eventType === "TASK_UPDATED" || eventType === "TASK_STATUS_CHANGED") {
       // Gate: act on the release.pre_dev trigger task → Complete/Completed
       // (the old trigger, now scoped to its template key to match internal QA
-      // and post-release), OR on the release.qa_pre target task itself while
-      // still "Not Started" — a manual/test kick-off (direct run trigger).
-      // The target is scoped to release.qa_pre so a random Not Started task
-      // never launches a pre-release run.
+      // and post-release), OR on a manual trigger of the release.qa_pre target
+      // task itself at any status (see isManualTargetTrigger). The target is
+      // scoped to release.qa_pre so a random task never launches a run.
       const isPreDevTrigger = task.templateKey === "release.pre_dev"
       const isComplete =
         task.status === "Complete" || task.status === "Completed"
       const isPreQaTarget = task.templateKey === "release.qa_pre"
-      const isNotStarted = task.status === "Not Started"
-      if (
-        (isPreDevTrigger && isComplete) ||
-        (isPreQaTarget && isNotStarted)
-      ) {
+      const isManual = isPreQaTarget && isManualTargetTrigger(task)
+      if ((isPreDevTrigger && isComplete) || isManual) {
         console.log(
-          isPreQaTarget && isNotStarted
-            ? "✅ release.qa_pre direct trigger (Not Started)! Triggering QACC pre-release workflow..."
+          isManual
+            ? `✅ release.qa_pre manual trigger (${task.status})! Triggering QACC pre-release workflow...`
             : "✅ release.pre_dev is Complete! Triggering QACC pre-release workflow...",
         )
         console.log("Task Data:", task)
@@ -1451,34 +1447,15 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
               runCreatorId = adminUser?.id || null
             }
 
-            // Dedupe guard: skip if a run for this TED task was created very
-            // recently. QACC writes "In Progress" back to TED, which re-fires
-            // this webhook (status is in the accept list) — without this, that
-            // re-entry spawns a duplicate run, report, AI-fix pass and PR.
-            // Window via TED_RUN_DEDUPE_HOURS (default 6).
+            // Dedupe guard (see findBlockingRun): no second run while one is
+            // active, nor within the cooldown unless TED sends force: true.
             if (preReleaseTaskId) {
-              const dedupeHours = Number(process.env.TED_RUN_DEDUPE_HOURS || 6)
-              const since = new Date(
-                Date.now() - dedupeHours * 3600 * 1000,
-              ).toISOString()
-              const { data: recentRuns } = await supabase
-                .from("qa_runs")
-                .select("id, created_at")
-                .eq("ted_task_id", String(preReleaseTaskId))
-                // Ignore cancelled scans (status "failed") so a retry after the
-                // beta URL is added isn't blocked by the earlier aborted run.
-                .neq("status", "failed")
-                .gte("created_at", since)
-                .limit(1)
-              if (recentRuns && recentRuns.length > 0) {
-                console.log(
-                  `[TED webhook] Duplicate suppressed: run ${recentRuns[0].id} already exists for TED task ${preReleaseTaskId} within ${dedupeHours}h`,
-                )
-                return res.status(200).json({
-                  status: "duplicate_suppressed",
-                  existingRunId: recentRuns[0].id,
-                })
-              }
+              const blocking = await findBlockingRun(
+                String(preReleaseTaskId),
+                isForcedTrigger(payload),
+              )
+              if (blocking)
+                return skipDuplicateTrigger(res, String(preReleaseTaskId), blocking, "pre-release")
             }
 
             // 3. No beta site URL resolved → do NOT scan. Record a visible
@@ -1574,7 +1551,11 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
         // Only when the scan actually started (createdRunId set). QACC never
         // marks the PARENT Complete here — a human closes it out after the
         // remaining manual work, so it deliberately stays "In Progress".
-        if (createdRunId && taskId && apiToken) {
+        // Skip when TED handed us this task already In Progress: re-writing the
+        // same status is a no-op that could echo back as a manual trigger.
+        const alreadyInProgress =
+          String(task.id) === String(taskId) && task.status === "In Progress"
+        if (createdRunId && taskId && apiToken && !alreadyInProgress) {
           console.log(
             `🔄 Marking TED Task #${taskId} as "In Progress" (QACC scan started)...`,
           )
@@ -1968,6 +1949,100 @@ function mapSubtasksToChecks(
     )
   }
   return { map, matchedChecks: Object.keys(map), unmatched }
+}
+
+// A manual trigger from TED re-sends the target QA task with its status
+// UNCHANGED (previousStatus === status, e.g. "In Progress → In Progress" or
+// "Completed → Completed"); a real status change always differs. So the target
+// task starts a run on a manual trigger at ANY status, plus the original
+// "Not Started" direct trigger.
+function isManualTargetTrigger(task: any): boolean {
+  if (task?.status === "Not Started") return true
+  return !!task?.status && task.previousStatus === task.status
+}
+
+// ---------------------------------------------------------------------------
+// Run dedupe — one QACC run per TED task at a time, plus a short cooldown, so
+// double-clicks and re-fired webhooks never start duplicate scans.
+//   • ACTIVE (always on): a run for this task is paused, or pending/running and
+//     updated within TED_RUN_STALE_MINUTES (default 60). A pending/running run
+//     that stopped updating that long ago is dead (e.g. its queue job was
+//     lost), so it no longer blocks a new trigger.
+//   • COOLDOWN: any other run for this task created within
+//     TED_RUN_DEDUPE_MINUTES (default 15; 0 = off).
+// Override: `force: true` on the TED payload (top level or in `trigger`) skips
+// the cooldown — never the active block; cancel the active run for that.
+// Aborted ("failed", e.g. no beta URL) and cancelled runs never block.
+// ---------------------------------------------------------------------------
+type BlockingRun = { id: string; reason: "active" | "cooldown"; createdAt: string }
+
+function isForcedTrigger(payload: any): boolean {
+  return payload?.force === true || payload?.trigger?.force === true
+}
+
+async function findBlockingRun(
+  tedTaskId: string,
+  force: boolean,
+): Promise<BlockingRun | null> {
+  const minsAgo = (m: number) => new Date(Date.now() - m * 60 * 1000).toISOString()
+  const staleMins = Number(process.env.TED_RUN_STALE_MINUTES || 60)
+  const { data: active } = await supabase
+    .from("qa_runs")
+    .select("id, created_at")
+    .eq("ted_task_id", tedTaskId)
+    .or(
+      `status.eq.paused,and(status.in.(pending,running),updated_at.gte.${minsAgo(staleMins)})`,
+    )
+    .order("created_at", { ascending: false })
+    .limit(1)
+  if (active?.length)
+    return { id: active[0].id, reason: "active", createdAt: active[0].created_at }
+
+  const cooldownMins = Number(process.env.TED_RUN_DEDUPE_MINUTES ?? 15)
+  if (force || !(cooldownMins > 0)) return null
+  const { data: recent } = await supabase
+    .from("qa_runs")
+    .select("id, created_at")
+    .eq("ted_task_id", tedTaskId)
+    .not("status", "in", "(failed,cancelled)")
+    .gte("created_at", minsAgo(cooldownMins))
+    .order("created_at", { ascending: false })
+    .limit(1)
+  return recent?.length
+    ? { id: recent[0].id, reason: "cooldown", createdAt: recent[0].created_at }
+    : null
+}
+
+// Tell TED why the trigger did nothing (once per blocking run, so repeat clicks
+// don't stack comments), then answer the webhook.
+async function skipDuplicateTrigger(
+  res: Response,
+  tedTaskId: string,
+  blocking: BlockingRun,
+  flow: string,
+) {
+  console.log(
+    `[TED ${flow}] Duplicate suppressed (${blocking.reason}): run ${blocking.id} for TED task ${tedTaskId}`,
+  )
+  const text =
+    blocking.reason === "active"
+      ? `<p>⏸️ <strong>Trigger skipped</strong> — a QACC scan for this task is already in progress (run ${blocking.id}). Wait for it to finish, or cancel it, then trigger again.</p>`
+      : (() => {
+          const mins = Number(process.env.TED_RUN_DEDUPE_MINUTES ?? 15)
+          const readyAt = new Date(new Date(blocking.createdAt).getTime() + mins * 60 * 1000)
+          return `<p>⏸️ <strong>Trigger skipped</strong> — a QACC scan for this task started less than ${mins} minutes ago (run ${blocking.id}). Trigger again after ${readyAt.toISOString().slice(11, 16)} UTC to re-run.</p>`
+        })()
+  await postTedComment(
+    tedTaskId,
+    text,
+    `ext:qacc-trigger-skipped-${tedTaskId}-${blocking.id}`,
+    blocking.id,
+  ).catch(() => {})
+  return res.status(200).json({
+    status: "duplicate_suppressed",
+    reason: blocking.reason,
+    existingRunId: blocking.id,
+  })
 }
 
 // PUT a status onto a TED task. TED's SSR returns app-shell HTML (HTTP 200)
@@ -2410,19 +2485,19 @@ webhookRouter.post(
         )
       }
 
-      // 3. Gate: act on beta_site.seo → Complete/Completed, OR on the
-      //    beta_site.internal_test target itself while still "Not Started"
-      //    (a direct manual/test trigger — touch the internal-test task to
-      //    kick off the scan without waiting on the SEO task).
+      // 3. Gate: act on beta_site.seo → Complete/Completed, OR on a manual
+      //    trigger of the beta_site.internal_test target itself at any status
+      //    (see isManualTargetTrigger) — kicks off the scan without waiting on
+      //    the SEO task.
       const isSeoTemplate =
         task.templateKey === INTERNAL_QA_TRIGGER_TEMPLATE_KEY
       const isComplete =
         task.status === "Complete" || task.status === "Completed"
 
-      // Direct trigger: the internal_test task (the target) at Not Started.
+      // Manual trigger: the internal_test task (the target) at any status.
       const isInternalTestTemplate =
         task.templateKey === INTERNAL_QA_TARGET_TEMPLATE_KEY
-      const isNotStarted = task.status === "Not Started"
+      const isManual = isInternalTestTemplate && isManualTargetTrigger(task)
 
       // TED labels a status change as TASK_UPDATED (the record event); the
       // "Task Status Changed" trigger is a TED-side filter, not the delivered
@@ -2431,12 +2506,11 @@ webhookRouter.post(
       if (
         (eventType === "TASK_UPDATED" ||
           eventType === "TASK_STATUS_CHANGED") &&
-        ((isSeoTemplate && isComplete) ||
-          (isInternalTestTemplate && isNotStarted))
+        ((isSeoTemplate && isComplete) || isManual)
       ) {
         console.log(
-          isInternalTestTemplate
-            ? "✅ beta_site.internal_test direct trigger (Not Started)! Starting internal QA scan of the beta site..."
+          isManual
+            ? `✅ beta_site.internal_test manual trigger (${task.status})! Starting internal QA scan of the beta site...`
             : "✅ beta_site.seo is Complete! Starting internal QA scan of the beta site...",
         )
 
@@ -2653,32 +2727,15 @@ webhookRouter.post(
               runCreatorId = adminUser?.id || null
             }
 
-            // Dedupe guard: QACC writes "In Progress" back to TED, which can
-            // re-fire this webhook. Skip if a run for this target task was
-            // created within TED_RUN_DEDUPE_HOURS (default 6).
+            // Dedupe guard (see findBlockingRun): no second run while one is
+            // active, nor within the cooldown unless TED sends force: true.
             if (targetTaskId) {
-              const dedupeHours = Number(process.env.TED_RUN_DEDUPE_HOURS || 6)
-              const since = new Date(
-                Date.now() - dedupeHours * 3600 * 1000,
-              ).toISOString()
-              const { data: recentRuns } = await supabase
-                .from("qa_runs")
-                .select("id, created_at")
-                .eq("ted_task_id", String(targetTaskId))
-                // Ignore cancelled scans (status "failed") so a retry after the
-                // beta URL is added isn't blocked by the earlier aborted run.
-                .neq("status", "failed")
-                .gte("created_at", since)
-                .limit(1)
-              if (recentRuns && recentRuns.length > 0) {
-                console.log(
-                  `[TED internal-QA] Duplicate suppressed: run ${recentRuns[0].id} already exists for TED task ${targetTaskId} within ${dedupeHours}h`,
-                )
-                return res.status(200).json({
-                  status: "duplicate_suppressed",
-                  existingRunId: recentRuns[0].id,
-                })
-              }
+              const blocking = await findBlockingRun(
+                String(targetTaskId),
+                isForcedTrigger(payload),
+              )
+              if (blocking)
+                return skipDuplicateTrigger(res, String(targetTaskId), blocking, "internal-QA")
             }
 
             // No beta site URL resolved → do NOT scan. Record a visible
@@ -2777,7 +2834,11 @@ webhookRouter.post(
 
         // Only mark In Progress when the scan actually started. QACC never
         // marks it Complete — a human closes it out after the manual work.
-        if (createdRunId && taskId && apiToken) {
+        // Skip when TED handed us this task already In Progress: re-writing the
+        // same status is a no-op that could echo back as a manual trigger.
+        const alreadyInProgress =
+          String(task.id) === String(taskId) && task.status === "In Progress"
+        if (createdRunId && taskId && apiToken && !alreadyInProgress) {
           console.log(
             `🔄 Marking TED Task #${taskId} as "In Progress" (internal QA scan started)...`,
           )
@@ -3006,26 +3067,25 @@ webhookRouter.post(
         )
       }
 
-      // 3. Gate: act on release.security → Complete/Completed, OR on the
-      //    release.qa_post target task itself while still "Not Started" (a
-      //    manual/test kick-off, same setting as internal QA / pre-release).
+      // 3. Gate: act on release.security → Complete/Completed, OR on a manual
+      //    trigger of the release.qa_post target task at any status (see
+      //    isManualTargetTrigger; same as internal QA / pre-release).
       const isSecurityTemplate = task.templateKey === "release.security"
       const isComplete =
         task.status === "Complete" || task.status === "Completed"
 
-      // Direct trigger: the release.qa_post target task at Not Started.
+      // Manual trigger: the release.qa_post target task at any status.
       const isPostQaTarget = task.templateKey === "release.qa_post"
-      const isNotStarted = task.status === "Not Started"
+      const isManual = isPostQaTarget && isManualTargetTrigger(task)
 
       if (
         (eventType === "TASK_UPDATED" ||
           eventType === "TASK_STATUS_CHANGED") &&
-        ((isSecurityTemplate && isComplete) ||
-          (isPostQaTarget && isNotStarted))
+        ((isSecurityTemplate && isComplete) || isManual)
       ) {
         console.log(
-          isPostQaTarget && isNotStarted
-            ? "✅ release.qa_post direct trigger (Not Started)! Shifting project to post-release and starting General Checks..."
+          isManual
+            ? `✅ release.qa_post manual trigger (${task.status})! Shifting project to post-release and starting General Checks...`
             : "✅ release.security is Complete! Shifting project to post-release and starting General Checks...",
         )
 
@@ -3199,6 +3259,16 @@ webhookRouter.post(
                 `⚠️ Fallback URL in use: no released domain was found on the "Complete website security and release" task ` +
                 `(neither in its automation payload nor its comments), so the TED client page Website URL (${liveSiteUrl}) is being scanned instead.`
             }
+            // Dedupe guard (see findBlockingRun): no second run while one is
+            // active, nor within the cooldown unless TED sends force: true.
+            if (scanTaskId) {
+              const blocking = await findBlockingRun(
+                String(scanTaskId),
+                isForcedTrigger(payload),
+              )
+              if (blocking)
+                return skipDuplicateTrigger(res, String(scanTaskId), blocking, "post-release")
+            }
             if (!runSiteUrl) {
               scanAborted = true
               const abortedRunId = await createAbortedRun({
@@ -3313,7 +3383,11 @@ webhookRouter.post(
           )
         }
 
-        if (createdRunId && taskId && apiToken) {
+        // Skip when TED handed us this task already In Progress: re-writing the
+        // same status is a no-op that could echo back as a manual trigger.
+        const alreadyInProgress =
+          String(task.id) === String(taskId) && task.status === "In Progress"
+        if (createdRunId && taskId && apiToken && !alreadyInProgress) {
           console.log(
             `🔄 Marking TED Task #${taskId} as "In Progress" (post-release scan started)...`,
           )
