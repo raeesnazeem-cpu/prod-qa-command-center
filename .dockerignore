@@ -33,6 +33,9 @@ playwright-report/
 blob-report/
 *.sql
 **/*.sql
+# ...except the schema the qacc-dbtools image (infra/db/Dockerfile) applies
+!infra/db/*.sql
+!supabase/migrations/*.sql
 *.md
 **/*.md
 plan-*.md

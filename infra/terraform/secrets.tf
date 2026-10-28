@@ -5,7 +5,7 @@ resource "aws_secretsmanager_secret" "app" {
 }
 
 locals {
-  all_app_secrets = merge(var.app_secrets, var.extra_app_secrets)
+  all_app_secrets = merge(var.app_secrets, var.extra_app_secrets, local.computed_secrets)
 }
 
 resource "aws_secretsmanager_secret_version" "app" {

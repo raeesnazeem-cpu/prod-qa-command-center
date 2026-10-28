@@ -1,10 +1,10 @@
 locals {
-  repos = ["qacc-api", "qacc-worker", "qacc-web", "qacc-recorder", "postgrest"]
+  repos = ["qacc-api", "qacc-worker", "qacc-web", "qacc-dbtools", "postgrest"]
 }
 
 resource "aws_ecr_repository" "this" {
   for_each             = toset(local.repos)
-  name                 = each.key
+  name                 = "${var.ecr_repo_prefix}${each.key}"
   image_tag_mutability = "IMMUTABLE"
   force_delete         = var.use_floci
 

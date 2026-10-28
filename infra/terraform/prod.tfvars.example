@@ -1,0 +1,36 @@
+# Copy to prod.tfvars and fill in the <...> values. Not secret (secrets go in
+# infra/aws/secrets.env). Every value is explained in infra/README.md.
+
+env    = "prod"
+region = "us-east-1"
+
+# Image tag to run. infra/aws/03-build-push.sh prints it; deploy.sh sets it for you.
+image_tag = "<git short sha>"
+
+# Web address. Both names must point at the load balancer (alb_dns_name output).
+web_host       = "qacc.<your-domain>"
+api_host       = "api.qacc.<your-domain>"
+public_web_url = "https://qacc.<your-domain>"
+https_enabled  = true
+
+# TED login page (same as today's VITE_TED_BASE_URL).
+ted_base_url = "<https://ted…>"
+
+# Rows that already exist in the migrated database (ask the project owner).
+system_org_id  = "<uuid>"
+system_user_id = "<uuid>"
+
+# false = TED really receives comments. Keep true until the owner says go.
+ted_preview_only = true
+
+# Workers: one per running QA run. min 1 keeps one warm; max = runs at once.
+worker_min_count = 1
+worker_max_count = 10
+
+recording_enabled = false
+
+# Sizes (defaults are fine to start; see infra/README.md "Costs").
+# db_instance_class = "db.t4g.small"
+# redis_node_type   = "cache.t4g.micro"
+# worker_cpu        = 2048
+# worker_memory     = 4096

@@ -1,0 +1,6 @@
+# Copy to backend-aws.hcl and fill in. Created once by infra/aws/01-state-bucket.sh.
+bucket         = "qacc-tfstate-<ACCOUNT_ID>"
+key            = "qacc/prod.tfstate"
+region         = "us-east-1"
+dynamodb_table = "qacc-tfstate-lock"
+encrypt        = true

@@ -304,3 +304,6 @@ infra/terraform/*.tfvars
 infra/terraform/*.tfvars.json
 !infra/terraform/*.tfvars.example
 infra/floci/.data/
+infra/terraform/backend-aws.hcl
+infra/aws/secrets.env
+*.dump

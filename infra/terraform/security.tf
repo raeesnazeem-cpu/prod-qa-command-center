@@ -1,7 +1,7 @@
 resource "aws_security_group" "alb" {
   name        = "qacc-${var.env}-alb"
   description = "QACC ALB"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.vpc_id
 
   ingress {
     description = "HTTP"
@@ -30,7 +30,7 @@ resource "aws_security_group" "alb" {
 resource "aws_security_group" "tasks" {
   name        = "qacc-${var.env}-tasks"
   description = "QACC ECS tasks"
-  vpc_id      = var.vpc_id
+  vpc_id      = local.vpc_id
 
   ingress {
     description     = "ALB to web/api"

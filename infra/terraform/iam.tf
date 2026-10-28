@@ -25,9 +25,13 @@ resource "aws_iam_role_policy" "task_exec_secrets" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = [aws_secretsmanager_secret.app.arn]
+      Effect = "Allow"
+      Action = ["secretsmanager:GetSecretValue"]
+      # + the RDS master password AWS manages (read only by the dbtools task).
+      Resource = concat(
+        [aws_secretsmanager_secret.app.arn],
+        var.create_data_services ? [aws_db_instance.main[0].master_user_secret[0].secret_arn] : [],
+      )
     }]
   })
 }
@@ -47,18 +51,32 @@ resource "aws_iam_role_policy" "task" {
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-        Resource = ["arn:aws:s3:::${var.media_bucket}/*"]
+        Resource = ["arn:aws:s3:::${local.media_bucket}/*"]
       },
       {
         Effect   = "Allow"
         Action   = ["s3:ListBucket"]
-        Resource = ["arn:aws:s3:::${var.media_bucket}"]
+        Resource = ["arn:aws:s3:::${local.media_bucket}"]
       },
       {
-        # Video recording barrier: one RunTask per viewport (plan D11)
+        # Video recording: one RunTask per viewport (plan D11), from the worker
+        # barrier or the API "Record" button.
         Effect   = "Allow"
         Action   = ["ecs:RunTask"]
         Resource = ["arn:aws:ecs:${var.region}:*:task-definition/qacc-${var.env}-recorder*"]
+      },
+      {
+        # Workers keep themselves alive while busy (ECS_TASK_PROTECTION).
+        Effect   = "Allow"
+        Action   = ["ecs:GetTaskProtection", "ecs:UpdateTaskProtection"]
+        Resource = ["arn:aws:ecs:${var.region}:*:task/${aws_ecs_cluster.main.name}/*"]
+      },
+      {
+        # The API publishes RunsInFlight for worker autoscaling.
+        Effect    = "Allow"
+        Action    = ["cloudwatch:PutMetricData"]
+        Resource  = ["*"]
+        Condition = { StringEquals = { "cloudwatch:namespace" = "QACC" } }
       },
       {
         Effect   = "Allow"

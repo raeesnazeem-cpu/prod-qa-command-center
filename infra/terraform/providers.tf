@@ -6,6 +6,12 @@ terraform {
       version = "~> 5.80"
     }
   }
+
+  # State lives in S3 (+ a DynamoDB lock table on AWS), never on one laptop.
+  # Settings come from a file at init time:
+  #   floci: terraform init -backend-config=backend-floci.hcl
+  #   AWS:   terraform init -backend-config=backend-aws.hcl  (copy backend-aws.hcl.example)
+  backend "s3" {}
 }
 
 # One provider, two profiles: use_floci=true points every service at floci's single endpoint.
@@ -23,17 +29,21 @@ provider "aws" {
   dynamic "endpoints" {
     for_each = var.use_floci ? [1] : []
     content {
-      ec2            = var.floci_endpoint
-      ecs            = var.floci_endpoint
-      ecr            = var.floci_endpoint
-      elasticache    = var.floci_endpoint
-      elbv2          = var.floci_endpoint
-      iam            = var.floci_endpoint
-      logs           = var.floci_endpoint
-      rds            = var.floci_endpoint
-      s3             = var.floci_endpoint
-      secretsmanager = var.floci_endpoint
-      sts            = var.floci_endpoint
+      acm                    = var.floci_endpoint
+      applicationautoscaling = var.floci_endpoint
+      cloudfront             = var.floci_endpoint
+      cloudwatch             = var.floci_endpoint
+      ec2                    = var.floci_endpoint
+      ecs                    = var.floci_endpoint
+      ecr                    = var.floci_endpoint
+      elasticache            = var.floci_endpoint
+      elbv2                  = var.floci_endpoint
+      iam                    = var.floci_endpoint
+      logs                   = var.floci_endpoint
+      rds                    = var.floci_endpoint
+      s3                     = var.floci_endpoint
+      secretsmanager         = var.floci_endpoint
+      sts                    = var.floci_endpoint
     }
   }
 

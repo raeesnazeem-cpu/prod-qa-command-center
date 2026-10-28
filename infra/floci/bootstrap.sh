@@ -38,6 +38,10 @@ service_key=$(node "$repo/infra/db/make-jwt.mjs" "$jwt_secret" service_role)
 cat > "$tf_dir/local.auto.tfvars" <<EOF
 env            = "local"
 use_floci      = true
+
+# Reuse floci's default VPC and the hand-made RDS / Redis / bucket (Phases 1-2).
+create_network       = false
+create_data_services = false
 floci_endpoint = "http://floci:4566"
 image_tag      = "$tag"
 
@@ -73,7 +77,10 @@ app_secrets = {
 }
 EOF
 
-tf init -input=false >/dev/null
+# Terraform state in floci S3 (same backend type as AWS).
+aws s3api head-bucket --bucket qacc-tfstate-local >/dev/null 2>&1 \
+  || aws s3api create-bucket --bucket qacc-tfstate-local >/dev/null
+tf init -input=false -backend-config=backend-floci.hcl >/dev/null
 
 # --- ECR repos, then images -----------------------------------------------------
 # floci runs with FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR=prefer-cached, so tasks use
