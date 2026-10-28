@@ -1,6 +1,6 @@
 import { Finding } from "@qacc/shared"
 import { supabase } from "../lib/supabase"
-import { getClientNotesText } from "../lib/tedClient"
+import { getClientNotesText, getClientProfile } from "../lib/tedClient"
 
 /**
  * QA-Backend Check (login-free)
@@ -88,6 +88,9 @@ export async function checkBackend(
   sharedBrowser?: any,
   onProgress?: (progress: number, message: string) => Promise<void>,
   projectId?: string,
+  // The run's TED client id (qa_runs.ted_client_id) — the reliable key; the
+  // project name is only a fallback.
+  tedClientId?: string | number | null,
 ): Promise<Finding[]> {
   const { chromium } = require("playwright")
   const { uploadScreenshot } = require("../lib/supabaseStorage")
@@ -425,22 +428,30 @@ export async function checkBackend(
     try {
       if (onProgress) await onProgress(88, "Checking contact number matches client record...")
 
-      // Resolve the authoritative number from TED notes (best-effort).
+      // Resolve the authoritative number (best-effort): a phone in the TED
+      // client notes, else the primary-contact phone on the TED client page.
       let authoritative = ""
-      if (projectId) {
-        try {
+      let authoritativeSource = "TED client notes"
+      try {
+        let clientKey: string | null =
+          tedClientId != null && String(tedClientId).trim() ? String(tedClientId).trim() : null
+        if (!clientKey && projectId) {
           const { data: project } = await supabase
             .from("projects")
             .select("name")
             .eq("id", projectId)
             .single()
-          const clientName = project?.name || ""
-          if (clientName) {
-            const notes = await getClientNotesText(clientName)
-            authoritative = parsePhoneFromNotes(notes)
+          clientKey = project?.name || null
+        }
+        if (clientKey) {
+          authoritative = parsePhoneFromNotes(await getClientNotesText(clientKey))
+          if (!authoritative) {
+            const profile = await getClientProfile(clientKey).catch(() => null)
+            authoritative = parsePhoneFromNotes(profile?.contactPhone || "")
+            if (authoritative) authoritativeSource = "TED client page (primary contact)"
           }
-        } catch {}
-      }
+        }
+      } catch {}
 
       // Scrape on-site numbers from the homepage (tel: links + visible text).
       await page.setViewportSize({ width: 1920, height: 1080 })
@@ -478,8 +489,8 @@ export async function checkBackend(
           findings.push({
             check_factor: CHECK_FACTOR,
             title: "Contact number does not match the client record",
-            description: `The client's number in TED is ${authoritative}, but it was not found on the homepage. Numbers on site: ${onSite.join(", ") || "none"}.`,
-            context_text: `TED (authoritative): ${authoritative}\nOn site: ${onSite.join(", ") || "none"}`,
+            description: `The client's number in TED (${authoritativeSource}) is ${authoritative}, but it was not found on the homepage. Numbers on site: ${onSite.join(", ") || "none"}.${authoritativeSource.includes("primary contact") ? " Note: this is the primary contact's phone; if the business line differs, update the TED client notes." : ""}`,
+            context_text: `TED (${authoritativeSource}): ${authoritative}\nOn site: ${onSite.join(", ") || "none"}`,
             screenshot_url: phonesShot || null,
             status: "open",
             ai_generated: false,
@@ -490,7 +501,7 @@ export async function checkBackend(
           findings.push({
             check_factor: CHECK_FACTOR,
             title: "Contact number matches the client record",
-            description: `No issues found. The published contact number matches the client's number in TED (${authoritative}).`,
+            description: `No issues found. The published contact number matches the client's number in TED (${authoritative}, from ${authoritativeSource}).`,
             screenshot_url: phonesShot || null,
             status: "open",
             ai_generated: false,
@@ -513,7 +524,7 @@ export async function checkBackend(
         findings.push({
           check_factor: CHECK_FACTOR,
           title: "Contact number present",
-          description: `No issues found. A contact number is published on the site (${onSite.join(", ")}); it could not be cross-checked because no authoritative number was available in the TED client notes.`,
+          description: `No issues found. A contact number is published on the site (${onSite.join(", ")}); it could not be cross-checked because no authoritative number was available on the TED client page or in its notes.`,
           screenshot_url: phonesShot || null,
           status: "open",
           ai_generated: false,
