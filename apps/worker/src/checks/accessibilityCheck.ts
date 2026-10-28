@@ -85,7 +85,7 @@ export async function checkAccessibility(
     // its own .catch so a failure in either still degrades gracefully exactly as
     // before (Promise.all would otherwise reject the whole thing into the outer
     // catch). Both operations are read-only.
-    const [html, { tier: requiredTier, planRaw }] = await Promise.all([
+    const [html, { tier: requiredTier, planRaw, source: planSource }] = await Promise.all([
       page.content().then((c) => c || "").catch(() => ""),
       resolveRequiredUserwayTier(
         tedClientId != null && String(tedClientId).trim()
@@ -94,6 +94,7 @@ export async function checkAccessibility(
       ).catch(() => ({
         tier: null as UserwayTier | null,
         planRaw: null as string | null,
+        source: null as "TED" | "HubSpot" | null,
       })),
     ])
     let installed = detectUserwayInSource(html)
@@ -128,14 +129,14 @@ export async function checkAccessibility(
     const ctxBase =
       `URL: ${pageUrl}\n` +
       `Installed: ${installed.present ? installed.tier || `unknown account (${installed.account || "?"})` : "none"}\n` +
-      `HubSpot accessibility_plan_add_on: ${planRaw || "n/a"}\n` +
+      `Accessibility plan add-on (${planSource || "none"}): ${planRaw || "n/a"}\n` +
       `Required tier: ${requiredTier || "unknown"}`
 
     // --- not installed ----------------------------------------------------
     if (!installed.present) {
       const desc = requiredTier
-        ? `No UserWay accessibility widget is installed on the site. The HubSpot Accessibility Plan Add-On is "${planRaw}", so the ${tierLabel(requiredTier)} UserWay widget (data-account ${USERWAY_ACCOUNTS[requiredTier]}) should be installed site-wide.`
-        : `No UserWay accessibility widget is installed, and HubSpot has no Accessibility Plan Add-On for this client to say which tier to install. Confirm the plan in HubSpot.`
+        ? `No UserWay accessibility widget is installed on the site. The ${planSource} Accessibility Plan Add-On is "${planRaw}", so the ${tierLabel(requiredTier)} UserWay widget (data-account ${USERWAY_ACCOUNTS[requiredTier]}) should be installed site-wide.`
+        : `No UserWay accessibility widget is installed, and neither the TED client page nor HubSpot has an Accessibility Plan Add-On for this client to say which tier to install. Confirm the ADA add-on in TED.`
       return [
         {
           check_factor: factor,
@@ -156,7 +157,7 @@ export async function checkAccessibility(
           {
             check_factor: factor,
             title: `Accessibility: UserWay compliant (${tierLabel(requiredTier)})`,
-            description: `The ${tierLabel(requiredTier)} UserWay accessibility widget is installed and matches the HubSpot Accessibility Plan Add-On ("${planRaw}"). No accessibility issues found — ${tierLabel(requiredTier)} UserWay Accessibility compliance.`,
+            description: `The ${tierLabel(requiredTier)} UserWay accessibility widget is installed and matches the ${planSource} Accessibility Plan Add-On ("${planRaw}"). No accessibility issues found — ${tierLabel(requiredTier)} UserWay Accessibility compliance.`,
             context_text: ctxBase,
             screenshot_url: null,
             status: "open",
@@ -172,7 +173,7 @@ export async function checkAccessibility(
         {
           check_factor: factor,
           title: "Accessibility: UserWay plan mismatch",
-          description: `The site has ${have}, but the HubSpot Accessibility Plan Add-On is "${planRaw}", which requires the ${tierLabel(requiredTier)} UserWay widget (data-account ${USERWAY_ACCOUNTS[requiredTier]}). Update the site to the ${tierLabel(requiredTier)} widget.`,
+          description: `The site has ${have}, but the ${planSource} Accessibility Plan Add-On is "${planRaw}", which requires the ${tierLabel(requiredTier)} UserWay widget (data-account ${USERWAY_ACCOUNTS[requiredTier]}). Update the site to the ${tierLabel(requiredTier)} widget.`,
           context_text: ctxBase,
           screenshot_url: null,
           status: "open",
@@ -189,7 +190,7 @@ export async function checkAccessibility(
       {
         check_factor: factor,
         title: "Accessibility: UserWay present (plan unverified)",
-        description: `The site has ${haveNote}, but HubSpot has no Accessibility Plan Add-On for this client, so it could not be verified against the plan. No accessibility issues found — confirm the intended tier in HubSpot.`,
+        description: `The site has ${haveNote}, but neither the TED client page nor HubSpot has an Accessibility Plan Add-On for this client, so it could not be verified against the plan. No accessibility issues found — confirm the intended tier in TED.`,
         context_text: ctxBase,
         screenshot_url: null,
         status: "open",

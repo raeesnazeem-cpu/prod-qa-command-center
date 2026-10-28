@@ -1210,6 +1210,7 @@ export async function processCrawlPageJob(job: Job) {
                 await updateCheckProgress("backend_check", p, m)
               },
               run.project_id,
+              run.ted_client_id,
             ).catch((e) => {
               logger.error("Backend check failed:", e)
               return lapse("backend_check")(e)
@@ -1242,6 +1243,7 @@ export async function processCrawlPageJob(job: Job) {
               async (p, m) => {
                 await updateCheckProgress("gbp_check", p, m)
               },
+              run.ted_client_id,
             ).catch((e) => {
               logger.error("GBP check failed:", e)
               return lapse("gbp_check")(e)

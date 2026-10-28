@@ -7,15 +7,24 @@
 import { isToolLapseFinding, isRealDefect, isCleanPassFinding } from "@qacc/shared"
 
 jest.mock("got", () => jest.fn())
-jest.mock("../../lib/tedClient", () => ({
-  resolveClient: jest.fn(),
+jest.mock("../../lib/tedClient", () => {
+  const resolveClient = jest.fn()
+  return {
+  resolveClient,
+  // The profile wraps resolveClient; tests drive it through that mock.
+  getClientProfile: jest.fn(async (key: any, url: any) => {
+    const client = await resolveClient(key, url)
+    return client ? { client, plan: null, hasLeadGen: false, addOnKeys: [] } : null
+  }),
+  profileContextLine: () => "",
   getClientTimeline: jest.fn(async () => []),
   getClientHubspotId: jest.fn(async () => null),
   getClientNotesText: jest.fn(async () => ""),
   getClientPlanField: (c: any) => (c?.plan || "").toString().trim(),
   tasksByDepartment: () => [],
   parsePlan: (raw: any) => (raw ? { raw, addOns: [], hasLeadGen: /lead gen/i.test(raw) } : null),
-}))
+  }
+})
 jest.mock("../../lib/hubspotClient", () => ({ resolveHubspotClientData: jest.fn(async () => null) }))
 jest.mock("../../lib/aiFallback", () => ({ describeImageResult: jest.fn() }))
 jest.mock("../../lib/supabaseStorage", () => ({ uploadScreenshot: jest.fn(async () => "") }))

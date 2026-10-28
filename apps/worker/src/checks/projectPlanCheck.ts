@@ -7,8 +7,10 @@ import {
   getClientNotesText,
   getClientHubspotId,
   getClientPlanField,
-  resolveClient,
+  getClientProfile,
+  profileContextLine,
   parsePlan,
+  type TedClientProfile,
 } from "../lib/tedClient"
 import { resolveHubspotClientData } from "../lib/hubspotClient"
 import pino from "pino"
@@ -127,11 +129,14 @@ export async function checkProjectPlan(
       ? String(tedClientId).trim()
       : (clientName || "").trim() || null
   let client: any = null
+  let profile: TedClientProfile | null = null
   try {
     // 1. TED client record `plan` — the main-page value on the client dashboard.
     //    Resolve the client by id/name, else by a host match against the record's
     //    beta/website URL (covers URL-only full scans where the name is synthetic).
-    client = await withTimeout(resolveClient(clientKey, pageRecord?.siteUrl), "TED client lookup")
+    // The profile adds the details-tab add-ons (deal summary) to the client record.
+    profile = await withTimeout(getClientProfile(clientKey, pageRecord?.siteUrl), "TED client lookup")
+    client = profile?.client ?? null
     planRaw = getClientPlanField(client)
     if (planRaw) planSource = "TED client page"
 
@@ -196,7 +201,10 @@ export async function checkProjectPlan(
     ]
   }
 
-  const parsed = parsePlan(planRaw)
+  // From the TED client page, use the profile's plan: its add-ons include the
+  // deal-summary chips (ADA, GIA, upsold Lead Gen) the plan text leaves out.
+  const parsed =
+    planSource === "TED client page" && profile?.plan ? profile.plan : parsePlan(planRaw)
   const accelerator = isAcceleratorPlan(planRaw)
   logger.info({ planRaw, parsed, accelerator }, "Resolved project plan from TED")
 
@@ -216,9 +224,9 @@ export async function checkProjectPlan(
         d.industry && `Industry: ${d.industry}`,
       ].filter(Boolean)
     : []
-  const detailLine = detailBits.length
-    ? `\n\nClient details (HubSpot): ${detailBits.join(" · ")}.`
-    : ""
+  const detailLine =
+    profileContextLine(profile) +
+    (detailBits.length ? `\n\nClient details (HubSpot): ${detailBits.join(" · ")}.` : "")
   const ctx = `${planRaw}${d ? `\n${JSON.stringify(d)}` : ""}`
 
   // Scenario 5 — any non-Accelerator plan. PASS (plan confirmation only).
