@@ -2050,8 +2050,14 @@ export async function checkFavicon(
   ]
 }
 
-const GROWTH99_FORM_SRC = "widget-ui.growth99.com/assets/widgets/new-form.html"
-const GROWTH99_FORM_IFRAME = `iframe[src*="${GROWTH99_FORM_SRC}"]`
+// Both Growth99 form embeds count: the current widget and the older
+// app.growth99.com static form many live sites still use (same marks as
+// CONTACT_FORM_MARKS in lib/gitopsFix.ts).
+const GROWTH99_FORM_SRCS = [
+  "widget-ui.growth99.com/assets/widgets/new-form.html",
+  "app.growth99.com/assets/static/form.html",
+]
+const GROWTH99_FORM_IFRAME = GROWTH99_FORM_SRCS.map((s) => `iframe[src*="${s}"]`).join(", ")
 
 /**
  * Name the non-Growth99 contact form on the page, or null when there is none.
@@ -2182,7 +2188,7 @@ export async function checkGrowth99ContactForm(
       .catch(() => {})
     const content = await page.content().catch(() => "")
 
-    hasForm = content.includes(GROWTH99_FORM_SRC)
+    hasForm = GROWTH99_FORM_SRCS.some((s) => content.includes(s))
     // Not the Growth99 widget: note any other contact form so a site built on
     // another form tool isn't reported as having no form at all.
     if (!hasForm) {
