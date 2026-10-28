@@ -485,6 +485,22 @@ async function closeManualPostReleaseSubtasks(
   }
 }
 
+// Did this run's report hold the parent open because issues remain (a check
+// failed with no fix applied, or could not complete)? postSectionedReport writes
+// a QACC-only ledger row under this key; its own key so it never collides with
+// the scan-start `status:<id>:In Progress:<runId>` row. Such a parent is left
+// In Progress for a person, never closed.
+const heldOpenKey = (parentTaskId: string, runId: string) =>
+  `held-open:${parentTaskId}:${runId}`
+export async function parentHeldOpen(runId: string, parentTaskId: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("ted_comments")
+    .select("id")
+    .eq("event_key", heldOpenKey(String(parentTaskId), runId))
+    .limit(1)
+  return !!data && data.length > 0
+}
+
 // Close out a finished run in TED: mark the parent scan task Completed, and —
 // for internal-QA runs only — mark every mapped subtask Completed too. Called at
 // the very end of the run (after the AI-fix pass), so failing checks have already
@@ -605,8 +621,16 @@ export async function markAllTedTasksCompleted(
             { runId, error: e?.message },
             "Failed to enqueue video_recording_check — closing parent directly as a fallback.",
           )
-          if (parent) return postTedStatus(parent, TED_STATUS_COMPLETED, runId)
+          if (parent)
+            return parentHeldOpen(runId, String(parent)).then((held) =>
+              held ? false : postTedStatus(parent, TED_STATUS_COMPLETED, runId),
+            )
         })
+    } else if (parent && (await parentHeldOpen(runId, String(parent)))) {
+      logger.info(
+        { runId, parent },
+        "No video subtask — open issues remain, parent left In Progress.",
+      )
     } else {
       if (parent) await postTedStatus(parent, TED_STATUS_COMPLETED, runId)
       logger.info(
@@ -2155,6 +2179,17 @@ export async function postSectionedReport(opts: {
   const subtaskMap = runMeta?.ted_subtask_map || {}
   const hasSubtasks = Object.keys(subtaskMap).length > 0
 
+  // Checks a person still has to act on: failed with no fix applied (the
+  // no-result loop below adds the checks that could not complete). Any of these
+  // keeps the PARENT task open — see markParentOpenIfIssues.
+  const appliedFor = (factor: string) =>
+    (byCheck.get(factor) || []).filter(
+      (f: any) => f?.id && fixMap.get(String(f.id))?.applied,
+    ).length
+  let openIssues = sections.filter(
+    (s) => s.factor !== "video_recording" && s.status === "failed" && appliedFor(s.factor) === 0,
+  ).length
+
   if (hasSubtasks) {
     // Floor the FIRST subtask post to at least 1 min after the run started — so a
     // fast/degenerate run doesn't dump every result the instant it ends (which
@@ -2268,6 +2303,7 @@ export async function postSectionedReport(opts: {
       if (factor === "video_recording") continue
       const targets = Array.isArray(raw) ? raw : raw ? [raw] : []
       if (!targets.length) continue
+      openIssues++
       const label = FRIENDLY[factor] || titleCase(factor)
       const lapse = (byCheck.get(factor) || []).find(isToolLapseFinding)
       const reason = lapse
@@ -2294,8 +2330,9 @@ export async function postSectionedReport(opts: {
             ...reportCtx,
           },
         ).catch(() => {})
-        // Close this subtask now that its "could not complete" note has landed.
-        await postTedStatus(target, TED_STATUS_COMPLETED, runId).catch(() => {})
+        // No automated result → a person must check it, so leave it In Progress
+        // (a final state for the video barrier, same as failed-and-not-fixed).
+        await postTedStatus(target, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
       }
     }
     // Now that every subtask has its comment AND is marked Completed (both loops
@@ -2334,6 +2371,20 @@ export async function postSectionedReport(opts: {
       `ext:${opts.eventKeyPrefix}-summary-${runId}`,
       { runId, projectId: runMeta?.project_id, targetKind: "parent", ...reportCtx, aiAssigned: true },
     ).catch(() => {})
+  }
+
+  // Issues left for a person → hold the parent open (it is already In Progress
+  // from scan start). This QACC-only ledger row is what the close paths
+  // (markAllTedTasksCompleted, the video barrier) read to skip closing it
+  // Completed. Full scans never change task status.
+  if (openIssues > 0 && runMeta?.run_type !== "full_scan") {
+    await recordLocalTedComment(
+      tedTaskId,
+      `<p>🔖 <strong>Left In Progress</strong> — ${openIssues} check${openIssues > 1 ? "s" : ""} still need a person.</p>`,
+      heldOpenKey(tedTaskId, runId),
+      { runId, projectId: runMeta?.project_id || undefined, source: "status" },
+    )
+    logger.info({ runId, tedTaskId, openIssues }, "Open issues remain — parent held In Progress.")
   }
 
   return tally
