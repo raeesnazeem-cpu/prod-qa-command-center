@@ -9,6 +9,13 @@ import { transitionRunStatus } from "../lib/runControl"
 import { isRealDefect } from "@qacc/shared"
 import { getCheckBreakdown } from "../lib/runCheckBreakdown"
 import { nonGrowth99Checks } from "../lib/fullScanChecks"
+import {
+  tedGetJson,
+  getTedClientProfile,
+  findTaskIdByTemplateKey,
+  pickReleasedUrl,
+  hostOf,
+} from "../lib/tedApi"
 
 const execFileAsync = promisify(execFile)
 
@@ -275,27 +282,18 @@ async function resolveRunCreatorId(
 async function fetchTedTaskCommentsText(
   taskId: string | number | null | undefined,
 ): Promise<string> {
-  const apiToken = process.env.TED_API_TOKEN
-  if (!apiToken || taskId == null) return ""
-  try {
-    const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${taskId}/comments`,
-      { headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" } },
+  if (taskId == null) return ""
+  const c: any = await tedGetJson(`/api/tasks/${taskId}/comments`, {
+    label: `task ${taskId} comments`,
+  })
+  const arr: any[] = Array.isArray(c) ? c : c?.comments || c?.data || c?.items || []
+  if (!Array.isArray(arr)) return ""
+  return arr
+    .map((x: any) =>
+      typeof x === "string" ? x : x?.text || x?.body || x?.content || x?.comment || "",
     )
-    const ct = r.headers.get("content-type") || ""
-    if (!r.ok || !ct.includes("application/json")) return ""
-    const c: any = await r.json().catch(() => null)
-    const arr: any[] = Array.isArray(c) ? c : c?.comments || c?.data || c?.items || []
-    if (!Array.isArray(arr)) return ""
-    return arr
-      .map((x: any) =>
-        typeof x === "string" ? x : x?.text || x?.body || x?.content || x?.comment || "",
-      )
-      .filter(Boolean)
-      .join("\n")
-  } catch {
-    return ""
-  }
+    .filter(Boolean)
+    .join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -340,34 +338,18 @@ function githubRepoUrl(raw: string | null | undefined): string | null {
   return /^[\w.-]+\/[\w.-]+/.test(path) ? `https://github.com/${path}` : null
 }
 
-// GET /api/clients/{clientId}/info — the TED client page's overview panel.
-// Returns the raw info object, or null.
+// GET /api/clients/{clientId}/info — the TED client details tab. Read through
+// the shared, short-lived client profile (lib/tedApi), so one trigger reads it
+// once however many resolvers ask. Returns the raw info object, or null.
 async function fetchTedClientInfo(
   clientId?: string | number | null,
 ): Promise<any | null> {
-  const apiToken = process.env.TED_API_TOKEN
-  if (!apiToken) {
+  if (!process.env.TED_API_TOKEN) {
     console.log("⚠️ TED_API_TOKEN missing — cannot read the TED client page.")
     return null
   }
-  if (clientId == null || String(clientId).trim() === "") return null
-  try {
-    const url = `https://ted.growth99.com/api/clients/${encodeURIComponent(String(clientId))}/info`
-    const r = await fetch(url, {
-      headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
-    })
-    const ct = r.headers.get("content-type") || ""
-    if (!r.ok || !ct.includes("application/json")) {
-      console.error(
-        `❌ TED ${url} did not return JSON (HTTP ${r.status}, content-type "${ct}").`,
-      )
-      return null
-    }
-    return await r.json().catch(() => null)
-  } catch (err) {
-    console.error("❌ Error reading the TED client page:", err)
-    return null
-  }
+  const profile = await getTedClientProfile(clientId)
+  return profile?.info ?? null
 }
 
 // Find a TED client id by exact name (GET /api/clients). Only used when a
@@ -375,24 +357,14 @@ async function fetchTedClientInfo(
 async function findTedClientIdByName(
   clientName?: string | null,
 ): Promise<string | null> {
-  const apiToken = process.env.TED_API_TOKEN
   const want = (clientName || "").trim().toLowerCase()
-  if (!apiToken || !want) return null
-  try {
-    const r = await fetch("https://ted.growth99.com/api/clients", {
-      headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
-    })
-    const ct = r.headers.get("content-type") || ""
-    if (!r.ok || !ct.includes("application/json")) return null
-    const body: any = await r.json().catch(() => null)
-    const list: any[] = Array.isArray(body)
-      ? body
-      : body?.clients || body?.data || body?.items || []
-    const hit = list.find((c) => String(c?.name || "").trim().toLowerCase() === want)
-    return hit?.id != null ? String(hit.id) : null
-  } catch {
-    return null
-  }
+  if (!want) return null
+  const body: any = await tedGetJson("/api/clients", { label: "clients list" })
+  const list: any[] = Array.isArray(body)
+    ? body
+    : body?.clients || body?.data || body?.items || []
+  const hit = list.find((c) => String(c?.name || "").trim().toLowerCase() === want)
+  return hit?.id != null ? String(hit.id) : null
 }
 
 // Resolve the beta site URL that QACC should scan: the TED client page's
@@ -474,80 +446,62 @@ async function resolveClientNotesSiteUrlFromTED(
   return url
 }
 
-// Resolve the RELEASED site URL from the TED `release.security` task's
-// automation.payload. The webhook payload doesn't carry automation.payload, so
-// we re-GET the task by id (same pattern as resolveBetaSiteUrlFromTED). We match
-// a set of likely payload keys, then fall back to the first raw URL in the
-// payload. Returns the released URL, or null.
-async function resolveReleasedUrlFromReleaseSecurity(
-  taskId?: string | number | null,
+// The launch task (template key release.security). TED renamed it from
+// "Complete website security and release" to "Website Launch (Beta to Live)";
+// both titles seed the lookup, the template key decides.
+const LAUNCH_TASK_TEMPLATE_KEY = "release.security"
+const LAUNCH_TASK_TITLE_RE = /website launch|beta to live|security and release|release.*security/i
+
+// Resolve the RELEASED site URL from the launch task — the payload first, then
+// its comments (see pickReleasedUrl: keyed token, labelled line, or a link on the
+// client's live domain). `launchTaskId` is used when the trigger IS the launch
+// task; otherwise (manual start from release.qa_post, single-subtask play) the
+// launch task is looked up by template key. Never reads the QA task's own
+// comments, which hold QACC's earlier report links. Returns the URL, or null —
+// callers then fall back to the details-tab Live site.
+async function resolveReleasedUrl(
+  clientId: string | number | null | undefined,
+  launchTaskId?: string | number | null,
 ): Promise<string | null> {
-  const apiToken = process.env.TED_API_TOKEN
-  if (!apiToken) {
+  if (!process.env.TED_API_TOKEN) {
     console.log("⚠️ TED_API_TOKEN missing — cannot resolve released site URL.")
     return null
   }
-  if (taskId == null) {
-    console.log(
-      "⚠️ No release.security task id — cannot resolve released site URL.",
-    )
+  const taskId =
+    launchTaskId != null && String(launchTaskId) !== ""
+      ? String(launchTaskId)
+      : await resolveTaskIdByTemplateKeyFromTED(
+          clientId,
+          LAUNCH_TASK_TEMPLATE_KEY,
+          LAUNCH_TASK_TITLE_RE,
+        )
+  if (!taskId) {
+    console.log("⚠️ No launch (release.security) task found — cannot resolve released site URL.")
     return null
   }
 
-  try {
-    const r = await fetch(`https://ted.growth99.com/api/tasks/${taskId}`, {
-      headers: {
-        Authorization: `Bearer ${apiToken}`,
-        Accept: "application/json",
-      },
-    })
-    const ct = r.headers.get("content-type") || ""
-    if (!r.ok || !ct.includes("application/json")) {
-      console.error(
-        `❌ TED /api/tasks/${taskId} did not return JSON (HTTP ${r.status}, content-type "${ct}").`,
-      )
-      return null
-    }
-    const task = (await r.json().catch(() => null)) as any
-    if (!task) return null
-
-    const payload: string = task?.automation?.payload || ""
-    // The released URL may be in the payload OR typed as a comment on the
-    // release.security task page. Search payload first, then comments.
-    const findUrl = (text: string): string => {
-      // Prefer an explicit released/live/site/production URL token.
-      const keyed = text.match(
-        /(?:releaseUrl|releasedUrl|liveUrl|liveSiteUrl|siteUrl|productionUrl|prodUrl|domainUrl|websiteUrl)=(\S+)/i,
-      )
-      // Fall back to the first raw http(s) URL anywhere in the text.
-      const raw = text.match(/https?:\/\/\S+/i)
-      return (keyed?.[1] || raw?.[0] || "").trim()
-    }
-    let url = findUrl(payload)
-    let source = "payload"
-    if (!url) {
-      url = findUrl(await fetchTedTaskCommentsText(taskId))
-      source = "comment"
-    }
-    if (!url) {
-      console.log(
-        `⚠️ release.security task #${taskId} has no released URL in payload or comments yet.`,
-      )
-      return null
-    }
-    console.log(`ℹ️ Released URL resolved from ${source} (task #${taskId}).`)
-    url = url.replace(/[.,;)]+$/, "")
-    if (!/^https?:\/\//i.test(url)) url = `https://${url}`
-    if (!/\.[a-z]{2,}/i.test(url)) return null
-
+  const task: any = await tedGetJson(`/api/tasks/${taskId}`, { label: `task ${taskId}` })
+  if (task && String(task?.automation?.templateKey || "") !== LAUNCH_TASK_TEMPLATE_KEY) {
     console.log(
-      `✅ Resolved released site URL from TED release.security (task #${taskId}): ${url}`,
+      `⚠️ Task #${taskId} is not the launch task (templateKey "${task?.automation?.templateKey || ""}") — not reading a released URL from it.`,
     )
-    return url
-  } catch (err) {
-    console.error("❌ Error resolving released site URL from TED:", err)
     return null
   }
+  const profile = await getTedClientProfile(clientId ?? task?.clientId)
+  const liveHost = hostOf(profile?.info?.liveSiteUrl)
+
+  let url = pickReleasedUrl(String(task?.automation?.payload || ""), liveHost)
+  let source = "payload"
+  if (!url) {
+    url = pickReleasedUrl(await fetchTedTaskCommentsText(taskId), liveHost)
+    source = "comment"
+  }
+  if (!url) {
+    console.log(`⚠️ Launch task #${taskId} has no released URL in payload or comments yet.`)
+    return null
+  }
+  console.log(`✅ Resolved released site URL from the launch task ${source} (task #${taskId}): ${url}`)
+  return url
 }
 
 // Normalize a URL down to its bare host for comparison (drop protocol, "www.",
@@ -569,66 +523,18 @@ function normalizeHost(u: string | null | undefined): string {
   }
 }
 
-// Resolve a client's task id for a given template key from TED, client-agnostic.
-// TED webhook payloads don't reliably carry sibling task ids, so we look the
-// client's tasks up via GET /api/clients/{clientId}/timeline and pick the task
-// matching `templateKey` (verified via GET /api/tasks/{id}.automation.templateKey;
-// completed tasks in the timeline lack templateKey, so `titleRegex` seeds candidates).
-// Returns the task id string, or null.
+// Resolve a client's task id for a given template key from TED, client-agnostic
+// (see findTaskIdByTemplateKey in lib/tedApi: timeline → title candidates,
+// subtasks skipped → verified by GET /api/tasks/{id}). Returns the id, or null.
 async function resolveTaskIdByTemplateKeyFromTED(
   clientId: string | number | null | undefined,
   templateKey: string,
   titleRegex: RegExp,
 ): Promise<string | null> {
-  const apiToken = process.env.TED_API_TOKEN
-  if (!apiToken || clientId == null) return null
-
-  const getJson = async (url: string): Promise<any | null> => {
-    const r = await fetch(url, {
-      headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" },
-    })
-    const ct = r.headers.get("content-type") || ""
-    if (!r.ok || !ct.includes("application/json")) return null
-    return r.json().catch(() => null)
-  }
-
   try {
-    const tl = await getJson(
-      `https://ted.growth99.com/api/clients/${clientId}/timeline`,
-    )
-    if (!tl) return null
-
-    const ids = new Set<string>()
-    for (const t of tl.activeTasks || []) {
-      if (String(t?.automation?.templateKey || "") === templateKey && t?.id)
-        ids.add(String(t.id))
-    }
-    for (const t of tl.timeline || []) {
-      if (titleRegex.test(t?.title || "") && t?.id) ids.add(String(t.id))
-    }
-
-    if (ids.size === 0) {
-      console.log(
-        `⚠️ No task matching templateKey "${templateKey}" found in client ${clientId}'s timeline.`,
-      )
-      return null
-    }
-
-    for (const id of ids) {
-      const task = await getJson(`https://ted.growth99.com/api/tasks/${id}`)
-      if (String(task?.automation?.templateKey || "") === templateKey) {
-        console.log(
-          `✅ Resolved "${templateKey}" task from TED: #${id}`,
-        )
-        return id
-      }
-    }
-    return null
+    return await findTaskIdByTemplateKey(clientId, templateKey, titleRegex)
   } catch (err) {
-    console.error(
-      `❌ Error resolving "${templateKey}" task from TED:`,
-      err,
-    )
+    console.error(`❌ Error resolving "${templateKey}" task from TED:`, err)
     return null
   }
 }
@@ -1871,26 +1777,17 @@ async function resolveTaskSubtasksFromTED(
   // 2. Fallback — fetch the dedicated subtasks sub-resource. TED does NOT put
   // the subtasks in the webhook payload (subtasks:[]) nor in the plain task GET;
   // GET /api/tasks/{id}/subtasks returns them (verified against parent #9075).
-  const apiToken = process.env.TED_API_TOKEN
-  if (!apiToken || !parentTaskId) {
+  if (!process.env.TED_API_TOKEN || !parentTaskId) {
     console.log(
       "⚠️ Cannot fetch subtasks (missing TED_API_TOKEN or parent id).",
     )
     return []
   }
   try {
-    const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${parentTaskId}/subtasks`,
-      { headers: { Authorization: `Bearer ${apiToken}`, Accept: "application/json" } },
-    )
-    const ct = r.headers.get("content-type") || ""
-    if (!r.ok || !ct.includes("application/json")) {
-      console.error(
-        `❌ TED /api/tasks/${parentTaskId}/subtasks did not return JSON (HTTP ${r.status}, content-type "${ct}").`,
-      )
-      return []
-    }
-    const body = (await r.json().catch(() => null)) as any
+    const body: any = await tedGetJson(`/api/tasks/${parentTaskId}/subtasks`, {
+      label: `task ${parentTaskId} subtasks`,
+    })
+    if (!body) return []
     // The endpoint returns the array directly; findSubtaskArray also handles a
     // wrapped shape just in case.
     const arr = Array.isArray(body) ? body : findSubtaskArray(body)
@@ -2242,12 +2139,8 @@ async function handleAgentRunRequested(
   let liveSiteUrl: string | null = null
   let releasedUrl: string | null = null
   if (runType === "post_release") {
-    const releaseSecId = await resolveTaskIdByTemplateKeyFromTED(
-      clientId,
-      "release.security",
-      /release.*security|security/i,
-    )
-    releasedUrl = await resolveReleasedUrlFromReleaseSecurity(releaseSecId)
+    // Launch task first (looked up by template key), else the details-tab Live site.
+    releasedUrl = await resolveReleasedUrl(clientId)
     liveSiteUrl = await resolveClientNotesSiteUrlFromTED(clientId, clientName)
     siteUrl = releasedUrl || liveSiteUrl
     siteSource = releasedUrl
@@ -3096,10 +2989,14 @@ webhookRouter.post(
             task.clientId,
             clientName,
           )
-          // Resolve the RELEASED URL from the release.security task's payload —
+          // Resolve the RELEASED URL from the launch (release.security) task —
           // the live_site_link check asserts this matches the client page Website URL.
-          const releasedUrl = await resolveReleasedUrlFromReleaseSecurity(
-            task.id,
+          // When the trigger IS the launch task use it directly; on a manual start
+          // from release.qa_post, look the launch task up instead of reading the QA
+          // task (whose comments hold QACC's own report links).
+          const releasedUrl = await resolveReleasedUrl(
+            task.clientId,
+            task.templateKey === LAUNCH_TASK_TEMPLATE_KEY ? task.id : null,
           )
 
           // Resolve the release.qa_post ("Complete QA post-release testing")
