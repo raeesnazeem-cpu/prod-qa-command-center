@@ -11,7 +11,7 @@
  * account the HubSpot plan calls for.
  */
 
-import { getClientHubspotId } from "./tedClient"
+import { getClientHubspotId, getClientProfile } from "./tedClient"
 import { resolveHubspotClientData } from "./hubspotClient"
 
 export type UserwayTier = "pro" | "free"
@@ -72,16 +72,21 @@ export function detectUserwayInSource(html: string): InstalledUserway {
 }
 
 /**
- * The UserWay tier the client's HubSpot plan requires, or null when HubSpot has
- * no accessibility_plan_add_on for them (can't decide a tier). `clientKey` is the
- * TED client id (preferred) or the client/project name.
+ * The UserWay tier the client's plan requires. TED first — the "ADA Basic" /
+ * "ADA Complete" add-on on the client details tab (deal summary) — then the
+ * HubSpot accessibility_plan_add_on. `tier` is null when neither says which
+ * tier. `clientKey` is the TED client id (preferred) or the client/project name.
  */
 export async function resolveRequiredUserwayTier(
   clientKey: string | null | undefined,
-): Promise<{ tier: UserwayTier | null; planRaw: string | null }> {
-  if (!clientKey) return { tier: null, planRaw: null }
+): Promise<{ tier: UserwayTier | null; planRaw: string | null; source: "TED" | "HubSpot" | null }> {
+  if (!clientKey) return { tier: null, planRaw: null, source: null }
+  const profile = await getClientProfile(clientKey).catch(() => null)
+  const tedTier = tierForPlan(profile?.adaRaw)
+  if (tedTier) return { tier: tedTier, planRaw: profile!.adaRaw, source: "TED" }
   const hubspotId = await getClientHubspotId(clientKey).catch(() => null)
   const hs = await resolveHubspotClientData(hubspotId, clientKey).catch(() => null)
   const planRaw = hs?.accessibilityPlan || null
-  return { tier: tierForPlan(planRaw), planRaw }
+  const tier = tierForPlan(planRaw)
+  return { tier, planRaw, source: planRaw ? "HubSpot" : null }
 }

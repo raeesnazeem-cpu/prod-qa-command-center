@@ -61,17 +61,9 @@ function indexClients(list: any[]): ClientIndex {
 }
 
 async function fetchClientIndex(): Promise<ClientIndex | null> {
-  const token = process.env.TED_API_TOKEN
-  if (!token) return null
   try {
-    const r = await fetch(`${TED_BASE}/clients`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      signal: AbortSignal.timeout(30000),
-    })
-    if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) {
-      return null
-    }
-    const body: any = await r.json()
+    const body: any = await tedGetJson("/clients")
+    if (!body) return null
     const list: any[] = Array.isArray(body)
       ? body
       : body?.clients || body?.data || body?.items || []
@@ -345,18 +337,29 @@ export async function resolveClient(
   return findClientBySiteUrl(siteUrl)
 }
 
+// TED rate-limits the API token (HTTP 429 "Retry after 1s"). A 429 is retried
+// (Retry-After, else 1s/2s/3s) so a busy moment never reads as "no data".
+const TED_429_RETRIES = 3
+
 async function tedGetJson(pathAndQuery: string): Promise<any | null> {
   const token = process.env.TED_API_TOKEN
   if (!token) return null
-  try {
-    const r = await fetch(`${TED_BASE}${pathAndQuery}`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      signal: AbortSignal.timeout(30000),
-    })
-    if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) return null
-    return await r.json()
-  } catch {
-    return null
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await fetch(`${TED_BASE}${pathAndQuery}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(30000),
+      })
+      if (r.status === 429 && attempt < TED_429_RETRIES) {
+        const after = Number(r.headers.get("retry-after"))
+        await new Promise((res) => setTimeout(res, (after > 0 ? after : attempt + 1) * 1000))
+        continue
+      }
+      if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) return null
+      return await r.json()
+    } catch {
+      return null
+    }
   }
 }
 
@@ -399,6 +402,26 @@ async function tedGetInfo(clientId: string | number): Promise<any | null> {
   return result
 }
 
+// The client's deal summary (GET /clients/{id}/deal-summary): the core plan and
+// the add-on chips shown on the TED details tab. Same short-TTL cache.
+const dealSummaryCache = new Map<string, { at: number; promise: Promise<any | null> }>()
+
+async function tedGetDealSummary(clientId: string | number): Promise<any | null> {
+  const key = String(clientId)
+  const now = Date.now()
+  const hit = dealSummaryCache.get(key)
+  if (hit && now - hit.at < CLIENTS_TTL_MS) return hit.promise
+
+  const entry = {
+    at: now,
+    promise: tedGetJson(`/clients/${encodeURIComponent(key)}/deal-summary`),
+  }
+  dealSummaryCache.set(key, entry)
+  const result = await entry.promise
+  if (result === null && dealSummaryCache.get(key) === entry) dealSummaryCache.delete(key)
+  return result
+}
+
 /**
  * The TED client page's overview panel (GET /clients/{id}/info) for a client
  * id (preferred) or name. Returns the raw info object, or null.
@@ -417,6 +440,7 @@ export function clearTedCaches(): void {
   clearClientCache()
   timelineCache.clear()
   infoCache.clear()
+  dealSummaryCache.clear()
 }
 
 /**
@@ -500,4 +524,126 @@ export function parsePlan(plan: string | null | undefined): ParsedPlan | null {
     addOns: parts.slice(1),
     hasLeadGen: /lead\s*generation/i.test(plan),
   }
+}
+
+// ---------------------------------------------------------------------------
+// Client profile — everything on the TED client details tab
+// (ted.growth99.com/v2/dashboard/clients/{id}?tab=details) in one object:
+//   • client record (GET /clients): plan, HubSpot ID, onboarding tier, stage, status
+//   • info (GET /clients/{id}/info): name, contact, live site, beta, GitHub repo
+//   • deal summary (GET /clients/{id}/deal-summary): add-ons (Lead Gen, ADA
+//     Basic/Complete, GIA Voice, Social, VIP …) and the deal type
+// Built from the cached reads above, so checks can all call it freely.
+// ---------------------------------------------------------------------------
+
+export type AdaTier = "basic" | "complete" | "unknown"
+
+export interface TedClientProfile {
+  client: any
+  info: any | null
+  dealSummary: any | null
+  /** Client name as TED shows it. */
+  name: string
+  /** Core plan + add-ons. Add-ons merge the plan text and the deal summary. */
+  plan: ParsedPlan | null
+  /** Add-on keys from the deal summary ("leadgen", "ada", "gia", "social", …). */
+  addOnKeys: string[]
+  hasLeadGen: boolean
+  hasGia: boolean
+  /** ADA add-on tier, or null when the client has no ADA add-on. */
+  adaTier: AdaTier | null
+  /** Raw ADA source value ("Basic", "Complete", …) for messages. */
+  adaRaw: string | null
+  contactPhone: string | null
+  businessAddress: string | null
+  onboardingTier: string | null
+  dealType: string | null
+  stage: string | null
+  status: string | null
+  onHold: boolean
+}
+
+function adaFromAddon(addon: any): { tier: AdaTier; raw: string } {
+  const src = `${addon?.label || ""} ${addon?.sourceField || ""}`
+  if (/complete/i.test(src)) return { tier: "complete", raw: "Complete" }
+  if (/basic/i.test(src)) return { tier: "basic", raw: "Basic" }
+  // The add-on is sold but TED doesn't say which tier (HubSpot may).
+  return { tier: "unknown", raw: "tier not set" }
+}
+
+/**
+ * The client's TED details-tab profile, resolved by ted_client_id (preferred),
+ * name, or — for URL-only runs — a host match on `siteUrl`. Null when no TED
+ * client matches.
+ */
+export async function getClientProfile(
+  clientIdOrName: string | number | null | undefined,
+  siteUrl?: string | null,
+): Promise<TedClientProfile | null> {
+  const client = await resolveClient(clientIdOrName, siteUrl)
+  if (!client?.id) return null
+  const [info, dealSummary] = await Promise.all([
+    tedGetInfo(client.id),
+    tedGetDealSummary(client.id),
+  ])
+
+  const addons: any[] = Array.isArray(dealSummary?.addons) ? dealSummary.addons : []
+  const addOnKeys = addons.map((a) => String(a?.key || "").toLowerCase()).filter(Boolean)
+  const planText = getClientPlanField(client) || String(dealSummary?.plan || "")
+  const parsed = parsePlan(planText)
+  let plan = parsed
+  if (parsed) {
+    const labels = addons.map((a) => String(a?.label || "").trim()).filter(Boolean)
+    const have = parsed.addOns.map((x) => x.toLowerCase())
+    // "Lead Gen" in the deal summary is the plan's "Lead Generation" — don't list it twice.
+    const extra = labels.filter((l) => {
+      const n = l.toLowerCase()
+      if (/lead\s*gen/.test(n)) return !have.some((h) => /lead\s*gen/.test(h))
+      if (/social/.test(n)) return !have.some((h) => /social/.test(h))
+      return !have.includes(n)
+    })
+    plan = {
+      ...parsed,
+      addOns: [...parsed.addOns, ...extra],
+      hasLeadGen: parsed.hasLeadGen || addOnKeys.includes("leadgen"),
+    }
+  }
+
+  const ada = addons.find((a) => String(a?.key || "").toLowerCase() === "ada")
+  const adaInfo = ada ? adaFromAddon(ada) : null
+  const str = (v: any) => (v == null || String(v).trim() === "" ? null : String(v).trim())
+
+  return {
+    client,
+    info,
+    dealSummary,
+    name: str(info?.name) || str(client?.name) || "",
+    plan,
+    addOnKeys,
+    hasLeadGen: !!plan?.hasLeadGen || addOnKeys.includes("leadgen"),
+    hasGia: addOnKeys.includes("gia"),
+    adaTier: adaInfo?.tier ?? null,
+    adaRaw: adaInfo?.raw ?? null,
+    contactPhone: str(info?.contactPhone) || str(client?.clientDetails?.contactPhone),
+    businessAddress: str(info?.businessAddress) || str(client?.clientDetails?.businessAddress),
+    onboardingTier: str(client?.onboardingType),
+    dealType: str(dealSummary?.dealType?.label) || str(dealSummary?.dealType?.raw),
+    stage: str(client?.clientStage),
+    status: str(client?.status),
+    onHold: !!str(client?.onHoldReason) || /hold/i.test(String(client?.status || "")),
+  }
+}
+
+/** One line of client context for reports ("" when there is nothing to say). */
+export function profileContextLine(p: TedClientProfile | null): string {
+  if (!p) return ""
+  const bits = [
+    p.onboardingTier && `Onboarding: ${p.onboardingTier}`,
+    p.dealType && `Deal: ${p.dealType}`,
+    p.stage && `Stage: ${p.stage}`,
+    p.onHold && `ON HOLD${p.client?.onHoldReason ? ` (${p.client.onHoldReason})` : ""}`,
+    p.hasGia && "GIA add-on",
+    p.adaRaw && `ADA: ${p.adaRaw}`,
+  ].filter(Boolean)
+  return bits.length ? `\n\nClient details (TED): ${bits.join(" · ")}.` : ""
 }

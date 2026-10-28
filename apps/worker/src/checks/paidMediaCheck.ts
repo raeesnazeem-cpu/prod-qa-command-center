@@ -3,7 +3,7 @@ import {
   getClientTimeline,
   getClientHubspotId,
   getClientPlanField,
-  resolveClient,
+  getClientProfile,
   tasksByDepartment,
   parsePlan,
   TedTask,
@@ -70,6 +70,7 @@ export async function checkPaidMedia(
   siteUrl?: string | null,
 ): Promise<Finding[]> {
   let client: any
+  let profile: Awaited<ReturnType<typeof getClientProfile>> = null
   let tasks: TedTask[]
   let hs: Awaited<ReturnType<typeof resolveHubspotClientData>> = null
   // The handle used for every TED read: prefer the real ted_client_id, else
@@ -84,7 +85,10 @@ export async function checkPaidMedia(
     // still land on the right client record. The timeline and HubSpot id are
     // then read by the RESOLVED client's id (not the name), so a client found
     // by URL gets its own timeline. Both are independent, so run concurrently.
-    client = await withTimeout(resolveClient(clientKey, siteUrl), "TED client lookup")
+    // The profile carries the details-tab add-ons (deal summary): an upsold
+    // Lead Gen shows there even when the plan text doesn't say so.
+    profile = await withTimeout(getClientProfile(clientKey, siteUrl), "TED client lookup")
+    client = profile?.client ?? null
     const key = client?.id ?? null
     const [timeline, hubspotId] = key
       ? await Promise.all([
@@ -129,7 +133,7 @@ export async function checkPaidMedia(
     (typeof tedStrategist === "string" ? tedStrategist.trim() : tedStrategist?.name) ||
     hs?.paidSearchStrategist ||
     null
-  const hasLeadGen = !!plan?.hasLeadGen || !!hs?.hasLeadGenFlag
+  const hasLeadGen = !!plan?.hasLeadGen || !!profile?.hasLeadGen || !!hs?.hasLeadGenFlag
 
   const pmTasks = tasksByDepartment(tasks || [], "paid media")
   const strict = /build\s+(google|meta|facebook)\s+ads\s+campaign/i

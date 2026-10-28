@@ -1,6 +1,6 @@
 import { Finding } from "@qacc/shared"
 import { supabase } from "../lib/supabase"
-import { getClientNotesText } from "../lib/tedClient"
+import { getClientNotesText, getClientProfile, getClientTimeline } from "../lib/tedClient"
 
 /**
  * GBP Optimization Check (inline, homepage-anchored).
@@ -80,6 +80,9 @@ export async function checkGbp(
   projectId: string,
   siteUrl?: string | null,
   onProgress?: (progress: number, message: string) => Promise<void>,
+  // The run's TED client id (qa_runs.ted_client_id) — the reliable key; the
+  // project name is only a fallback.
+  tedClientId?: string | number | null,
 ): Promise<Finding[]> {
   const findings: Finding[] = []
 
@@ -91,17 +94,31 @@ export async function checkGbp(
       .select("name")
       .eq("id", projectId)
       .single()
-    const clientName = project?.name || ""
+    const clientKey =
+      tedClientId != null && String(tedClientId).trim()
+        ? String(tedClientId).trim()
+        : project?.name || ""
+    // Search Google Places by the name TED shows for the client.
+    const profile = clientKey ? await getClientProfile(clientKey, siteUrl).catch(() => null) : null
+    const clientName = profile?.name || project?.name || ""
 
-    const notesText = await getClientNotesText(clientName)
-    const addonActive = GBP_KEYWORDS.some((k) => notesText.toLowerCase().includes(k))
+    // GBP is in scope when the notes mention it OR the client has a Google
+    // Business Profile task in TED (the notes are often empty).
+    const notesText = clientKey ? await getClientNotesText(profile?.client?.id ?? clientKey) : ""
+    const gbpTask = profile
+      ? (await getClientTimeline(profile.client.id).catch(() => [])).find((t) =>
+          /google business profile|\bgbp\b|google my business/i.test(t.title),
+        )
+      : undefined
+    const addonActive =
+      !!gbpTask || GBP_KEYWORDS.some((k) => notesText.toLowerCase().includes(k))
 
     if (!addonActive) {
       findings.push({
         check_factor: CHECK_FACTOR,
-        title: "GBP add-on not detected in client notes — skipped",
+        title: "GBP not in scope for this client — skipped",
         description:
-          "No Google Business Profile / GMB add-on reference was found in the client notes, so the GBP optimization check was skipped.",
+          "No Google Business Profile task was found for this client in TED and the client notes don't mention GBP, so the GBP optimization check was skipped.",
         status: "open",
         ai_generated: false,
       } as Finding)
