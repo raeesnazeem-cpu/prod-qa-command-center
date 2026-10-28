@@ -1,4 +1,5 @@
-import { Router } from "express"
+import { Router, Request, Response, NextFunction } from "express"
+import { timingSafeEqual } from "crypto"
 import { clerkAuth } from "../middleware/clerkAuth"
 import { JobsClient } from "@google-cloud/run"
 import { supabase } from "../lib/supabase"
@@ -22,7 +23,22 @@ const jobsClient = new JobsClient()
 
 const RECORDING_VIEWPORTS = ["desktop", "tablet", "mobile"] as const
 
-router.post("/start", async (req, res) => {
+// /start is reached by the worker (server to server) and by the "Record Full
+// Project Video" button. The worker sends `Authorization: Bearer
+// RECORDING_TRIGGER_TOKEN`; anyone else must be signed in (clerkAuth).
+function recordingStartAuth(req: Request, res: Response, next: NextFunction) {
+  const token = process.env.RECORDING_TRIGGER_TOKEN
+  const header = req.headers.authorization || ""
+  if (token && header.startsWith("Bearer ")) {
+    const given = Buffer.from(header.slice(7))
+    const expected = Buffer.from(token)
+    if (given.length === expected.length && timingSafeEqual(given, expected)) return next()
+    return res.status(401).json({ error: "Invalid recording trigger token" })
+  }
+  return clerkAuth(req, res, next)
+}
+
+router.post("/start", recordingStartAuth, async (req, res) => {
   const { runId } = req.body
 
   if (!runId) {
@@ -75,14 +91,15 @@ router.post("/start", async (req, res) => {
           const ecsClient = new ECSClient({ region: process.env.AWS_REGION || "us-east-1" })
           const runTaskCommand = new RunTaskCommand({
             cluster: process.env.AWS_ECS_CLUSTER || "qacc-cluster",
-            taskDefinition: process.env.AWS_ECS_TASK_DEFINITION || "qacc-worker-task",
+            taskDefinition:
+              process.env.AWS_ECS_TASK_DEF || process.env.AWS_ECS_TASK_DEFINITION || "qacc-recorder",
             launchType: "FARGATE",
             networkConfiguration: {
               awsvpcConfiguration: {
                 subnets: (process.env.AWS_ECS_SUBNETS || "").split(",").filter(Boolean),
                 securityGroups: (process.env.AWS_ECS_SECURITY_GROUPS || "").split(",").filter(Boolean),
                 assignPublicIp:
-                  process.env.AWS_ECS_ASSIGN_PUBLIC_IP === "DISABLED" ? "DISABLED" : "ENABLED",
+                  process.env.AWS_ECS_ASSIGN_PUBLIC_IP === "ENABLED" ? "ENABLED" : "DISABLED",
               },
             },
             overrides: {
@@ -92,7 +109,17 @@ router.post("/start", async (req, res) => {
               ...(process.env.AWS_ECS_EXECUTION_ROLE_ARN
                 ? { executionRoleArn: process.env.AWS_ECS_EXECUTION_ROLE_ARN }
                 : {}),
-              containerOverrides: [{ name: "qacc-worker", environment: recorderEnv(viewportType) }],
+              // The recorder task definition carries DB, bucket and secrets; only
+              // the per-viewport values are overridden (no key in the request).
+              containerOverrides: [
+                {
+                  name: process.env.AWS_ECS_CONTAINER || "qacc-recorder",
+                  environment: [
+                    { name: "VIEWPORT_TYPE", value: viewportType },
+                    { name: "RUN_ID", value: String(runId) },
+                  ],
+                },
+              ],
             },
           })
           return ecsClient.send(runTaskCommand)

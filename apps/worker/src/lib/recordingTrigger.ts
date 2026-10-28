@@ -38,9 +38,10 @@ export type TriggerResult = {
 //   • GCP → Cloud Run Job `:run` with per-viewport env overrides. Auth token
 //     from the instance metadata server (works on Cloud Run/GCE without extra
 //     deps) or GOOGLE_OAUTH_TOKEN for local/testing.
-//   • AWS → ECS RunTask (needs @aws-sdk/client-ecs; imported lazily so the
-//     worker still builds without it — a clear error is reported if selected
-//     without the SDK installed).
+//   • AWS → ECS RunTask on the qacc-<env>-recorder task definition (Terraform
+//     infra/terraform/ecs.tf). The task definition already carries the DB,
+//     bucket and secrets, so only RUN_ID / VIEWPORT_TYPE are overridden — no
+//     service key travels in the RunTask request.
 //   • RECORDING_TRIGGER_URL (any provider) → simple HTTP POST escape hatch:
 //     one POST { runId, viewport } per viewport to that URL.
 // ---------------------------------------------------------------------------
@@ -182,13 +183,12 @@ async function getGcpAccessToken(): Promise<string> {
   return j.access_token
 }
 
-// --- AWS: ECS RunTask. @aws-sdk/client-ecs is imported lazily via a runtime
-// variable so the bundler does not hard-require it (it is not a worker dep by
-// default). If AWS is selected without the SDK, a clear error is thrown. ---
+// --- AWS: ECS RunTask. @aws-sdk/client-ecs is a worker dependency, imported
+// lazily via a runtime variable so GCP-only deployments never load it. ---
 async function triggerViaEcs(runId: string, viewport: string): Promise<void> {
   const cluster = process.env.AWS_ECS_CLUSTER || "qacc-cluster"
   const taskDefinition = process.env.AWS_ECS_TASK_DEF
-  const containerName = process.env.AWS_ECS_CONTAINER || "qacc-worker"
+  const containerName = process.env.AWS_ECS_CONTAINER || "qacc-recorder"
   if (!taskDefinition) throw new Error("AWS_ECS_TASK_DEF not set")
 
   const pkg = "@aws-sdk/client-ecs"
@@ -203,7 +203,8 @@ async function triggerViaEcs(runId: string, viewport: string): Promise<void> {
   const { ECSClient, RunTaskCommand } = ecsMod
   const client = new ECSClient({ region: process.env.AWS_REGION || "us-east-1" })
 
-  const env = recorderEnv(runId, viewport)
+  // Everything else (DB, bucket, keys) comes from the recorder task definition.
+  const env: Record<string, string> = { VIEWPORT_TYPE: viewport, RUN_ID: runId }
   const subnets = (process.env.AWS_ECS_SUBNETS || "").split(",").map((s) => s.trim()).filter(Boolean)
   const securityGroups = (process.env.AWS_ECS_SECURITY_GROUPS || "")
     .split(",")
@@ -220,7 +221,7 @@ async function triggerViaEcs(runId: string, viewport: string): Promise<void> {
             awsvpcConfiguration: {
               subnets,
               securityGroups,
-              assignPublicIp: process.env.AWS_ECS_ASSIGN_PUBLIC_IP || "ENABLED",
+              assignPublicIp: process.env.AWS_ECS_ASSIGN_PUBLIC_IP || "DISABLED",
             },
           }
         : undefined,
@@ -245,7 +246,13 @@ async function triggerViaApi(apiBase: string, runId: string): Promise<void> {
   const url = `${apiBase.replace(/\/+$/, "")}/api/recordings/start`
   const r = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      // /api/recordings/start accepts this shared token or a signed-in user.
+      ...(process.env.RECORDING_TRIGGER_TOKEN
+        ? { Authorization: `Bearer ${process.env.RECORDING_TRIGGER_TOKEN}` }
+        : {}),
+    },
     body: JSON.stringify({ runId }),
   })
   if (!r.ok) {

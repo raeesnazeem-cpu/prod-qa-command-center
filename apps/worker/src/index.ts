@@ -18,6 +18,7 @@ import { processCaptureMultiviewScreenshotsJob } from "./jobs/captureMultiviewSc
 import { startStuckRunSweeper } from "./lib/stuckRunSweeper"
 import { releaseReportGate } from "./lib/reportGate"
 import { healthStatus, scanJobEnded, scanJobStarted } from "./lib/workerHealth"
+import { jobEnded, jobStarted } from "./lib/ecsTaskProtection"
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -73,6 +74,7 @@ const worker = new Worker(
     )
 
     scanJobStarted(job.id, name)
+    jobStarted()
     try {
       switch (name) {
         case "start_run":
@@ -126,6 +128,7 @@ const worker = new Worker(
       throw error
     } finally {
       scanJobEnded(job.id)
+      jobEnded()
     }
   },
   {

@@ -20,6 +20,7 @@ import helmet from "helmet"
 import cors from "cors"
 
 import { logger } from "./lib/logger"
+import { startRunMetrics } from "./lib/runMetrics"
 import { defaultRateLimiter } from "./middleware/rateLimiter"
 import { healthRouter } from "./routes/health"
 import { webhookRouter } from "./routes/webhooks"
@@ -97,6 +98,7 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 
 app.listen(PORT, () => {
   logger.info(`API server running on port ${PORT}`)
+  startRunMetrics()
 })
 
 export default app

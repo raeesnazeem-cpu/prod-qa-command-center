@@ -12,9 +12,10 @@ const logger = pino({
   },
 })
 
-// Global "one QA run at a time" slot, backed by an atomic single-row lock in
-// Postgres (see migration 20260820000000_add_run_slot_lock). start_run claims
-// the slot before a run begins and releases it when the run completes.
+// Global run slots (RUN_SLOT_LIMIT of them, default 1 = one QA run at a time),
+// backed by an atomic lock table in Postgres (migrations
+// 20260820000000_add_run_slot_lock + 20261028000000_run_slot_limit). start_run
+// claims a slot before a run begins and releases it when the run completes.
 //
 // FAIL-OPEN: if the lock RPC is missing (migration not applied) or errors, we
 // let the run proceed rather than wedge the whole queue. The guard is a safety
@@ -28,14 +29,22 @@ export const RUN_SLOT_STALE_SECONDS = Math.max(
   Number(process.env.RUN_SLOT_STALE_SECONDS || 1800),
 )
 
-// Try to claim the global run slot for `runId`. Returns true when this run now
-// holds it (free / already ours / previous holder stale), false when another
-// fresh run holds it. Never throws.
+// How many runs may execute at once (migration 20261028000000_run_slot_limit).
+// Default 1 = the old "one run at a time". On AWS each worker task handles one
+// run and the worker service scales out to this many tasks.
+export const RUN_SLOT_LIMIT = Math.max(1, Number(process.env.RUN_SLOT_LIMIT || 1))
+
+// Try to claim one of the run slots for `runId`. Returns true when this run now
+// holds one (free / already ours / previous holder stale), false when every slot
+// is held by another fresh run. Never throws.
 export async function acquireRunSlot(runId: string): Promise<boolean> {
   try {
     const { data, error } = await supabase.rpc("acquire_run_slot", {
       p_run_id: runId,
       p_stale_seconds: RUN_SLOT_STALE_SECONDS,
+      // Only sent when raised, so a database without the new migration keeps
+      // working with the old two-argument function.
+      ...(RUN_SLOT_LIMIT > 1 ? { p_max_slots: RUN_SLOT_LIMIT } : {}),
     })
     if (error) {
       logger.warn(
