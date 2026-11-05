@@ -675,6 +675,28 @@ export async function processAiFixRunJob(job: Job) {
       continue
     }
 
+    // --- cro_audit: scan only, no fix ---------------------------------
+    // CRO advice from G99 WebAudit is a design/marketing call, never an
+    // automatic edit.
+    if (f.check_factor === "cro_audit") {
+      analysis.push({
+        findingId: f.id ? String(f.id) : null,
+        check_factor: f.check_factor,
+        title: f.title || f.check_factor,
+        pageUrl,
+        category: "manual",
+        fix: "No automatic fix. Review the CRO advice with the design team.",
+        applied: false,
+        proposed: false,
+        noAutoFix: true,
+        suggestedFix: f.description || "Review the CRO advice with the design team",
+        lapse: false,
+        filesOffered: [],
+        filesChanged: [],
+      })
+      continue
+    }
+
     // --- media_crop: scan only, no fix ---------------------------------
     // Whether a crop is acceptable (and how to re-frame it) is a design call
     // per breakpoint, so it is never auto-edited or sent to AI triage.

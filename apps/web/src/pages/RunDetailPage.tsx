@@ -1853,6 +1853,7 @@ export const RunDetailPage = () => {
                     privacy_policy: "Privacy Policy Check",
                     hero_media: "Hero Media Check",
                     paid_media: "Paid Media Check",
+                    cro_audit: "CRO (Conversion Review)",
                     visual_regression: "Visual Regression Check",
                     accessibility: "Accessibility Check",
                     console_errors: "Console Errors Check",

@@ -8,6 +8,7 @@ import { processCaptureScreenshotJob } from "./jobs/captureScreenshotJob"
 import { processCrawlBatchJob } from "./jobs/crawlBatchJob"
 import { processCheckProjectPlanJob } from "./jobs/checkProjectPlanJob"
 import { processCheckPaidMediaJob } from "./jobs/checkPaidMediaJob"
+import { processCheckCroAuditJob } from "./jobs/checkCroAuditJob"
 import { processAiFixRunJob } from "./jobs/aiFixRunJob"
 import {
   processVideoRecordingJob,
@@ -89,6 +90,9 @@ const worker = new Worker(
           break
         case "check_paid_media":
           await runApiCheck(job, "paid_media", processCheckPaidMediaJob)
+          break
+        case "check_cro_audit":
+          await runApiCheck(job, "cro_audit", processCheckCroAuditJob)
           break
         case "ai_fix_run":
           await processAiFixRunJob(job)

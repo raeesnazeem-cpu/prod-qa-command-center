@@ -1656,6 +1656,9 @@ const FULL_SCAN_CHECKS = [
   // Standalone API checks (enqueued directly by startRunJob).
   "project_plan",
   "paid_media",
+  // CRO (conversion) review from G99 WebAudit — homepage + up to 3 conversion
+  // pages. FULL SCAN ONLY and scan only (no fix); the worker guards run_type.
+  "cro_audit",
   // All-pages / composite page checks.
   // visual_regression intentionally EXCLUDED from full scan — we do not want
   // baseline visual-diff comparisons running in the standalone full-scan suite.

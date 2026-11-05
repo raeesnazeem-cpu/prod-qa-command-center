@@ -919,6 +919,12 @@ router.post(
           projectId: run.project_id,
           isRetry: true,
         })
+      } else if (checkKey === "cro_audit") {
+        await qaQueue.add(
+          "check_cro_audit",
+          { runId: id, projectId: run.project_id, isRetry: true },
+          { attempts: 1 },
+        )
       } else if (pages && pages.length > 0) {
         // Filter pages for homepage-only checks so we don't queue redundant tasks
         const homepageChecks = [
