@@ -4,7 +4,8 @@ jest.mock("@qacc/ai", () => ({}), { virtual: true })
 
 import { isCleanPassFinding, isRealDefect, isToolLapseFinding } from "@qacc/shared"
 import { parseWebAuditNdjson, WebAuditCroResult } from "../../lib/webAuditClient"
-import { croFindingsFor, pickCroPages } from "../checkCroAuditJob"
+import { croFindingFor, pickCroPages } from "../checkCroAuditJob"
+import { croBand, formatCroContext, parseCroContext } from "../../lib/croReport"
 import { renderCheckSectionHtml, FRIENDLY } from "../../lib/tedSync"
 
 const cro = (over: Partial<WebAuditCroResult> = {}): WebAuditCroResult => ({
@@ -82,26 +83,50 @@ describe("pickCroPages", () => {
   })
 })
 
-describe("croFindingsFor", () => {
-  it("score at/above the pass mark → one clean-pass row", () => {
-    const rows = croFindingsFor(cro({ score: 80 }), 70)
-    expect(rows).toHaveLength(1)
-    expect(isCleanPassFinding(rows[0])).toBe(true)
-    expect(isRealDefect(rows[0])).toBe(false)
+describe("croFindingFor (one row per page, always with the full data)", () => {
+  it("WebAudit bands: 90+ Excellent, 70-89 Average, <70 Poor", () => {
+    expect(croBand(95)).toBe("Excellent")
+    expect(croBand(70)).toBe("Average")
+    expect(croBand(69)).toBe("Poor")
   })
 
-  it("below the pass mark → one real defect per failed high/critical check, critical first", () => {
-    const rows = croFindingsFor(cro(), 70)
-    expect(rows.map((r) => r.title)).toEqual(["CRO: Primary CTA above the fold", "CRO: Trust badges"])
-    expect(rows.every((r) => isRealDefect(r))).toBe(true)
-    expect(rows[0].context_text).toContain("CRO score: 50/100 (pass mark 70)")
+  it("Average or better → clean pass, but still carries issues, fixes and failed checks", () => {
+    const f = croFindingFor("https://site.com/", cro({ score: 80 }))
+    expect(isCleanPassFinding(f)).toBe(true)
+    expect(isRealDefect(f)).toBe(false)
+    expect(f.title).toBe("CRO score 80/100 (Average) — no major conversion issues found")
+    const rep = parseCroContext(f.context_text)!
+    expect(rep.url).toBe("https://site.com/")
+    expect(rep.score).toBe(80)
+    expect(rep.band).toBe("Average")
+    expect(rep.issues).toEqual(["Hero has no clear call to action."])
+    expect(rep.fixes).toEqual(["Add a 'Book a consultation' button above the fold."])
+    expect(rep.failedChecks).toEqual([
+      { impact: "critical", name: "Primary CTA above the fold", fix: "Add a CTA in the hero." },
+      { impact: "high", name: "Trust badges", fix: "Show reviews near the form." },
+    ])
   })
 
-  it("below the pass mark with no high-impact failures → one summary defect", () => {
-    const rows = croFindingsFor(cro({ checks: [] }), 70)
-    expect(rows).toHaveLength(1)
-    expect(rows[0].title).toMatch(/below the pass mark/)
-    expect(isRealDefect(rows[0])).toBe(true)
+  it("Poor → real defect with the same data", () => {
+    const f = croFindingFor("https://site.com/", cro({ score: 50 }))
+    expect(isRealDefect(f)).toBe(true)
+    expect(f.title).toMatch(/^CRO score 50\/100 \(Poor\)/)
+    expect(parseCroContext(f.context_text)!.failedChecks).toHaveLength(2)
+  })
+
+  it("no high-impact failures → section omitted, parse gives an empty list", () => {
+    const f = croFindingFor("https://site.com/", cro({ checks: [] }))
+    expect(f.context_text).not.toContain("High-impact failed checks")
+    expect(parseCroContext(f.context_text)!.failedChecks).toEqual([])
+  })
+
+  it("long WebAudit paragraphs are kept on one line and clipped", () => {
+    const long = "word ".repeat(300)
+    const ctx = formatCroContext("https://x.com/", cro({ issues: [`first\n${long}`] }))
+    const rep = parseCroContext(ctx)!
+    expect(rep.issues).toHaveLength(1)
+    expect(rep.issues[0].length).toBeLessThanOrEqual(500)
+    expect(rep.issues[0].startsWith("first word")).toBe(true)
   })
 
   it("the lapse row shape counts as 'could not complete'", () => {
@@ -122,11 +147,60 @@ describe("TED report — cro_audit section", () => {
     expect(FRIENDLY.cro_audit).toBe("CRO (Conversion Review)")
   })
 
-  it("defects → failed, pass row → passed", async () => {
-    const failed = await render(croFindingsFor(cro(), 70).map((f, i) => ({ ...f, id: `f${i}`, page_id: "p1" })))
-    expect(failed.status).toBe("failed")
-    expect(failed.html).toContain("Primary CTA above the fold")
-    const passed = await render(croFindingsFor(cro({ score: 90 }), 70).map((f) => ({ ...f, id: "ok", page_id: "p1" })))
-    expect(passed.status).toBe("passed")
+  const row = (pageId: string, url: string, score: number, over: Partial<WebAuditCroResult> = {}) => ({
+    ...croFindingFor(url, cro({ score, ...over })),
+    id: `f-${pageId}`,
+    page_id: pageId,
+  })
+
+  it("a pass still shows score, issues found, fixes recommended and failed checks", async () => {
+    const r = await render([row("p1", "https://site.com/", 82)])
+    expect(r.status).toBe("passed")
+    expect(r.html).toContain("Passed")
+    expect(r.html).toContain("Score 82/100 (Average)")
+    expect(r.html).toContain("Issues found")
+    expect(r.html).toContain("Hero has no clear call to action.")
+    expect(r.html).toContain("Fixes recommended")
+    expect(r.html).toContain("Book a consultation")
+    expect(r.html).toContain("High-impact failed checks")
+    expect(r.html).toContain("[critical] Primary CTA above the fold — Add a CTA in the hero.")
+  })
+
+  it("one Poor page fails the section; every page gets its own block", async () => {
+    const pages = new Map([["p1", "https://site.com/"], ["p2", "https://site.com/contact"]])
+    const r = await renderCheckSectionHtml(
+      "cro_audit",
+      [row("p1", "https://site.com/", 85), row("p2", "https://site.com/contact", 40, { checks: [] })],
+      new Map(), { remaining: 0 }, pages,
+    )
+    expect(r.status).toBe("failed")
+    expect(r.html).toContain("1 of 2 pages rated Poor")
+    expect(r.html).toContain("https://site.com/contact")
+    expect(r.html).toContain("Score 40/100 (Poor)")
+    expect(r.html).toContain("No high-impact failed checks.")
+    // failed page listed first
+    expect(r.html.indexOf("Score 40/100")).toBeLessThan(r.html.indexOf("Score 85/100"))
+  })
+
+  it("all pages lapsed → could not complete, with the reason", async () => {
+    const lapse = {
+      id: "l1", page_id: "p1", check_factor: "cro_audit", title: "Check Failed",
+      description: "The cro_audit check encountered an unexpected error: WebAudit request failed with status code 401. Process aborted gracefully.",
+    }
+    const r = await render([lapse])
+    expect(r.status).toBe("errored")
+    expect(r.html).toContain("status code 401")
+  })
+
+  it("some pages lapsed → listed under the results", async () => {
+    const pages = new Map([["p1", "https://site.com/"], ["p2", "https://site.com/contact"]])
+    const lapse = {
+      id: "l2", page_id: "p2", check_factor: "cro_audit", title: "Check Failed",
+      description: "The cro_audit check encountered an unexpected error: x. Process aborted gracefully.",
+    }
+    const r = await renderCheckSectionHtml("cro_audit", [row("p1", "https://site.com/", 91), lapse], new Map(), { remaining: 0 }, pages)
+    expect(r.status).toBe("passed")
+    expect(r.html).toContain("Score 91/100 (Excellent)")
+    expect(r.html).toContain("Could not check 1 page")
   })
 })

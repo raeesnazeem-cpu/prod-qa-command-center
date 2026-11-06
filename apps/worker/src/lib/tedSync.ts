@@ -2,6 +2,7 @@ import { supabase } from "./supabase"
 import { getClientDomain } from "./tedClient"
 import { qaQueue } from "./queue"
 import { releaseRunSlot } from "./runSlot"
+import { parseCroContext, CroPageReport } from "./croReport"
 import pino from "pino"
 import sharp from "sharp"
 
@@ -1477,6 +1478,65 @@ export async function renderCheckSectionHtml(
       status: "errored",
       html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete: no service pages were identified in this scan, so no images were checked.</p>`,
     }
+  }
+
+  // CRO (G99 WebAudit): one row per checked page, pass or fail, each carrying
+  // the full WebAudit result in context_text (lib/croReport). Every page shows
+  // its score, the issues found, the fixes recommended and any high-impact
+  // failed checks — a pass is never a bare green line. Pass/fail follows
+  // WebAudit's own bands (Poor <70 fails).
+  if (factor === "cro_audit") {
+    if (group.length === 0)
+      return {
+        status: "errored",
+        html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete: no CRO result was recorded for this scan.</p>`,
+      }
+    const urlOf = (f: any, rep: CroPageReport | null) =>
+      (f.page_id && pageUrlById?.get(String(f.page_id))) || rep?.url || ""
+    const pageLink = (u: string) => (u ? `<a href="${esc(u)}">${esc(u)}</a>` : "this page")
+    const list = (items: string[]) => `<ul>${items.map((s) => `<li>${esc(s)}</li>`).join("")}</ul>`
+    // Latest row per page wins (a re-run replaces, never doubles).
+    const byPage = new Map<string, any>()
+    group.forEach((f: any, i: number) => byPage.set(f.page_id ? String(f.page_id) : `row-${i}`, f))
+    const rows = [...byPage.values()]
+    const failed = rows.filter((f) => isRealDefect(f))
+    const passed = rows.filter((f) => isCleanPassFinding(f))
+    const lapsed = rows.filter((f) => isToolLapseFinding(f))
+    const checked = failed.length + passed.length
+    if (checked === 0) {
+      const why = clipText(String(lapsed[0]?.description || "").replace(/\s+/g, " ").trim(), 240)
+      return {
+        status: "errored",
+        html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete${why ? `: ${esc(why)}` : "."}</p>`,
+      }
+    }
+    let html = failed.length
+      ? `<p>❌ <strong>${esc(label)}</strong> — ${failed.length} of ${checked} page${checked > 1 ? "s" : ""} rated Poor (score under 70) by G99 WebAudit.</p>`
+      : `<p>✅ <strong>${esc(label)}</strong> — Passed. ${checked} page${checked > 1 ? "s" : ""} rated Average or better by G99 WebAudit. Suggestions below.</p>`
+    for (const f of [...failed, ...passed]) {
+      const rep = parseCroContext(f.context_text)
+      const u = urlOf(f, rep)
+      const verdict = isRealDefect(f) ? "❌" : "✅"
+      const score = rep?.score != null ? `Score ${rep.score}/100 (${rep.band})` : esc(String(f.title || ""))
+      html += `<p>📄 <strong>Page:</strong> ${pageLink(u)} — ${verdict} ${score}</p>`
+      if (!rep) {
+        const desc = clipText(String(f.description || "").replace(/\s+/g, " ").trim(), 300)
+        if (desc) html += `<p>${esc(desc)}</p>`
+        continue
+      }
+      if (rep.issues.length) html += `<p><strong>Issues found</strong></p>${list(rep.issues)}`
+      if (rep.fixes.length) html += `<p><strong>Fixes recommended</strong></p>${list(rep.fixes)}`
+      if (rep.failedChecks.length)
+        html += `<p><strong>High-impact failed checks</strong></p>${list(
+          rep.failedChecks.map((c) => `${c.impact ? `[${c.impact}] ` : ""}${c.name}${c.fix ? ` — ${c.fix}` : ""}`),
+        )}`
+      else html += `<p><small>No high-impact failed checks.</small></p>`
+    }
+    if (lapsed.length)
+      html += `<p><small>Could not check ${lapsed.length} page${lapsed.length > 1 ? "s" : ""}: ${lapsed
+        .map((f) => pageLink(urlOf(f, null)))
+        .join(", ")}</small></p>`
+    return { status: failed.length ? "failed" : "passed", html }
   }
 
   // Blog sidebar: one row per blog post. Rows are identical text across posts,

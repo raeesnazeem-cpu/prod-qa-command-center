@@ -2,6 +2,7 @@ import { Job } from "bullmq"
 import pino from "pino"
 import { supabase } from "../lib/supabase"
 import { runWebAuditCro, WebAuditCroResult, webAuditBaseUrl } from "../lib/webAuditClient"
+import { CRO_PASS_SCORE, croBand, formatCroContext, highImpactFailed } from "../lib/croReport"
 
 // CRO (conversion) check — FULL SCAN ONLY, scan only (no fix).
 //
@@ -18,13 +19,6 @@ const logger = pino({
 
 export const CRO_CHECK = "cro_audit"
 const MAX_EXTRA_PAGES = 3
-const MAX_FINDINGS_PER_PAGE = 8
-const IMPACT_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 }
-
-export function croPassScore(): number {
-  const n = parseInt(process.env.CRO_PASS_SCORE || "", 10)
-  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 70
-}
 
 const pathOf = (u: string): string => {
   try {
@@ -71,62 +65,30 @@ export function pickCroPages<T extends { url: string }>(pages: T[], siteUrl: str
   return picked
 }
 
-/** Turn one page's WebAudit CRO result into finding rows. Exported for tests. */
-export function croFindingsFor(cro: WebAuditCroResult, passScore: number): any[] {
-  // Plain text: the web's default finding card shows context_text as-is.
-  const meta = (extra: { impact?: string | null; recommendations?: string[] } = {}) =>
-    [
-      `CRO score: ${cro.score}/100 (pass mark ${passScore})`,
-      extra.impact ? `Impact: ${extra.impact}` : null,
-      ...(extra.recommendations || []).map((r) => `- ${r}`),
-      "Source: G99 WebAudit",
-    ]
-      .filter(Boolean)
-      .join("\n")
-
-  if (cro.score >= passScore) {
-    return [
-      {
-        check_factor: CRO_CHECK,
-        title: "CRO: no major conversion issues found",
-        description: `CRO score ${cro.score}/100 (pass mark ${passScore}).`,
-        context_text: meta({ recommendations: cro.recommendations.slice(0, 3) }),
-        status: "open",
-        ai_generated: false,
-      },
-    ]
+/**
+ * One finding per page, pass or fail, always carrying WebAudit's full CRO
+ * result (score, issues found, recommended fixes, high-impact failed checks)
+ * in context_text — see lib/croReport. Pass/fail follows WebAudit's own score
+ * bands: Poor (<70) fails; Average and Excellent pass. Exported for tests.
+ */
+export function croFindingFor(url: string, cro: WebAuditCroResult): any {
+  const band = croBand(cro.score)
+  const passed = cro.score >= CRO_PASS_SCORE
+  const firstFix = cro.recommendations[0] || highImpactFailed(cro)[0]?.remediation || ""
+  return {
+    check_factor: CRO_CHECK,
+    // Pass titles state absence ("no major … issues found") so the shared
+    // verdict rules read them as a clean pass; fail titles do not.
+    title: passed
+      ? `CRO score ${cro.score}/100 (${band}) — no major conversion issues found`
+      : `CRO score ${cro.score}/100 (${band}) — conversion problems on this page`,
+    description: passed
+      ? `WebAudit rates this page ${band}. ${firstFix ? `Top suggestion: ${firstFix}` : ""}`.trim()
+      : firstFix || "Review the page's calls to action, value proposition and trust signals.",
+    context_text: formatCroContext(url, cro),
+    status: "open",
+    ai_generated: false,
   }
-
-  const failed = cro.checks
-    .filter((c) => !c.passed && (c.impact === "critical" || c.impact === "high"))
-    .sort((a, b) => (IMPACT_RANK[a.impact || "low"] ?? 9) - (IMPACT_RANK[b.impact || "low"] ?? 9))
-    .slice(0, MAX_FINDINGS_PER_PAGE)
-
-  if (failed.length > 0) {
-    return failed.map((c) => ({
-      check_factor: CRO_CHECK,
-      title: `CRO: ${c.checkName}`,
-      description: c.remediation || `Fix "${c.checkName}" to improve conversions.`,
-      context_text: meta({ impact: c.impact || null }),
-      status: "open",
-      ai_generated: false,
-    }))
-  }
-
-  // Low score but no single high-impact failed check: report the summary.
-  return [
-    {
-      check_factor: CRO_CHECK,
-      title: `CRO score ${cro.score}/100 is below the pass mark (${passScore})`,
-      description:
-        cro.recommendations.slice(0, 3).join(" ") ||
-        cro.issues.slice(0, 2).join(" ") ||
-        "Review the page's calls to action, value proposition and trust signals.",
-      context_text: meta(),
-      status: "open",
-      ai_generated: false,
-    },
-  ]
 }
 
 const lapseFinding = (msg: string) => ({
@@ -172,7 +134,6 @@ export async function processCheckCroAuditJob(job: Job) {
   }
 
   const targets = pickCroPages(pages, run.site_url || pages[0].url)
-  const passScore = croPassScore()
   logger.info(
     { runId, webAudit: webAuditBaseUrl(), pages: targets.map((p) => p.url) },
     "Running CRO check via WebAudit",
@@ -191,7 +152,7 @@ export async function processCheckCroAuditJob(job: Job) {
     let findings: any[]
     try {
       const cro = await auditWithRetry(page.url)
-      findings = croFindingsFor(cro, passScore)
+      findings = [croFindingFor(page.url, cro)]
       logger.info({ runId, url: page.url, score: cro.score }, "CRO page done")
     } catch (e: any) {
       logger.error({ runId, url: page.url, error: e?.message }, "CRO page could not complete")
