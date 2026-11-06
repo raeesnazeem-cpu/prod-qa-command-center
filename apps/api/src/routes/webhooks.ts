@@ -9,6 +9,7 @@ import { transitionRunStatus } from "../lib/runControl"
 import { isRealDefect } from "@qacc/shared"
 import { getCheckBreakdown } from "../lib/runCheckBreakdown"
 import { nonGrowth99Checks } from "../lib/fullScanChecks"
+import { isSubtaskEvent } from "../lib/tedSubtaskEvent"
 import {
   tedGetJson,
   getTedClientProfile,
@@ -1109,7 +1110,9 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
       const isComplete =
         task.status === "Complete" || task.status === "Completed"
       const isPreQaTarget = task.templateKey === "release.qa_pre"
-      const isManual = isPreQaTarget && isManualTargetTrigger(task)
+      // A checklist row's update carries its parent's key; only the parent itself is a manual trigger.
+      const isManual =
+        isPreQaTarget && !isSubtaskEvent(task) && isManualTargetTrigger(task)
       if ((isPreDevTrigger && isComplete) || isManual) {
         console.log(
           isManual
@@ -2393,7 +2396,8 @@ webhookRouter.post(
       // Manual trigger: the internal_test task (the target) at any status.
       const isInternalTestTemplate =
         task.templateKey === INTERNAL_QA_TARGET_TEMPLATE_KEY
-      const isManual = isInternalTestTemplate && isManualTargetTrigger(task)
+      const isManual =
+        isInternalTestTemplate && !isSubtaskEvent(task) && isManualTargetTrigger(task)
 
       // TED labels a status change as TASK_UPDATED (the record event); the
       // "Task Status Changed" trigger is a TED-side filter, not the delivered
@@ -2972,7 +2976,8 @@ webhookRouter.post(
 
       // Manual trigger: the release.qa_post target task at any status.
       const isPostQaTarget = task.templateKey === "release.qa_post"
-      const isManual = isPostQaTarget && isManualTargetTrigger(task)
+      const isManual =
+        isPostQaTarget && !isSubtaskEvent(task) && isManualTargetTrigger(task)
 
       if (
         (eventType === "TASK_UPDATED" ||
