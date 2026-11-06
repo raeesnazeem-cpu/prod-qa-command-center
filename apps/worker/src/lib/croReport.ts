@@ -37,6 +37,7 @@ export interface CroPageReport {
   issues: string[]
   fixes: string[]
   failedChecks: { impact: string; name: string; fix: string }[]
+  reportUrl: string
 }
 
 export function highImpactFailed(cro: WebAuditCroResult) {
@@ -63,6 +64,7 @@ export function formatCroContext(url: string, cro: WebAuditCroResult): string {
         return `- [${c.impact}] ${oneLine(c.checkName, 120)}${fix ? `: ${fix}` : ""}`
       }),
     )
+  if (cro.reportUrl) lines.push(`WebAudit report: ${cro.reportUrl}`)
   lines.push("Source: G99 WebAudit")
   return lines.join("\n")
 }
@@ -71,7 +73,7 @@ export function formatCroContext(url: string, cro: WebAuditCroResult): string {
 export function parseCroContext(ctx: string | null | undefined): CroPageReport | null {
   const text = String(ctx || "")
   if (!/^Score:\s*\d+/m.test(text)) return null
-  const out: CroPageReport = { url: "", score: null, band: "", issues: [], fixes: [], failedChecks: [] }
+  const out: CroPageReport = { url: "", score: null, band: "", issues: [], fixes: [], failedChecks: [], reportUrl: "" }
   let section: "issues" | "fixes" | "failed" | null = null
   for (const raw of text.split("\n")) {
     const line = raw.trim()
@@ -83,7 +85,10 @@ export function parseCroContext(ctx: string | null | undefined): CroPageReport |
     } else if (/^Issues found:$/i.test(line)) section = "issues"
     else if (/^Recommended fixes:$/i.test(line)) section = "fixes"
     else if (/^High-impact failed checks:$/i.test(line)) section = "failed"
-    else if (/^Source:/i.test(line)) section = null
+    else if ((m = line.match(/^WebAudit report:\s*(https?:\/\/\S+)/))) {
+      out.reportUrl = m[1]
+      section = null
+    } else if (/^Source:/i.test(line)) section = null
     else if (line.startsWith("- ") && section) {
       const item = line.slice(2)
       if (section === "issues") out.issues.push(item)
