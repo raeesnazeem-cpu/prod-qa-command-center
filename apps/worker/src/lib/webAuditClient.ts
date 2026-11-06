@@ -46,6 +46,20 @@ export function webAuditBaseUrl(): string {
 }
 
 /**
+ * First non-empty line of an upstream error, max 300 chars. WebAudit passes
+ * through raw errors such as Playwright's multi-line ASCII box, which would
+ * otherwise land verbatim in the TED report. Exported for tests.
+ */
+export function firstLine(s: unknown): string {
+  const line = String(s ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l && !/^[╔║╚═]/.test(l))
+  if (!line) return ""
+  return line.length > 300 ? `${line.slice(0, 299)}…` : line
+}
+
+/**
  * Read an NDJSON body and return the CRO section of the "complete" line.
  * Exported for tests. Throws WebAuditError on an error line, on an agent
  * error (the CRO section would be missing), or if the stream ends early.
@@ -62,10 +76,10 @@ export function parseWebAuditNdjson(text: string): WebAuditCroResult {
       continue
     }
     if (msg?.type === "error") {
-      throw new WebAuditError(`WebAudit error: ${msg.message || "unknown"}`)
+      throw new WebAuditError(`WebAudit error: ${firstLine(msg.message) || "unknown"}`)
     }
     if (msg?.type === "agent_error") {
-      agentError = String(msg.message || msg.agent || "AI step failed")
+      agentError = firstLine(msg.message || msg.agent) || "AI step failed"
     }
     if (msg?.type === "complete") {
       const cro = msg?.data?.report?.rawResults?.cro

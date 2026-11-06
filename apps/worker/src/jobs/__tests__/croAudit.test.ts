@@ -48,6 +48,15 @@ describe("WebAudit NDJSON reader", () => {
     expect(parseWebAuditNdjson(complete({ score: 75 })).reportUrl).toBeNull()
   })
 
+  it("keeps only the first line of a multi-line WebAudit error (no Playwright ASCII box)", () => {
+    const raw =
+      "browserType.launch: Executable doesn't exist at /root/.cache/ms-playwright/chromium_headless_shell-1228/chrome-linux/headless_shell\n" +
+      "╔════════╗\n║ Looks like Playwright was just installed ║\n╚════════╝"
+    expect(() => parseWebAuditNdjson(JSON.stringify({ type: "error", message: raw }))).toThrow(
+      /^WebAudit error: browserType\.launch: Executable doesn't exist at \S+headless_shell$/,
+    )
+  })
+
   it("throws on an error line", () => {
     expect(() => parseWebAuditNdjson(JSON.stringify({ type: "error", message: "boom" }))).toThrow(/boom/)
   })
