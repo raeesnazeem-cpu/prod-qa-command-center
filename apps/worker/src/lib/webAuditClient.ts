@@ -26,6 +26,9 @@ export interface WebAuditCroResult {
   issues: string[]
   recommendations: string[]
   checks: WebAuditCheck[]
+  // Link to this audit on WebAudit's dashboard (WebAudit saves token-caller
+  // audits since Growth99ops/g99-web-audit#4). Null on older WebAudit builds.
+  reportUrl?: string | null
 }
 
 export class WebAuditError extends Error {
@@ -89,6 +92,10 @@ export function parseWebAuditNdjson(text: string): WebAuditCroResult {
                 impact: c.impact,
               }))
           : [],
+        reportUrl:
+          typeof msg?.data?.reportUrl === "string" && /^https?:\/\//.test(msg.data.reportUrl)
+            ? msg.data.reportUrl
+            : null,
       }
     }
   }
@@ -108,9 +115,9 @@ export async function runWebAuditCro(url: string): Promise<WebAuditCroResult> {
     const res = await fetch(`${webAuditBaseUrl()}/api/audit`, {
       method: "POST",
       headers,
-      // `sections` lets a WebAudit that supports it skip PageSpeed; older
-      // WebAudit builds ignore unknown fields.
-      body: JSON.stringify({ url, sections: ["cro"] }),
+      // `sections` lets WebAudit skip PageSpeed; `source` labels the audit it
+      // saves on its dashboard. Older WebAudit builds ignore unknown fields.
+      body: JSON.stringify({ url, sections: ["cro"], source: "qacc-full-scan" }),
       signal: controller.signal,
     })
     if (!res.ok) {

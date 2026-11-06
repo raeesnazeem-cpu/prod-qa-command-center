@@ -38,6 +38,15 @@ describe("WebAudit NDJSON reader", () => {
     expect(r.issues).toEqual(["a"])
   })
 
+  it("picks up WebAudit's saved-report link when present, else null", () => {
+    const withLink = JSON.stringify({
+      type: "complete",
+      data: { reportUrl: "https://auditarena.gogroth.com/dashboard/report?id=1-ab", report: { rawResults: { cro: { score: 75 } } } },
+    })
+    expect(parseWebAuditNdjson(withLink).reportUrl).toBe("https://auditarena.gogroth.com/dashboard/report?id=1-ab")
+    expect(parseWebAuditNdjson(complete({ score: 75 })).reportUrl).toBeNull()
+  })
+
   it("throws on an error line", () => {
     expect(() => parseWebAuditNdjson(JSON.stringify({ type: "error", message: "boom" }))).toThrow(/boom/)
   })
@@ -180,6 +189,16 @@ describe("TED report — cro_audit section", () => {
     expect(r.html).toContain("No high-impact failed checks.")
     // failed page listed first
     expect(r.html.indexOf("Score 40/100")).toBeLessThan(r.html.indexOf("Score 85/100"))
+  })
+
+  it("links the full WebAudit report when WebAudit saved it", async () => {
+    const link = "https://auditarena.gogroth.com/dashboard/report?id=9-xy"
+    const f = row("p1", "https://site.com/", 82, { reportUrl: link })
+    expect(parseCroContext(f.context_text)!.reportUrl).toBe(link)
+    const r = await render([f])
+    expect(r.html).toContain(`Full report: <a href="${link}">G99 WebAudit</a>`)
+    const noLink = await render([row("p1", "https://site.com/", 82)])
+    expect(noLink.html).not.toContain("Full report")
   })
 
   it("all pages lapsed → could not complete, with the reason", async () => {
