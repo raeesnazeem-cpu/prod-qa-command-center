@@ -374,9 +374,12 @@ export async function processStartRunJob(job: Job) {
 
     // Add jobs to queue for each page discovered
     // Standalone API checks enabled on this run (each is its own job).
-    const API_CHECKS = ["project_plan", "paid_media"]
+    // cro_audit (G99 WebAudit CRO review) is full-scan only.
+    const API_CHECKS = ["project_plan", "paid_media", "cro_audit"]
     const enabledApiChecks: string[] = (run.enabled_checks || []).filter(
-      (c: string) => API_CHECKS.includes(c),
+      (c: string) =>
+        API_CHECKS.includes(c) &&
+        (c !== "cro_audit" || run.run_type === "full_scan"),
     )
 
     if (needsPageScan && insertedPages && insertedPages.length > 0) {
@@ -443,10 +446,14 @@ export async function processStartRunJob(job: Job) {
       await qaQueue.add(
         jobName,
         { runId, projectId: run.project_id },
-        {
-          attempts: 3,
-          backoff: { type: "exponential", delay: 5000 },
-        },
+        // cro_audit retries each page itself and records "could not complete"
+        // rows; a job-level retry would just call WebAudit again for every page.
+        check === "cro_audit"
+          ? { attempts: 1 }
+          : {
+              attempts: 3,
+              backoff: { type: "exponential", delay: 5000 },
+            },
       )
       logger.info({ runId, jobName }, `Enqueued ${jobName} job successfully`)
     }

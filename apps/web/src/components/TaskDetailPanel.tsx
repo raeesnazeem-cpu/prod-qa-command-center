@@ -238,6 +238,7 @@ export const TaskDetailPanel = ({
       dead_links: "Deadlink Check",
       learn_more_buttons: "Learn more buttons check",
       paid_media: "Paid Media Check",
+      cro_audit: "CRO (Conversion Review)",
       privacy_policy: "Privacy Policy check",
       footer_logo: "Footer Logo check",
       single_script: "SingleScript Features",

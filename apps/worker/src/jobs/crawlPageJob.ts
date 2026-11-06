@@ -143,7 +143,7 @@ const HOMEPAGE_ONLY_KEYS = new Set([
   "gbp_check", "social_share_heading", "single_script", "gsr_check",
 ])
 // Standalone API checks run as their own jobs, never per page.
-const NON_PAGE_KEYS = new Set(["project_plan", "paid_media", "video_recording"])
+const NON_PAGE_KEYS = new Set(["project_plan", "paid_media", "cro_audit", "video_recording"])
 
 const sameSiteUrl = (u: string) =>
   String(u || "")
