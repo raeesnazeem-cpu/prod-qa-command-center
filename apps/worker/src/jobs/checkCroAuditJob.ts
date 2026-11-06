@@ -3,6 +3,7 @@ import pino from "pino"
 import { supabase } from "../lib/supabase"
 import { runWebAuditCro, WebAuditCroResult, webAuditBaseUrl } from "../lib/webAuditClient"
 import { CRO_PASS_SCORE, croBand, formatCroContext, highImpactFailed } from "../lib/croReport"
+import { recordTiming } from "../lib/timingCollector"
 
 // CRO (conversion) check — FULL SCAN ONLY, scan only (no fix).
 //
@@ -150,11 +151,14 @@ export async function processCheckCroAuditJob(job: Job) {
     const page = targets[i]
     await broadcast(`CRO check ${i + 1}/${targets.length}: ${page.url}`)
     let findings: any[]
+    const started = Date.now()
     try {
       const cro = await auditWithRetry(page.url)
       findings = [croFindingFor(page.url, cro)]
+      recordTiming(runId, CRO_CHECK, page.url, Date.now() - started)
       logger.info({ runId, url: page.url, score: cro.score }, "CRO page done")
     } catch (e: any) {
+      recordTiming(runId, CRO_CHECK, page.url, Date.now() - started, false)
       logger.error({ runId, url: page.url, error: e?.message }, "CRO page could not complete")
       findings = [lapseFinding(e?.message || String(e))]
     }

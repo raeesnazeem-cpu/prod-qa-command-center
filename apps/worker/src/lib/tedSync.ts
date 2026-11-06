@@ -1531,6 +1531,8 @@ export async function renderCheckSectionHtml(
           rep.failedChecks.map((c) => `${c.impact ? `[${c.impact}] ` : ""}${c.name}${c.fix ? ` — ${c.fix}` : ""}`),
         )}`
       else html += `<p><small>No high-impact failed checks.</small></p>`
+      if (rep.reportUrl)
+        html += `<p><small>Full report: <a href="${esc(rep.reportUrl)}">G99 WebAudit</a></small></p>`
     }
     if (lapsed.length)
       html += `<p><small>Could not check ${lapsed.length} page${lapsed.length > 1 ? "s" : ""}: ${lapsed

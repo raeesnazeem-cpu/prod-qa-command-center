@@ -7,6 +7,7 @@ import { parseWebAuditNdjson, WebAuditCroResult } from "../../lib/webAuditClient
 import { croFindingFor, pickCroPages } from "../checkCroAuditJob"
 import { croBand, formatCroContext, parseCroContext } from "../../lib/croReport"
 import { renderCheckSectionHtml, FRIENDLY } from "../../lib/tedSync"
+import { croSiteAuditMessage } from "../../lib/runResults"
 
 const cro = (over: Partial<WebAuditCroResult> = {}): WebAuditCroResult => ({
   score: 50,
@@ -36,6 +37,15 @@ describe("WebAudit NDJSON reader", () => {
     expect(r.score).toBe(61)
     expect(r.checks).toHaveLength(1)
     expect(r.issues).toEqual(["a"])
+  })
+
+  it("picks up WebAudit's saved-report link when present, else null", () => {
+    const withLink = JSON.stringify({
+      type: "complete",
+      data: { reportUrl: "https://auditarena.gogroth.com/dashboard/report?id=1-ab", report: { rawResults: { cro: { score: 75 } } } },
+    })
+    expect(parseWebAuditNdjson(withLink).reportUrl).toBe("https://auditarena.gogroth.com/dashboard/report?id=1-ab")
+    expect(parseWebAuditNdjson(complete({ score: 75 })).reportUrl).toBeNull()
   })
 
   it("throws on an error line", () => {
@@ -182,6 +192,16 @@ describe("TED report — cro_audit section", () => {
     expect(r.html.indexOf("Score 40/100")).toBeLessThan(r.html.indexOf("Score 85/100"))
   })
 
+  it("links the full WebAudit report when WebAudit saved it", async () => {
+    const link = "https://auditarena.gogroth.com/dashboard/report?id=9-xy"
+    const f = row("p1", "https://site.com/", 82, { reportUrl: link })
+    expect(parseCroContext(f.context_text)!.reportUrl).toBe(link)
+    const r = await render([f])
+    expect(r.html).toContain(`Full report: <a href="${link}">G99 WebAudit</a>`)
+    const noLink = await render([row("p1", "https://site.com/", 82)])
+    expect(noLink.html).not.toContain("Full report")
+  })
+
   it("all pages lapsed → could not complete, with the reason", async () => {
     const lapse = {
       id: "l1", page_id: "p1", check_factor: "cro_audit", title: "Check Failed",
@@ -202,5 +222,40 @@ describe("TED report — cro_audit section", () => {
     expect(r.status).toBe("passed")
     expect(r.html).toContain("Score 91/100 (Excellent)")
     expect(r.html).toContain("Could not check 1 page")
+  })
+})
+
+describe("TED Site Audit message (run_check_results.message) for cro_audit", () => {
+  const urls = new Map([["p1", "https://site.com/"], ["p2", "https://site.com/contact"]])
+  const r = (pageId: string, url: string, score: number, over: Partial<WebAuditCroResult> = {}) => ({
+    ...croFindingFor(url, cro({ score, ...over })),
+    page_id: pageId,
+  })
+
+  it("a pass carries score, issues, fixes and failed checks — not a bare 'passed'", () => {
+    const msg = croSiteAuditMessage([r("p1", "https://site.com/", 82, { reportUrl: "https://wa.test/r?id=1" })], urls)!
+    expect(msg).toContain("✅ https://site.com/ — Score 82/100 (Average)")
+    expect(msg).toContain("Issues found:\n• Hero has no clear call to action.")
+    expect(msg).toContain("Fixes recommended:\n• Add a 'Book a consultation' button above the fold.")
+    expect(msg).toContain("• [critical] Primary CTA above the fold — Add a CTA in the hero.")
+    expect(msg).toContain("Full report: https://wa.test/r?id=1")
+  })
+
+  it("Poor pages come first; lapsed pages are counted", () => {
+    const lapse = {
+      page_id: "p2", check_factor: "cro_audit", title: "Check Failed",
+      description: "The cro_audit check encountered an unexpected error: x. Process aborted gracefully.",
+    }
+    const msg = croSiteAuditMessage(
+      [r("p1", "https://site.com/", 85), r("p2", "https://site.com/contact", 40, { checks: [] }), lapse],
+      urls,
+    )!
+    expect(msg.indexOf("Score 40/100 (Poor)")).toBeLessThan(msg.indexOf("Score 85/100"))
+    expect(msg).toContain("High-impact failed checks: none")
+    expect(msg).toContain("Could not check 1 page.")
+  })
+
+  it("only lapses → null (the caller writes 'Could not complete')", () => {
+    expect(croSiteAuditMessage([{ check_factor: "cro_audit", title: "Check Failed", description: "x encountered an unexpected error" }], urls)).toBeNull()
   })
 })

@@ -15,6 +15,7 @@ import { supabase } from "./supabase"
 import { getRunTimings, getAiFixTimings } from "./timingCollector"
 import { aiLapseBlocksPass, aiLapseSummary } from "@qacc/shared"
 import { FRIENDLY, isRealDefect, isToolLapseFinding } from "./tedSync"
+import { parseCroContext } from "./croReport"
 
 const logger = {
   warn: (obj: any, msg: string) => console.warn(msg, obj),
@@ -31,6 +32,43 @@ const logger = {
 const NO_ROW_MESSAGE: Record<string, string> = {
   image_relevance: "Could not complete: no service pages were identified in this scan",
   blog_sidebar: "Could not complete: no blog post pages were found in this scan",
+  // CRO always writes one row per checked page (result or "could not complete"),
+  // so no row means the CRO job never ran for this scan.
+  cro_audit: "Could not complete: no CRO result was recorded for this scan",
+}
+
+/**
+ * CRO's message for TED's Site Audit page: every checked page with its score,
+ * then the issues found, fixes recommended and high-impact failed checks — for
+ * a pass too. TED shows `message` as the check's text, so this is where the
+ * WebAudit detail has to live. Exported for tests.
+ */
+export function croSiteAuditMessage(group: any[], urlById: Map<string, string>): string | null {
+  const pages = group
+    .filter((f) => !isToolLapseFinding(f))
+    .map((f) => ({ f, rep: parseCroContext(f.context_text) }))
+    .filter((p) => p.rep)
+  if (pages.length === 0) return null
+  // Poor (failed) pages first.
+  pages.sort((a, b) => Number(isRealDefect(b.f)) - Number(isRealDefect(a.f)))
+  const out: string[] = []
+  for (const { f, rep } of pages) {
+    const r = rep!
+    const url = urlById.get(f.page_id) || r.url
+    out.push(`${isRealDefect(f) ? "❌" : "✅"} ${url} — Score ${r.score}/100 (${r.band})`)
+    if (r.issues.length) out.push("Issues found:", ...r.issues.map((s) => `• ${s}`))
+    if (r.fixes.length) out.push("Fixes recommended:", ...r.fixes.map((s) => `• ${s}`))
+    out.push(
+      ...(r.failedChecks.length
+        ? ["High-impact failed checks:", ...r.failedChecks.map((c) => `• [${c.impact}] ${c.name}${c.fix ? ` — ${c.fix}` : ""}`)]
+        : ["High-impact failed checks: none"]),
+    )
+    if (r.reportUrl) out.push(`Full report: ${r.reportUrl}`)
+    out.push("")
+  }
+  const lapsed = group.filter(isToolLapseFinding).length
+  if (lapsed) out.push(`Could not check ${lapsed} page${lapsed > 1 ? "s" : ""}.`)
+  return out.join("\n").trim()
 }
 
 export async function persistScanCheckResults(runId: string): Promise<void> {
@@ -44,7 +82,7 @@ export async function persistScanCheckResults(runId: string): Promise<void> {
 
     const { data: findings } = await supabase
       .from("findings")
-      .select("check_factor, title, description, screenshot_url, severity, page_id")
+      .select("check_factor, title, description, context_text, screenshot_url, severity, page_id")
       .eq("run_id", runId)
 
     const { data: pages } = await supabase
@@ -85,6 +123,30 @@ export async function persistScanCheckResults(runId: string): Promise<void> {
       else status = "passed"
 
       const first = real[0] || null
+      if (factor === "cro_audit") {
+        const lapseWhy = String(lapses[0]?.description || "")
+          .replace(/^The cro_audit check encountered an unexpected error:\s*/i, "")
+          .replace(/\.?\s*Process aborted gracefully\.?$/i, "")
+          .trim()
+        rows.push({
+          run_id: runId,
+          phase: "scan",
+          check_factor: factor,
+          label: FRIENDLY[factor] || factor,
+          status,
+          duration_ms: durByCheck.get(factor) ?? null,
+          message:
+            status !== "errored"
+              ? croSiteAuditMessage(group, urlById)
+              : group.length === 0
+                ? NO_ROW_MESSAGE.cro_audit
+                : `Could not complete: ${lapseWhy || "G99 WebAudit did not return a result"}`,
+          page_url: urlById.get((first || group[0])?.page_id) || null,
+          screenshot_url: null,
+          severity: first ? first.severity || null : null,
+        })
+        continue
+      }
       rows.push({
         run_id: runId,
         phase: "scan",
