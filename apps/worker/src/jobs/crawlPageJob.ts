@@ -41,6 +41,7 @@ import { gapKeysByScope } from "@qacc/shared"
 import { checkPageGaps } from "../checks/gaps/pageGapsCheck"
 import { checkResponsiveGaps, RESPONSIVE_KEYS } from "../checks/gaps/responsiveGapsCheck"
 import { checkHomepageGaps, HOMEPAGE_KEYS } from "../checks/gaps/homepageGapsCheck"
+import { checkVisionGaps, VISION_KEYS, releaseVisionBudget } from "../checks/gaps/visionGapsCheck"
 import { runSiteConsistencyChecks } from "../checks/gaps/siteConsistencyCheck"
 import { releaseFacts, sweepFacts } from "../checks/gaps/factsStore"
 import { checkGbp } from "../checks/gbpCheck"
@@ -147,6 +148,7 @@ const GAP_RUN_KEYS = gapKeysByScope("run")
 // Checks that only run on the homepage (see the HOMEPAGE-ONLY block below).
 const HOMEPAGE_ONLY_KEYS = new Set([
   ...gapKeysByScope("homepage"),
+  "logo_visibility", // vision scope, but judged on the homepage only
   "hero_media", "privacy_policy", "footer_logo", "hamburger_menu", "blog_verification",
   "top_bar_sticky", "favicon", "chatbot_consultation", "logo_chatbot", "text_share",
   "callnow_links", "url_tab_compare", "verify_plugin_updates", "plugin_number",
@@ -636,6 +638,14 @@ export async function processCrawlPageJob(job: Job) {
             checkResponsiveGaps(pageUrl, runId, browser, gapEnabled, homeForGaps).catch((e) => {
               logger.error("QA-gap responsive checks failed:", e)
               return RESPONSIVE_KEYS.filter((k) => gapEnabled.has(k) && k !== "mobile_order").flatMap((k) => lapse(k)(e))
+            }),
+          )
+        }
+        if (VISION_KEYS.some((k) => gapEnabled.has(k))) {
+          schedule("qa_gaps_vision", () =>
+            checkVisionGaps(pageUrl, runId, pageId, browser, gapEnabled, homeForGaps).catch((e) => {
+              logger.error("QA-gap vision checks failed:", e)
+              return VISION_KEYS.filter((k) => gapEnabled.has(k)).flatMap((k) => lapse(k)(e))
             }),
           )
         }
@@ -1723,6 +1733,7 @@ async function runGapSiteChecks(runId: string): Promise<void> {
     }
   } finally {
     releaseFacts(runId)
+    releaseVisionBudget(runId)
   }
 }
 
