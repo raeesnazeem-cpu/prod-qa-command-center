@@ -8,4 +8,4 @@ export * from './schemas/finding.schema';
 export * from './findingVerdict';
 export * from './gsrVerdict';
 export * from './gapChecks';
-export * from './checkLabels';
+export * from './displayNames';
