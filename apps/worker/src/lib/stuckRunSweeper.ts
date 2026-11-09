@@ -34,7 +34,8 @@ import { qaQueue } from "./queue"
 import { releaseRunSlot } from "./runSlot"
 import { persistScanCheckResults } from "./runResults"
 import { persistRunReport } from "./runReport"
-import { postFinalReportToTED } from "./tedSync"
+import { postFinalReportToTED, postTedComment } from "./tedSync"
+import { logRunEvent } from "./runEvents"
 import pino from "pino"
 
 const logger = pino({
@@ -113,6 +114,54 @@ async function failOrphanedPages(
   return true
 }
 
+// The run's last "running" step in run_events (what it was doing when it stopped).
+async function lastRunningStep(runId: string): Promise<string> {
+  try {
+    const { data } = await supabase
+      .from("run_events")
+      .select("message")
+      .eq("run_id", runId)
+      .eq("status", "running")
+      .order("at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    return (data as any)?.message || "checking pages"
+  } catch {
+    return "checking pages"
+  }
+}
+
+// An orphaned run lost its worker jobs: log it and tell the TED task, so the
+// stop is never silent. The sweeper still completes the run with what finished.
+async function reportStoppedRun(run: { id: string; ted_task_id?: string | null; updated_at?: string | null }) {
+  try {
+    await reportStoppedRunInner(run)
+  } catch (e: any) {
+    logger.warn({ runId: run.id, error: e?.message }, "stuck-run sweep: could not report the stopped run")
+  }
+}
+
+async function reportStoppedRunInner(run: { id: string; ted_task_id?: string | null; updated_at?: string | null }) {
+  const mins = Math.round((Date.now() - new Date(run.updated_at ?? 0).getTime()) / 60_000)
+  const step = await lastRunningStep(run.id)
+  await logRunEvent({
+    runId: run.id,
+    tedTaskId: run.ted_task_id,
+    kind: "run.failed",
+    status: "failed",
+    message: `Stopped at "${step}" (no progress for ${mins} min); unfinished pages marked failed`,
+    detail: { idleMinutes: mins, step },
+  })
+  if (run.ted_task_id) {
+    await postTedComment(
+      String(run.ted_task_id),
+      `<p>⚠️ <strong>Test run stopped</strong> at "${step}" (no progress for ${mins} min). Results for the pages that finished follow. Trigger again to retry.</p>`,
+      `ext:qacc-run-stopped-${run.id}`,
+      { runId: run.id },
+    ).catch(() => {})
+  }
+}
+
 let timer: NodeJS.Timeout | null = null
 
 export async function sweepOnce(): Promise<void> {
@@ -150,11 +199,10 @@ export async function sweepOnce(): Promise<void> {
         continue
       }
       // Not all pages terminal: a live mid-scan run, unless it is orphaned.
-      if (
-        (doneCount ?? 0) < (run.pages_total ?? 0) &&
-        !(await failOrphanedPages(run, live))
-      )
-        continue
+      if ((doneCount ?? 0) < (run.pages_total ?? 0)) {
+        if (!(await failOrphanedPages(run, live))) continue
+        await reportStoppedRun(run)
+      }
 
       // Atomic, status-guarded complete. `true` only if THIS call won the flip.
       const { data: won, error: rErr } = await supabase.rpc(

@@ -1,4 +1,5 @@
 import { supabase } from "./supabase"
+import { logRunEvent } from "./runEvents"
 import { GAP_LABELS, GAP_NOT_FIXED } from "@qacc/shared"
 import { getClientDomain } from "./tedClient"
 import { qaQueue } from "./queue"
@@ -268,6 +269,8 @@ export async function postTedComment(
           body: JSON.stringify({
             text: clientText,
             eventKey,
+            // TED shows the comment as "TED QA Agent" (older TED ignores it).
+            agentName: "TED QA Agent",
             ...(ctx.aiAssigned === true ? { aiAssigned: true } : {}),
           }),
         },
@@ -548,6 +551,13 @@ export async function markAllTedTasksCompleted(
     // queued run can start while this run's TED closeout finishes. Idempotent
     // and best-effort; the staleness backstop covers any missed release.
     await releaseRunSlot(runId)
+    await logRunEvent({
+      runId,
+      tedTaskId: parentTaskId || null,
+      kind: "run.done",
+      status: "ok",
+      message: "Run finished · TED tasks being closed",
+    })
 
     const { data: run } = await supabase
       .from("qa_runs")

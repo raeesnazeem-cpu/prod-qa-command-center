@@ -7,6 +7,7 @@ import * as activityService from "../services/activityService"
 import { wpPasswordCache } from "../lib/credentialsCache"
 import { resolveThemeType } from "../lib/themeType"
 import { postTedComment } from "../lib/tedSync"
+import { logRunEvent, checkLabel } from "../lib/runEvents"
 import { acquireRunSlot, releaseRunSlot } from "../lib/runSlot"
 import { armReportGate } from "../lib/reportGate"
 import { resetAiBreakers } from "../lib/aiFallback"
@@ -78,6 +79,16 @@ export async function processStartRunJob(job: Job) {
       "Another QA run is already in progress; deferring this run and retrying.",
     )
     await qaQueue.add("start_run", job.data, { delay: delayMs })
+    if (!job.data.slotWaitLogged) {
+      job.data.slotWaitLogged = true
+      await logRunEvent({
+        runId,
+        tedTaskId: run.ted_task_id,
+        kind: "run.waiting_slot",
+        status: "running",
+        message: "Waiting for another QA run to finish (one run at a time)",
+      })
+    }
     return
   }
 
@@ -96,6 +107,14 @@ export async function processStartRunJob(job: Job) {
       "Failed to update run status to running",
     )
   }
+  await logRunEvent({
+    runId,
+    tedTaskId: run.ted_task_id,
+    kind: "run.started",
+    status: "ok",
+    message: "Worker started the run",
+    detail: { checks: (run.enabled_checks || []).map((c: string) => checkLabel(c)), siteUrl: run.site_url },
+  })
 
   // If this run carries a video-recording subtask, tell it up front that it is
   // deliberately waiting: recording is the final verification step and runs only
@@ -306,6 +325,13 @@ export async function processStartRunJob(job: Job) {
     // if (urls.length > 0) urls = pickDemoPages(urls, run.site_url)
 
     logger.info({ runId, count: urls.length }, "URL collection complete")
+    await logRunEvent({
+      runId,
+      kind: "pages.found",
+      status: "ok",
+      message: `Found ${urls.length} page${urls.length === 1 ? "" : "s"} to check`,
+      detail: { pages: urls.length },
+    })
 
     // Step 4: Update run.pages_total with URL count
     const { error: totalError } = await supabase
@@ -442,6 +468,13 @@ export async function processStartRunJob(job: Job) {
       })
 
       await qaQueue.addBulk(jobs)
+      await logRunEvent({
+        runId,
+        kind: "checks.running",
+        status: "running",
+        message: `Running ${(run.enabled_checks || []).length} checks on ${insertedPages.length} pages`,
+        detail: { checks: run.enabled_checks || [], pages: insertedPages.length },
+      })
       logger.info(
         { runId, jobCount: jobs.length },
         "Enqueued scan jobs successfully",
@@ -467,6 +500,21 @@ export async function processStartRunJob(job: Job) {
     }
   } catch (error: any) {
     logger.error({ runId, error: error.message }, "Error during sitemap crawl")
+    await logRunEvent({
+      runId,
+      tedTaskId: run.ted_task_id,
+      kind: "run.failed",
+      status: "failed",
+      message: `Run failed while collecting pages: ${String(error?.message || error).slice(0, 200)}`,
+    })
+    if (run.ted_task_id) {
+      await postTedComment(
+        String(run.ted_task_id),
+        `<p>❌ <strong>Test run failed</strong> while collecting the site's pages: ${escapeHtml(String(error?.message || error).slice(0, 300))}</p><p>To fix: check that ${escapeHtml(String(run.site_url || "the site"))} loads, then press Trigger manually again.</p>`,
+        `ext:qacc-run-failed-${runId}`,
+        { runId, projectId: run.project_id },
+      ).catch(() => {})
+    }
 
     // The run failed before it could reach the normal completion path, so free
     // the global run slot here — otherwise it would stay held until it goes
@@ -557,4 +605,8 @@ function pickDemoPages(urls: string[], siteUrl: string): string[] {
   // No backfill: 2 is the max, not a quota. If contact didn't match, the run
   // stays at just the homepage rather than padding with an arbitrary page.
   return out.slice(0, DEMO_PAGE_LIMIT)
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
 }
