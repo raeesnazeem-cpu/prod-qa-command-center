@@ -233,6 +233,13 @@ export async function processStartRunJob(job: Job) {
       "review_reputation_check",
       "gbp_check",
       "blog_verification",
+      // Run in crawlPageJob's homepage block too. Without them a run whose only
+      // checks are these (a single post-release subtask, e.g. "Cross verify the
+      // live site link") enqueued no page job and stayed "running" forever.
+      "hamburger_menu",
+      "plugin_number",
+      "live_site_link",
+      "page_speed",
     ]
 
     // NOTE: video_recording is intentionally NOT a page check. It is a
