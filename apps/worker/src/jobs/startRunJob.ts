@@ -192,6 +192,7 @@ export async function processStartRunJob(job: Job) {
       ...gapKeysByScope("responsive"),
       ...gapKeysByScope("run"),
       ...gapKeysByScope("vision"),
+      ...gapKeysByScope("keypage"),
     ]
 
     const HOMEPAGE_ONLY_CHECKS = [

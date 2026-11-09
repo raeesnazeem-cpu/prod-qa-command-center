@@ -42,6 +42,7 @@ import { checkPageGaps } from "../checks/gaps/pageGapsCheck"
 import { checkResponsiveGaps, RESPONSIVE_KEYS } from "../checks/gaps/responsiveGapsCheck"
 import { checkHomepageGaps, HOMEPAGE_KEYS } from "../checks/gaps/homepageGapsCheck"
 import { checkVisionGaps, VISION_KEYS, releaseVisionBudget } from "../checks/gaps/visionGapsCheck"
+import { checkSafariLayoutDiff, SAFARI_DIFF_KEY, releaseSafariDiffBudget } from "../checks/gaps/safariLayoutDiffCheck"
 import { runSiteConsistencyChecks } from "../checks/gaps/siteConsistencyCheck"
 import { releaseFacts, sweepFacts } from "../checks/gaps/factsStore"
 import { checkGbp } from "../checks/gbpCheck"
@@ -157,7 +158,9 @@ const HOMEPAGE_ONLY_KEYS = new Set([
 ])
 // Standalone API checks run as their own jobs, never per page.
 // Run-level gap checks (judged once at run end) are not per page either.
-const NON_PAGE_KEYS = new Set(["project_plan", "paid_media", "cro_audit", "video_recording", ...GAP_RUN_KEYS])
+// safari_layout_diff only runs on a few key pages, so an unreadable inner page
+// must not get a "could not complete" row for it.
+const NON_PAGE_KEYS = new Set(["project_plan", "paid_media", "cro_audit", "video_recording", ...GAP_RUN_KEYS, "safari_layout_diff"])
 
 const sameSiteUrl = (u: string) =>
   String(u || "")
@@ -646,6 +649,15 @@ export async function processCrawlPageJob(job: Job) {
             checkVisionGaps(pageUrl, runId, pageId, browser, gapEnabled, homeForGaps).catch((e) => {
               logger.error("QA-gap vision checks failed:", e)
               return VISION_KEYS.filter((k) => gapEnabled.has(k)).flatMap((k) => lapse(k)(e))
+            }),
+          )
+        }
+        if (gapEnabled.has(SAFARI_DIFF_KEY)) {
+          // Key pages only (home, contact, about, services); the check decides.
+          schedule("qa_gaps_safari_diff", () =>
+            checkSafariLayoutDiff(pageUrl, run.site_url, runId, pageId, browser).catch((e) => {
+              logger.error("Safari layout diff failed:", e)
+              return lapse(SAFARI_DIFF_KEY)(e)
             }),
           )
         }
@@ -1734,6 +1746,7 @@ async function runGapSiteChecks(runId: string): Promise<void> {
   } finally {
     releaseFacts(runId)
     releaseVisionBudget(runId)
+    releaseSafariDiffBudget(runId)
   }
 }
 
