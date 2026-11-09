@@ -44,17 +44,23 @@ export function buildRunProgress(
   const doneFromEvents = new Set(
     events.filter((e) => e.kind === "check.done").map((e) => String(e.detail?.check || e.message)),
   )
-  const failedFromEvents = new Set(
-    events
-      .filter((e) => e.kind === "check.done" && (e.status === "failed" || e.detail?.passed === false))
-      .map((e) => String(e.detail?.check || e.message)),
-  )
+  // "Failed" means the check ran and found a problem. A check that could not complete
+  // (errored) is counted apart: the report shows it as "could not run", not as a failure.
+  const outcomeOf = (e: RunEventRow): "failed" | "errored" | "passed" => {
+    const st = String(e.detail?.status || "")
+    if (st === "errored") return "errored"
+    if (st === "failed" || (e.detail?.passed === false && st !== "errored")) return "failed"
+    return e.status === "failed" && !st ? "failed" : "passed"
+  }
+  const checkDone = events.filter((e) => e.kind === "check.done")
+  const failedFromEvents = new Set(checkDone.filter((e) => outcomeOf(e) === "failed").map((e) => String(e.detail?.check || e.message)))
+  const erroredFromEvents = new Set(checkDone.filter((e) => outcomeOf(e) === "errored").map((e) => String(e.detail?.check || e.message)))
   const scanResults = checkResults.filter((c) => c)
-  const failedFromResults = new Set(
-    scanResults.filter((c) => c.status === "failed" || c.status === "errored").map((c) => c.check_factor),
-  )
+  const failedFromResults = new Set(scanResults.filter((c) => c.status === "failed").map((c) => c.check_factor))
+  const erroredFromResults = new Set(scanResults.filter((c) => c.status === "errored").map((c) => c.check_factor))
   const checksDone = Math.max(doneFromEvents.size, scanResults.length)
   const failedChecks = Math.max(failedFromEvents.size, failedFromResults.size)
+  const erroredChecks = Math.max(erroredFromEvents.size, erroredFromResults.size)
 
   const last = events.length ? events[events.length - 1] : null
   const lastEventAt = last ? last.at : null
@@ -81,6 +87,7 @@ export function buildRunProgress(
     checksTotal: enabled.length,
     checksDone: Math.min(checksDone, enabled.length || checksDone),
     failedChecks,
+    erroredChecks,
     pagesProcessed: run.pages_processed ?? 0,
     pagesTotal: run.pages_total ?? 0,
     issuesFound,

@@ -62,7 +62,8 @@ describe("buildRunProgress", () => {
     expect(p.status).toBe("completed")
     expect(p.currentStep).toBe("Finished")
     expect(p.checksDone).toBe(3)
-    expect(p.failedChecks).toBe(2)
+    expect(p.failedChecks).toBe(1)
+    expect(p.erroredChecks).toBe(1)
     expect(p.stuck).toBe(false)
   })
 
@@ -79,6 +80,21 @@ describe("buildRunProgress", () => {
     )
     expect(p.checksDone).toBe(2)
     expect(p.failedChecks).toBe(1)
+  })
+
+  it("a check that could not complete is not a failure", () => {
+    const p = buildRunProgress(
+      run(),
+      [
+        ev("2026-11-09T12:31:00Z", "check.done", "failed", "Booking Links · could not complete", { check: "booking_links", passed: false, status: "errored" }),
+        ev("2026-11-09T12:31:01Z", "check.done", "ok", "GSR · passed", { check: "gsr", passed: true, status: "passed" }),
+      ],
+      [],
+      0,
+      NOW,
+    )
+    expect(p.failedChecks).toBe(0)
+    expect(p.erroredChecks).toBe(1)
   })
 })
 
