@@ -9,7 +9,8 @@
  * Read-only: only GET requests. No writes.
  */
 
-const TED_BASE = "https://ted.growth99.com/api"
+// TED_API_BASE points a local worker at a local TED; production leaves it unset.
+export const TED_BASE = `${(process.env.TED_API_BASE || "https://ted.growth99.com").replace(/\/+$/, "")}/api`
 
 /** Strip HTML/entities to plain text (mirrors the API-side notes parser). */
 export function stripHtml(html: string | null | undefined): string {

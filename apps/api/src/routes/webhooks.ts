@@ -11,6 +11,13 @@ import { getCheckBreakdown } from "../lib/runCheckBreakdown"
 import { nonGrowth99Checks } from "../lib/fullScanChecks"
 import { isSubtaskEvent } from "../lib/tedSubtaskEvent"
 import {
+  logRunEvent,
+  TriggerTracker,
+  couldNotStartText,
+  startedText,
+} from "../lib/runEvents"
+import { buildRunProgress, pickLatestRun, NOT_STARTED_KINDS } from "../lib/runProgress"
+import {
   tedGetJson,
   getTedClientProfile,
   findTaskIdByTemplateKey,
@@ -20,6 +27,7 @@ import {
 
 const execFileAsync = promisify(execFile)
 
+import { TED_BASE } from "../lib/tedApi"
 export const webhookRouter: Router = Router()
 
 // =====================================================================
@@ -93,6 +101,19 @@ const NO_BETA_URL_REASON =
   "No beta site url found on the TED client page. Scanning cancelled as there is no site Url to scan."
 const NO_LIVE_URL_REASON =
   "No live/released site url found from the release task. Scanning cancelled as there is no site Url to scan."
+
+// Name TED shows on QACC's comments (sent to /comments/ai as agentName).
+const TED_QA_AGENT_NAME = "TED QA Agent"
+
+// "To fix" lines for the could-not-start comments (see TriggerTracker).
+const FIX_NO_BETA_URL = "add the Beta site URL on the TED client page, then press Trigger manually again."
+const FIX_NO_LIVE_URL =
+  "put the released URL on the \"Complete website security and release\" task or the Website URL on the TED client page, then press Trigger manually again."
+const FIX_RETRY = "press Trigger manually again. If it fails again, tell the QACC owner."
+const FIX_NO_CLIENT = "make sure the task is linked to a client in TED, then press Trigger manually again."
+const FIX_NO_ORG = "ask the QACC owner to check the QACC organisation setup, then press Trigger manually again."
+const fixNoProject = (clientId: unknown) =>
+  `create the project in QACC${clientId != null && clientId !== "" ? ` with TED client id ${clientId}` : ""}, then press Trigger manually again.`
 
 // Create a VISIBLE `failed` run when a scan can't proceed for lack of a site URL.
 // This replaces the old silent fallback: instead of scanning a local demo site,
@@ -563,7 +584,7 @@ async function postTedComment(
   if (xApiKey) {
     try {
       const r = await fetch(
-        `https://ted.growth99.com/api/tasks/${taskId}/comments/ai`,
+        `${TED_BASE}/api/tasks/${taskId}/comments/ai`,
         {
           method: "POST",
           headers: {
@@ -571,7 +592,8 @@ async function postTedComment(
             Accept: "application/json",
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ text, eventKey }),
+          // agentName: TED shows the comment as "TED QA Agent" (older TED ignores it).
+          body: JSON.stringify({ text, eventKey, agentName: TED_QA_AGENT_NAME }),
         },
       )
       if (isJsonOk(r)) {
@@ -601,7 +623,7 @@ async function postTedComment(
   }
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${taskId}/comments`,
+      `${TED_BASE}/api/tasks/${taskId}/comments`,
       {
         method: "POST",
         headers: {
@@ -625,6 +647,25 @@ async function postTedComment(
     console.error(`❌ Error posting comment to TED #${taskId} via /comments:`, err)
     return false
   }
+}
+
+// A trigger QACC acted on but that started no run: tell the TED task why and
+// how to fix it (once). Replaces the old generic "received ... ✅" comments,
+// which were posted even when nothing ran.
+async function reportCouldNotStart(tr: TriggerTracker): Promise<void> {
+  if (!tr.needsCouldNotStartComment()) return
+  tr.commented = true
+  const ok = await postTedComment(
+    tr.tedTaskId as string,
+    couldNotStartText(tr.reason as string, tr.fix || FIX_RETRY),
+    `ext:qacc-notstarted-${tr.flow}-${tr.tedTaskId}-${Date.now()}`,
+    tr.runId,
+  ).catch(() => false)
+  await tr.step(
+    ok ? "report.posted" : "report.failed",
+    ok ? "ok" : "failed",
+    ok ? "Could-not-start comment posted to TED" : "Could not post the could-not-start comment to TED",
+  )
 }
 
 webhookRouter.post("/clerk", async (req: Request, res: Response) => {
@@ -961,6 +1002,10 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
   // where it came from). Hoisted so the talk-back block, outside if(clientName),
   // can include it. Empty until a scan actually starts.
   let scanStartNote = ""
+  // Outcome of this trigger for TED (started / duplicate / not_started) + run log.
+  const tr = new TriggerTracker("pre-release")
+  // "Test run started …" text, set only once a run really started.
+  let startCommentText = ""
 
   try {
     // 1. Handle the body safely depending on how Express parsed it
@@ -1124,6 +1169,11 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             : "✅ release.pre_dev is Complete! Triggering QACC pre-release workflow...",
         )
         console.log("Task Data:", task)
+        await tr.received(actionableTaskId, {
+          manual: isManual,
+          templateKey: task.templateKey,
+          status: task.status,
+        })
 
         // The release.qa_pre task QACC routes results back to, and the
         // { check_factor: [subtaskId, ...] } map for its checklist subtasks.
@@ -1136,6 +1186,9 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
         let preReleaseSubtaskMap: Record<string, string[]> = {}
 
         // --- MATCH PROJECT & START QA RUN ---
+        if (!clientName) {
+          await tr.fail("project.missing", "TED did not send a client for this task.", FIX_NO_CLIENT)
+        }
         if (clientName) {
           console.log(
             `🔍 Looking up QACC project matching name: "${clientName}"`,
@@ -1195,6 +1248,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
 
           // 1. Resolve the QACC project — ID-first (ted_client_id), name
           //    fallback with backfill. See findProjectByTedClient.
+          tr.setTask(preReleaseTaskId)
           let project = await findProjectByTedClient(task.clientId, clientName)
 
           if (!project) {
@@ -1252,6 +1306,19 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 )
               }
             }
+          }
+
+          if (!project) {
+            await tr.fail(
+              "project.missing",
+              `There is no QACC project for ${clientName} and QACC could not create one.`,
+              FIX_NO_ORG,
+            )
+          } else {
+            await tr.step("project.found", "ok", `Project found: ${project.name}`, {
+              projectId: project.id,
+              tedClientId: task.clientId ?? null,
+            })
           }
 
           if (project) {
@@ -1368,7 +1435,7 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 isForcedTrigger(payload),
               )
               if (blocking)
-                return skipDuplicateTrigger(res, String(preReleaseTaskId), blocking, "pre-release")
+                return skipDuplicateTrigger(res, String(preReleaseTaskId), blocking, "pre-release", tr)
             }
 
             // 3. No beta site URL resolved → do NOT scan. Record a visible
@@ -1386,20 +1453,17 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 reason: NO_BETA_URL_REASON,
                 deviceMatrix: ["desktop", "mobile"],
               })
-              if (preReleaseTaskId && process.env.TED_API_TOKEN) {
-                await postTedComment(
-                  preReleaseTaskId,
-                  NO_BETA_URL_REASON,
-                  `ext:qacc-prerelease-cancelled-${preReleaseTaskId}`,
-                  abortedRunId,
-                )
-              }
+              await tr.fail("url.missing", NO_BETA_URL_REASON, FIX_NO_BETA_URL, abortedRunId)
               console.log(
                 `🛑 Pre-release scan cancelled for "${project.name}" — no beta site URL.`,
               )
             } else {
             // Provenance for the scan-start comment: which URL + where from.
             scanStartNote = `\n\nScanning beta site ${tedSiteUrl} (beta site URL obtained from ${tedSiteSource}).`
+            await tr.step("url.found", "ok", `Site URL: ${tedSiteUrl} (from ${tedSiteSource})`, {
+              url: tedSiteUrl,
+              source: tedSiteSource,
+            })
             // 3. Create the new QA Run in the database
             const { data: run, error: runError } = await supabase
               .from("qa_runs")
@@ -1430,8 +1494,11 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
               .select()
               .single()
 
-            if (runError) {
+            if (runError || !run) {
               console.error("❌ Failed to create QA Run in database:", runError)
+              await tr.fail("run.create_failed", "QACC could not save the test run.", FIX_RETRY, null, {
+                error: String(runError?.message || runError || "no row"),
+              })
             } else if (run) {
               createdRunId = run.id
               console.log(
@@ -1441,6 +1508,8 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                 // 4. Add the run to BullMQ so the worker starts scanning the site immediately
                 const { addRunJob } = require("../lib/queue")
                 await addRunJob(run.id)
+                await tr.started(run.id, { checks: preReleaseChecks, url: tedSiteUrl })
+                startCommentText = startedText(tedSiteUrl, tedSiteSource || "", preReleaseChecks, run.id)
                 console.log(
                   `✅ Automated QA Run for ${project.name} is now officially STARTING in the background!`,
                 )
@@ -1449,6 +1518,10 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
                   "❌ Failed to add QA run to worker queue:",
                   queueErr,
                 )
+                await tr.fail("run.queue_failed", "QACC saved the run but could not queue it for the worker.", FIX_RETRY, run.id, {
+                  error: String((queueErr as Error)?.message || queueErr),
+                })
+                createdRunId = null
               }
             }
             } // end else (tedSiteUrl resolved → scan)
@@ -1489,16 +1562,18 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
           }
         }
 
-        if (taskId && !scanAborted) {
+        if (taskId && createdRunId && startCommentText) {
           console.log(
-            `💬 Sending confirmation comment back to TED Task #${taskId}...`,
+            `💬 Sending scan-start comment back to TED Task #${taskId}...`,
           )
-          await postTedComment(
+          const ok = await postTedComment(
             taskId,
-            `Successfully received the release request — the automated QA connection is active!${scanStartNote}`,
-            `ext:qacc-prerelease-received-${taskId}`,
+            startCommentText,
+            `ext:qacc-prerelease-started-${createdRunId}`,
             createdRunId,
           )
+          await tr.step(ok ? "report.posted" : "report.failed", ok ? "ok" : "failed",
+            ok ? "\"Test run started\" comment posted to TED" : "Could not post the start comment to TED")
         } else if (!taskId) {
           console.log(
             "⚠️ Could not post comment to TED: taskId is missing from payload.",
@@ -1525,6 +1600,9 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
       }
     }
 
+    // Nothing started for a trigger QACC acted on → tell the task why.
+    await reportCouldNotStart(tr)
+
     // 6. We send a successful 200 OK response back to TED in their exact expected format
     console.log("✅ Webhook successfully processed")
 
@@ -1539,7 +1617,8 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
         executionId: actionableTaskId || "unknown",
         // The QACC run this trigger started (null if no run was created). TED
         // stores this to later pause/resume/cancel the run via /webhooks/ted/*.
-        qaRunId: createdRunId,
+        qaRunId: createdRunId || tr.runId,
+        ...tr.responseData(),
       },
     })
   } catch (error) {
@@ -1931,6 +2010,7 @@ async function skipDuplicateTrigger(
   tedTaskId: string,
   blocking: BlockingRun,
   flow: string,
+  tr?: TriggerTracker,
 ) {
   console.log(
     `[TED ${flow}] Duplicate suppressed (${blocking.reason}): run ${blocking.id} for TED task ${tedTaskId}`,
@@ -1949,10 +2029,24 @@ async function skipDuplicateTrigger(
     `ext:qacc-trigger-skipped-${tedTaskId}-${blocking.id}`,
     blocking.id,
   ).catch(() => {})
+  const reasonText =
+    blocking.reason === "active"
+      ? `A test run for this task is already in progress (run ${blocking.id}).`
+      : `A test run for this task started less than ${Number(process.env.TED_RUN_DEDUPE_MINUTES ?? 15)} minutes ago (run ${blocking.id}).`
+  if (tr) {
+    tr.setTask(tedTaskId)
+    await tr.duplicate(blocking.id, reasonText)
+  }
   return res.status(200).json({
     status: "duplicate_suppressed",
     reason: blocking.reason,
     existingRunId: blocking.id,
+    data: {
+      acknowledged: true,
+      qaRunId: blocking.id,
+      outcome: "duplicate",
+      reason: reasonText,
+    },
   })
 }
 
@@ -1976,7 +2070,7 @@ async function setTedTaskStatus(
   }
   try {
     const res = await fetch(
-      `https://ted.growth99.com/api/tasks/${taskId}/status`,
+      `${TED_BASE}/api/tasks/${taskId}/status`,
       {
         method: "PUT",
         headers: {
@@ -2097,6 +2191,8 @@ async function handleAgentRunRequested(
   }
 
   const { runType, sections } = resolveSingleSubtaskFlow(parentTemplateKey, endpointFlow)
+  const tr = new TriggerTracker(`subtask-${runType}`)
+  await tr.received(subtaskId, { subtask: subtaskTitle, parentTemplateKey, endpoint: endpointFlow })
 
   // Map the ONE subtask → its check(s). Reuse the parent section matchers, then
   // the always-on fallback (cross_browser has no section matcher).
@@ -2108,25 +2204,38 @@ async function handleAgentRunRequested(
     matchedChecks = fb.matchedChecks
   }
   if (!matchedChecks.length) {
-    const msg = `QACC has no automated check mapped to the subtask "${subtaskTitle}", so it can't run this one automatically yet.`
-    console.log(`ℹ️ ${msg}`)
-    if (apiToken)
-      await postTedComment(subtaskId, msg, `ext:qacc-single-unmapped-${subtaskId}`)
-    return res
-      .status(200)
-      .json({ status: "no_check_mapped", subtaskId, title: subtaskTitle })
+    console.log(`ℹ️ No automated check mapped to subtask "${subtaskTitle}".`)
+    await tr.fail(
+      "check.unmapped",
+      `QACC has no automated check for the subtask "${subtaskTitle}".`,
+      "do this subtask by hand, or ask the QACC owner to add a check for it.",
+    )
+    await reportCouldNotStart(tr)
+    return res.status(200).json({
+      status: "no_check_mapped",
+      subtaskId,
+      title: subtaskTitle,
+      data: { acknowledged: true, qaRunId: null, ...tr.responseData() },
+    })
   }
 
   // Resolve the project (ID-first). Single-subtask never auto-creates: a play
   // button implies the project already went through its parent flow.
   const project = await findProjectByTedClient(clientId, clientName)
   if (!project) {
-    const msg = `QACC couldn't find a project for this client (id ${clientId ?? "?"}, name "${clientName ?? "?"}"). Run the parent QA task once first, or check the client id.`
-    console.log(`❌ ${msg}`)
-    if (apiToken)
-      await postTedComment(subtaskId, msg, `ext:qacc-single-noproject-${subtaskId}`)
-    return res.status(200).json({ status: "project_not_found" })
+    console.log(`❌ No QACC project for client ${clientId ?? "?"} (${clientName ?? "?"}).`)
+    await tr.fail(
+      "project.missing",
+      `There is no QACC project for ${clientName || "this client"} (TED client ${clientId ?? "?"}).`,
+      `run the parent QA task once first, or ${fixNoProject(clientId)}`,
+    )
+    await reportCouldNotStart(tr)
+    return res.status(200).json({
+      status: "project_not_found",
+      data: { acknowledged: true, qaRunId: null, ...tr.responseData() },
+    })
   }
+  await tr.step("project.found", "ok", `Project found: ${project.name}`, { projectId: project.id })
 
   // Dedupe repeat clicks for the same subtask within a short window.
   const dedupeMins = Number(process.env.TED_SINGLE_SUBTASK_DEDUPE_MINUTES || 3)
@@ -2142,9 +2251,12 @@ async function handleAgentRunRequested(
     console.log(
       `🛑 Duplicate single-subtask trigger for #${subtaskId} within ${dedupeMins}m — suppressed.`,
     )
-    return res
-      .status(200)
-      .json({ status: "duplicate_suppressed", existingRunId: recent[0].id })
+    await tr.duplicate(recent[0].id, `This subtask's check started less than ${dedupeMins} minutes ago (run ${recent[0].id}).`)
+    return res.status(200).json({
+      status: "duplicate_suppressed",
+      existingRunId: recent[0].id,
+      data: { acknowledged: true, qaRunId: recent[0].id, ...tr.responseData() },
+    })
   }
 
   // Resolve the site URL exactly as the matching parent flow does.
@@ -2187,14 +2299,13 @@ async function handleAgentRunRequested(
       reason,
       deviceMatrix: ["desktop", "mobile"],
     })
-    if (apiToken)
-      await postTedComment(
-        subtaskId,
-        reason,
-        `ext:qacc-single-nourl-${subtaskId}`,
-        abortedRunId,
-      )
-    return res.status(200).json({ status: "cancelled_no_url", runId: abortedRunId })
+    await tr.fail("url.missing", reason, runType === "post_release" ? FIX_NO_LIVE_URL : FIX_NO_BETA_URL, abortedRunId)
+    await reportCouldNotStart(tr)
+    return res.status(200).json({
+      status: "cancelled_no_url",
+      runId: abortedRunId,
+      data: { acknowledged: true, qaRunId: abortedRunId, ...tr.responseData() },
+    })
   }
 
   // Keep the project's active site_url current (mirrors the parent flows).
@@ -2231,33 +2342,60 @@ async function handleAgentRunRequested(
     .single()
   if (runError || !run) {
     console.error("❌ Failed to create single-subtask QA run:", runError)
-    return res.status(500).json({ error: "Failed to create run" })
+    await tr.fail("run.create_failed", "QACC could not save the test run.", FIX_RETRY, null, {
+      error: String(runError?.message || runError || "no row"),
+    })
+    await reportCouldNotStart(tr)
+    return res.status(500).json({
+      error: "Failed to create run",
+      data: { acknowledged: true, qaRunId: null, ...tr.responseData() },
+    })
   }
 
-  // Mark the subtask In Progress + post a scan-start note, then enqueue.
+  await tr.step("url.found", "ok", `Site URL: ${siteUrl}${siteSource ? ` (from ${siteSource})` : ""}`, {
+    url: siteUrl,
+    source: siteSource,
+  })
+  // Enqueue first: the start comment only goes out once the run is really queued.
+  try {
+    const { addRunJob } = require("../lib/queue")
+    await addRunJob(run.id)
+    await tr.started(run.id, { checks: matchedChecks, url: siteUrl })
+  } catch (queueErr) {
+    console.error("❌ Failed to enqueue single-subtask run:", queueErr)
+    await tr.fail("run.queue_failed", "QACC saved the run but could not queue it for the worker.", FIX_RETRY, run.id, {
+      error: String((queueErr as Error)?.message || queueErr),
+    })
+    await reportCouldNotStart(tr)
+    return res.status(200).json({
+      status: "queue_failed",
+      runId: run.id,
+      data: { acknowledged: true, qaRunId: run.id, ...tr.responseData() },
+    })
+  }
   if (apiToken) {
     await setTedTaskStatus(subtaskId, "In Progress", apiToken, run.id).catch(
       () => {},
     )
-    await postTedComment(
-      subtaskId,
-      `QACC started an automated check for this subtask — scanning ${siteUrl}${siteSource ? ` (from ${siteSource})` : ""}. The result will post here shortly.`,
-      `ext:qacc-single-start-${run.id}`,
-      run.id,
-    )
   }
-  try {
-    const { addRunJob } = require("../lib/queue")
-    await addRunJob(run.id)
-  } catch (queueErr) {
-    console.error("❌ Failed to enqueue single-subtask run:", queueErr)
-  }
+  const ok = await postTedComment(
+    subtaskId,
+    startedText(siteUrl, siteSource, matchedChecks, run.id),
+    `ext:qacc-single-start-${run.id}`,
+    run.id,
+  )
+  await tr.step(ok ? "report.posted" : "report.failed", ok ? "ok" : "failed",
+    ok ? "Start comment posted to TED" : "Could not post the start comment to TED")
   console.log(
     `🚀 Single-subtask run ${run.id} started: [${matchedChecks.join(", ")}] → subtask #${subtaskId}.`,
   )
-  return res
-    .status(200)
-    .json({ status: "started", runId: run.id, checks: matchedChecks, subtaskId })
+  return res.status(200).json({
+    status: "started",
+    runId: run.id,
+    checks: matchedChecks,
+    subtaskId,
+    data: { acknowledged: true, qaRunId: run.id, ...tr.responseData() },
+  })
 }
 
 webhookRouter.post(
@@ -2272,6 +2410,9 @@ webhookRouter.post(
     // True when the scan was cancelled for lack of a resolvable beta site URL
     // (a `failed` run was recorded). Suppresses the generic confirmation comment.
     let scanAborted = false
+    // Outcome of this trigger for TED (started / duplicate / not_started) + run log.
+    const tr = new TriggerTracker("internal-qa")
+    let startCommentText = ""
     // Provenance line appended to the scan-start comment (URL + where from).
     let scanStartNote = ""
     // The task QACC talks back to = beta_site.internal_test (the target),
@@ -2422,6 +2563,14 @@ webhookRouter.post(
             : "✅ beta_site.seo is Complete! Starting internal QA scan of the beta site...",
         )
 
+        await tr.received(targetTask?.id ?? task.id, {
+          manual: isManual,
+          templateKey: task.templateKey,
+          status: task.status,
+        })
+        if (!clientName) {
+          await tr.fail("project.missing", "TED did not send a client for this task.", FIX_NO_CLIENT)
+        }
         if (clientName) {
           console.log(
             `🔍 Looking up QACC project matching name: "${clientName}"`,
@@ -2484,6 +2633,7 @@ webhookRouter.post(
 
           // 1. Resolve the QACC project — ID-first (ted_client_id), name
           //    fallback with backfill. See findProjectByTedClient.
+          tr.setTask(targetTaskId)
           let project = await findProjectByTedClient(task.clientId, clientName)
 
           if (!project) {
@@ -2537,6 +2687,19 @@ webhookRouter.post(
                 )
               }
             }
+          }
+
+          if (!project) {
+            await tr.fail(
+              "project.missing",
+              `There is no QACC project for ${clientName} and QACC could not create one.`,
+              FIX_NO_ORG,
+            )
+          } else {
+            await tr.step("project.found", "ok", `Project found: ${project.name}`, {
+              projectId: project.id,
+              tedClientId: task.clientId ?? null,
+            })
           }
 
           if (project) {
@@ -2643,7 +2806,7 @@ webhookRouter.post(
                 isForcedTrigger(payload),
               )
               if (blocking)
-                return skipDuplicateTrigger(res, String(targetTaskId), blocking, "internal-QA")
+                return skipDuplicateTrigger(res, String(targetTaskId), blocking, "internal-QA", tr)
             }
 
             // No beta site URL resolved → do NOT scan. Record a visible
@@ -2661,20 +2824,17 @@ webhookRouter.post(
                 reason: NO_BETA_URL_REASON,
                 deviceMatrix: ["desktop"],
               })
-              if (targetTaskId && process.env.TED_API_TOKEN) {
-                await postTedComment(
-                  targetTaskId,
-                  NO_BETA_URL_REASON,
-                  `ext:qacc-internalqa-cancelled-${targetTaskId}`,
-                  abortedRunId,
-                )
-              }
+              await tr.fail("url.missing", NO_BETA_URL_REASON, FIX_NO_BETA_URL, abortedRunId)
               console.log(
                 `🛑 Internal-QA scan cancelled for "${project.name}" — no beta site URL.`,
               )
             } else {
             // Provenance for the scan-start comment: which URL + where from.
             scanStartNote = `\n\nScanning beta site ${tedSiteUrl} (beta site URL obtained from ${tedSiteSource}).`
+            await tr.step("url.found", "ok", `Site URL: ${tedSiteUrl} (from ${tedSiteSource})`, {
+              url: tedSiteUrl,
+              source: tedSiteSource,
+            })
             // Create the internal QA run against the beta site. enabled_checks
             // are the checks that mapped to a discovered subtask (mirroring
             // TED's checklist), or the full internal-QA suite as a fallback.
@@ -2704,8 +2864,11 @@ webhookRouter.post(
               .select()
               .single()
 
-            if (runError) {
+            if (runError || !run) {
               console.error("❌ Failed to create internal-QA QA Run:", runError)
+              await tr.fail("run.create_failed", "QACC could not save the test run.", FIX_RETRY, null, {
+                error: String(runError?.message || runError || "no row"),
+              })
             } else if (run) {
               createdRunId = run.id
               console.log(
@@ -2714,11 +2877,17 @@ webhookRouter.post(
               try {
                 const { addRunJob } = require("../lib/queue")
                 await addRunJob(run.id)
+                await tr.started(run.id, { checks: internalQaChecks, url: tedSiteUrl })
+                startCommentText = startedText(tedSiteUrl, tedSiteSource || "", internalQaChecks, run.id)
                 console.log(
                   `✅ Internal QA scan for ${project.name} is now STARTING in the background!`,
                 )
               } catch (queueErr) {
                 console.error("❌ Failed to add run to worker queue:", queueErr)
+                await tr.fail("run.queue_failed", "QACC saved the run but could not queue it for the worker.", FIX_RETRY, run.id, {
+                  error: String((queueErr as Error)?.message || queueErr),
+                })
+                createdRunId = null
               }
             }
             } // end else (tedSiteUrl resolved → scan)
@@ -2764,16 +2933,18 @@ webhookRouter.post(
           }
         }
 
-        if (taskId && !scanAborted) {
+        if (taskId && createdRunId && startCommentText) {
           console.log(
-            `💬 Sending internal-QA confirmation comment to TED Task #${taskId}...`,
+            `💬 Sending internal-QA scan-start comment to TED Task #${taskId}...`,
           )
-          await postTedComment(
+          const ok = await postTedComment(
             taskId,
-            `Received the beta site SEO completion signal and started internal QA testing of the beta site.${scanStartNote}`,
-            `ext:qacc-internal-qa-received-${taskId}`,
+            startCommentText,
+            `ext:qacc-internal-qa-started-${createdRunId}`,
             createdRunId,
           )
+          await tr.step(ok ? "report.posted" : "report.failed", ok ? "ok" : "failed",
+            ok ? "Start comment posted to TED" : "Could not post the start comment to TED")
         }
       } else {
         console.log(
@@ -2799,6 +2970,8 @@ webhookRouter.post(
         }
       }
 
+      await reportCouldNotStart(tr)
+
       console.log("✅ Internal-QA webhook successfully processed")
       return res.status(200).json({
         status: 200,
@@ -2811,7 +2984,8 @@ webhookRouter.post(
           executionId: targetTaskId || "unknown",
           // The QACC run this trigger started (null if no run was created). TED
           // stores this to later pause/resume/cancel the run via /webhooks/ted/*.
-          qaRunId: createdRunId,
+          qaRunId: createdRunId || tr.runId,
+          ...tr.responseData(),
         },
       })
     } catch (error) {
@@ -2854,6 +3028,8 @@ webhookRouter.post(
     // fallback warning. Hoisted so the talk-back block (outside if(clientName))
     // can post it. Empty until a scan actually starts.
     let scanStartComment = ""
+    // Outcome of this trigger for TED (started / duplicate / not_started) + run log.
+    const tr = new TriggerTracker("post-release")
     // The scan task QACC operates on for post-release = release.qa_post (NOT the
     // release.security trigger). Resolved from the client's tasks below.
     let scanTaskId: string | null = null
@@ -2998,6 +3174,14 @@ webhookRouter.post(
             : "✅ release.security is Complete! Shifting project to post-release and starting General Checks...",
         )
 
+        await tr.received(actionableTaskId, {
+          manual: isManual,
+          templateKey: task.templateKey,
+          status: task.status,
+        })
+        if (!clientName) {
+          await tr.fail("project.missing", "TED did not send a client for this task.", FIX_NO_CLIENT)
+        }
         if (clientName) {
           // Resolve the LIVE site URL from the TED client page (Website URL).
           // This is the canonical/expected final domain.
@@ -3057,13 +3241,23 @@ webhookRouter.post(
 
           // The project must already exist in QACC (per requirement).
           // Resolve ID-first (ted_client_id), name fallback with backfill.
+          tr.setTask(scanTaskId)
           const project = await findProjectByTedClient(task.clientId, clientName)
 
           if (!project) {
             console.log(
               `⚠️ No existing QACC project named "${clientName}" — skipping post-release run (project must already exist).`,
             )
+            await tr.fail(
+              "project.missing",
+              `There is no QACC project for ${clientName} (TED client ${task.clientId ?? "?"}).`,
+              fixNoProject(task.clientId),
+            )
           } else {
+            await tr.step("project.found", "ok", `Project found: ${project.name}`, {
+              projectId: project.id,
+              tedClientId: task.clientId ?? null,
+            })
             console.log(
               `✅ Found QACC project: ${project.name} (ID: ${project.id})`,
             )
@@ -3180,7 +3374,7 @@ webhookRouter.post(
                 isForcedTrigger(payload),
               )
               if (blocking)
-                return skipDuplicateTrigger(res, String(scanTaskId), blocking, "post-release")
+                return skipDuplicateTrigger(res, String(scanTaskId), blocking, "post-release", tr)
             }
             if (!runSiteUrl) {
               scanAborted = true
@@ -3194,14 +3388,7 @@ webhookRouter.post(
                 reason: NO_LIVE_URL_REASON,
                 deviceMatrix: ["desktop"],
               })
-              if (scanTaskId && process.env.TED_API_TOKEN) {
-                await postTedComment(
-                  scanTaskId,
-                  NO_LIVE_URL_REASON,
-                  `ext:qacc-postrelease-cancelled-${scanTaskId}`,
-                  abortedRunId,
-                )
-              }
+              await tr.fail("url.missing", NO_LIVE_URL_REASON, FIX_NO_LIVE_URL, abortedRunId)
               console.log(
                 `🛑 Post-release scan cancelled for "${project.name}" — no live/released site URL.`,
               )
@@ -3224,10 +3411,11 @@ webhookRouter.post(
             }
             // Build the scan-start comment for the main thread: which URL was
             // scanned + where it came from, plus any mismatch/fallback warning.
-            scanStartComment =
-              `Post-release automated run started for ${runSiteUrl} ` +
-              `(release website url obtained from ${siteUrlSource}).` +
-              (urlWarning ? `\n\n${urlWarning}` : "")
+            await tr.step("url.found", urlWarning ? "warn" : "ok", `Site URL: ${runSiteUrl} (from ${siteUrlSource})`, {
+              url: runSiteUrl,
+              source: siteUrlSource,
+              warning: urlWarning || undefined,
+            })
             const { data: run, error: runError } = await supabase
               .from("qa_runs")
               .insert({
@@ -3257,11 +3445,14 @@ webhookRouter.post(
               .select()
               .single()
 
-            if (runError) {
+            if (runError || !run) {
               console.error(
                 "❌ Failed to create post-release QA Run:",
                 runError,
               )
+              await tr.fail("run.create_failed", "QACC could not save the test run.", FIX_RETRY, null, {
+                error: String(runError?.message || runError || "no row"),
+              })
             } else if (run) {
               createdRunId = run.id
               console.log(
@@ -3270,11 +3461,18 @@ webhookRouter.post(
               try {
                 const { addRunJob } = require("../lib/queue")
                 await addRunJob(run.id)
+                await tr.started(run.id, { checks: postReleaseChecks, url: runSiteUrl })
+                scanStartComment =
+                  startedText(runSiteUrl as string, siteUrlSource, postReleaseChecks, run.id, urlWarning || undefined)
                 console.log(
                   `✅ Post-release General Checks run for ${project.name} is now STARTING.`,
                 )
               } catch (queueErr) {
                 console.error("❌ Failed to add run to worker queue:", queueErr)
+                await tr.fail("run.queue_failed", "QACC saved the run but could not queue it for the worker.", FIX_RETRY, run.id, {
+                  error: String((queueErr as Error)?.message || queueErr),
+                })
+                createdRunId = null
               }
             }
             } // end else (live/released URL resolved → scan)
@@ -3319,17 +3517,20 @@ webhookRouter.post(
           }
         }
 
-        if (taskId && !scanAborted) {
+        // Only when a run really started (the old fallback said "started the
+        // General Checks ✅" even when no project was found and nothing ran).
+        if (taskId && createdRunId && scanStartComment) {
           console.log(
             `💬 Sending post-release scan-start comment to TED Task #${taskId}...`,
           )
-          await postTedComment(
+          const ok = await postTedComment(
             taskId,
-            scanStartComment ||
-              "Received the post-release signal and started the General Checks. ✅",
-            `ext:qacc-postrelease-received-${taskId}`,
+            scanStartComment,
+            `ext:qacc-postrelease-started-${createdRunId}`,
             createdRunId,
           )
+          await tr.step(ok ? "report.posted" : "report.failed", ok ? "ok" : "failed",
+            ok ? "Start comment posted to TED" : "Could not post the start comment to TED")
         }
       } else {
         console.log(
@@ -3355,6 +3556,8 @@ webhookRouter.post(
         }
       }
 
+      await reportCouldNotStart(tr)
+
       console.log("✅ Post-release webhook successfully processed")
       return res.status(200).json({
         status: 200,
@@ -3367,7 +3570,8 @@ webhookRouter.post(
           executionId: actionableTaskId || "unknown",
           // The QACC run this trigger started (null if no run was created). TED
           // stores this to later pause/resume/cancel the run via /webhooks/ted/*.
-          qaRunId: createdRunId,
+          qaRunId: createdRunId || tr.runId,
+          ...tr.responseData(),
         },
       })
     } catch (error) {
@@ -4377,6 +4581,96 @@ function tedSecretOk(req: Request, res: Response): boolean {
   }
   return true
 }
+
+// ---------------------------------------------------------------------------
+// Run status + step log for TED's Automation card and "View run log" panel.
+// Any run type (the full-scan /progress above answers only for full scans).
+//   GET /webhooks/ted/runs/:runId/progress
+//   GET /webhooks/ted/runs/:runId/events?limit=200   (oldest first)
+//   GET /webhooks/ted/tasks/:taskId/latest-run
+// ---------------------------------------------------------------------------
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+webhookRouter.get("/ted/runs/:runId/progress", async (req: Request, res: Response) => {
+  if (!tedSecretOk(req, res)) return
+  const runId = String(req.params.runId || "")
+  if (!UUID_RE.test(runId)) return res.status(400).json({ error: "runId must be a run id." })
+  const { data: run, error } = await supabase
+    .from("qa_runs")
+    .select("id, run_type, status, enabled_checks, pages_processed, pages_total, started_at, completed_at, created_at")
+    .eq("id", runId)
+    .maybeSingle()
+  if (error) return res.status(500).json({ error: error.message })
+  if (!run) return res.status(404).json({ error: `No run found with id ${runId}.` })
+  const [{ data: events }, { data: results }, { count: issues }] = await Promise.all([
+    supabase.from("run_events").select("at, kind, status, message, detail").eq("run_id", runId).order("at", { ascending: true }).limit(1000),
+    supabase.from("run_check_results").select("check_factor, status").eq("run_id", runId).eq("phase", "scan"),
+    supabase.from("findings").select("id", { count: "exact", head: true }).eq("run_id", runId).neq("status", "false_positive"),
+  ])
+  return res.status(200).json({
+    status: 200,
+    data: buildRunProgress(run as any, (events || []) as any, (results || []) as any, issues || 0),
+  })
+})
+
+webhookRouter.get("/ted/runs/:runId/events", async (req: Request, res: Response) => {
+  if (!tedSecretOk(req, res)) return
+  const runId = String(req.params.runId || "")
+  if (!UUID_RE.test(runId)) return res.status(400).json({ error: "runId must be a run id." })
+  const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000)
+  // Newest `limit`, returned oldest first.
+  const { data, error } = await supabase
+    .from("run_events")
+    .select("at, kind, status, message, detail")
+    .eq("run_id", runId)
+    .order("at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(limit)
+  if (error) return res.status(500).json({ error: error.message })
+  // The trigger's own steps (received, project, URL) are logged before the run row exists, so
+  // they carry only the task id. Pull those from the two minutes before the run was created.
+  let pre: any[] = []
+  const { data: run } = await supabase.from("qa_runs").select("ted_task_id, created_at").eq("id", runId).maybeSingle()
+  if (run?.ted_task_id && run?.created_at) {
+    const created = new Date(run.created_at as string)
+    const { data: p } = await supabase
+      .from("run_events")
+      .select("at, kind, status, message, detail")
+      .eq("ted_task_id", String(run.ted_task_id))
+      .is("run_id", null)
+      .gte("at", new Date(created.getTime() - 120_000).toISOString())
+      .lte("at", new Date(created.getTime() + 5_000).toISOString())
+      .order("at", { ascending: true })
+    pre = p || []
+  }
+  return res.status(200).json({ status: 200, data: { events: [...pre, ...(data || []).reverse()] } })
+})
+
+webhookRouter.get("/ted/tasks/:taskId/latest-run", async (req: Request, res: Response) => {
+  if (!tedSecretOk(req, res)) return
+  const taskId = String(req.params.taskId || "").trim()
+  if (!/^\d+$/.test(taskId)) return res.status(400).json({ error: "taskId must be a TED task id." })
+  const [{ data: run, error }, { data: ev }] = await Promise.all([
+    supabase
+      .from("qa_runs")
+      .select("id, status, created_at, custom_name, site_url")
+      .eq("ted_task_id", taskId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    supabase
+      .from("run_events")
+      .select("run_id, at, kind, status, message, detail")
+      .eq("ted_task_id", taskId)
+      .eq("status", "failed")
+      .in("kind", NOT_STARTED_KINDS)
+      .order("at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ])
+  if (error) return res.status(500).json({ error: error.message })
+  return res.status(200).json({ status: 200, data: pickLatestRun(run as any, (ev as any) || null) })
+})
 
 const RUN_TYPES = ["pre_release", "post_release", "full_scan"]
 

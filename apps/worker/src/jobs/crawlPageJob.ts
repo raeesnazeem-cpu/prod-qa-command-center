@@ -1,4 +1,5 @@
 import { Job } from "bullmq"
+import { logRunEvent } from "../lib/runEvents"
 import { checkLearnMoreButtons } from "../checks/learnMoreButtonsCheck"
 import { checkPageSpeed } from "../checks/pageSpeedCheck"
 import { chromium } from "playwright"
@@ -1478,6 +1479,14 @@ export async function processCrawlPageJob(job: Job) {
             current_step: "All checks complete",
           })
           .eq("id", pageId)
+        // Raw-events line for TED's run log: which page just finished.
+        await logRunEvent({
+          runId,
+          kind: "page.done",
+          status: "info",
+          message: `Page checked: ${pageUrl}`,
+          detail: { pageId, url: pageUrl },
+        })
       } else {
         // If it's an override, we only mark the specific check as done in check_progress
         const checkKey = job.data.overrideChecks[0]
@@ -1698,6 +1707,16 @@ export async function finalizeRun(runId: string): Promise<void> {
         return null
       },
     )
+    await logRunEvent({
+      runId,
+      tedTaskId: run.ted_task_id,
+      kind: report ? "report.posted" : "report.failed",
+      status: report ? "ok" : "failed",
+      message: report
+        ? `Results posted to TED (${report.issueCount} issue${report.issueCount === 1 ? "" : "s"})`
+        : "Could not post the results to TED",
+      detail: report ? { issues: report.issueCount, hasIssues: report.hasIssues } : {},
+    })
     // Only trigger the AI fix when the report actually posted AND there
     // were real issues. All-passed → say so and skip the fix.
     await maybeTriggerAiFix(runId, run.ted_task_id, report)

@@ -12,6 +12,7 @@
 // Both are best-effort: a failure here must never break the scan/fix or the TED
 // report — it only degrades the history view.
 import { supabase } from "./supabase"
+import { logRunEvent } from "./runEvents"
 import { getRunTimings, getAiFixTimings } from "./timingCollector"
 import { aiLapseBlocksPass, aiLapseSummary } from "@qacc/shared"
 import { FRIENDLY, isRealDefect, isToolLapseFinding } from "./tedSync"
@@ -171,6 +172,17 @@ export async function persistScanCheckResults(runId: string): Promise<void> {
       await supabase
         .from("run_check_results")
         .upsert(rows, { onConflict: "run_id,phase,check_factor" })
+      // One step per check for TED's run log (pass / fail + where it failed).
+      for (const r of rows) {
+        const passed = r.status === "passed"
+        await logRunEvent({
+          runId,
+          kind: "check.done",
+          status: passed ? "ok" : "failed",
+          message: `${r.label} · ${passed ? "passed" : r.status === "errored" ? "could not complete" : "failed"}${!passed && r.message ? `: ${String(r.message).slice(0, 160)}` : ""}`,
+          detail: { check: r.check_factor, passed, status: r.status, pageUrl: r.page_url, durationMs: r.duration_ms },
+        })
+      }
     }
   } catch (e: any) {
     logger.warn({ runId, error: e?.message }, "persistScanCheckResults failed")

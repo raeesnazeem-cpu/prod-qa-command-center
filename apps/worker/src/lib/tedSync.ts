@@ -1,4 +1,6 @@
 import { supabase } from "./supabase"
+import { logRunEvent } from "./runEvents"
+import { TED_BASE } from "./tedClient"
 import { GAP_LABELS, GAP_NOT_FIXED } from "@qacc/shared"
 import { getClientDomain } from "./tedClient"
 import { qaQueue } from "./queue"
@@ -257,7 +259,7 @@ export async function postTedComment(
   if (xApiKey) {
     try {
       const r = await fetch(
-        `https://ted.growth99.com/api/tasks/${tedTaskId}/comments/ai`,
+        `${TED_BASE}/tasks/${tedTaskId}/comments/ai`,
         {
           method: "POST",
           headers: {
@@ -268,6 +270,8 @@ export async function postTedComment(
           body: JSON.stringify({
             text: clientText,
             eventKey,
+            // TED shows the comment as "TED QA Agent" (older TED ignores it).
+            agentName: "TED QA Agent",
             ...(ctx.aiAssigned === true ? { aiAssigned: true } : {}),
           }),
         },
@@ -301,7 +305,7 @@ export async function postTedComment(
   }
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${tedTaskId}/comments`,
+      `${TED_BASE}/tasks/${tedTaskId}/comments`,
       {
         method: "POST",
         headers: {
@@ -375,7 +379,7 @@ export async function postTedStatus(
   }
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${tedTaskId}/status`,
+      `${TED_BASE}/tasks/${tedTaskId}/status`,
       {
         method: "PUT",
         headers: {
@@ -453,7 +457,7 @@ async function closeManualPostReleaseSubtasks(
   let subtasks: { id: string; title: string }[] = []
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${parentTaskId}/subtasks`,
+      `${TED_BASE}/tasks/${parentTaskId}/subtasks`,
       { headers: { Authorization: `Bearer ${bearer}`, Accept: "application/json" } },
     )
     if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) {
@@ -548,6 +552,13 @@ export async function markAllTedTasksCompleted(
     // queued run can start while this run's TED closeout finishes. Idempotent
     // and best-effort; the staleness backstop covers any missed release.
     await releaseRunSlot(runId)
+    await logRunEvent({
+      runId,
+      tedTaskId: parentTaskId || null,
+      kind: "run.done",
+      status: "ok",
+      message: "Run finished · TED tasks being closed",
+    })
 
     const { data: run } = await supabase
       .from("qa_runs")
@@ -897,54 +908,9 @@ async function renderImageGrid(
 // <p>/<strong>/<ul>/<li> cleanly (the format the TED team itself uses). So we
 // use plain grouped lists, one heading per check.
 
-export const FRIENDLY: Record<string, string> = {
-  dead_links: "Dead Links & Broken Anchors",
-  broken_links: "Broken Links",
-  external_links: "External Links",
-  image_quality: "Image Quality (Watermark & Blur)",
-  image_relevance: "Image Relevance (Service Pages)",
-  media_crop: "Image & Video Cropping (Desktop / Tablet / Mobile)",
-  blog_sidebar: "Blog Post Sidebar",
-  hero_media: "Hero Video & Image Load",
-  false_breakpoint: "False Breaking Points",
-  cross_browser: "Cross-Browser Visual",
-  backend_check: "Backend / WordPress",
-  review_reputation_check: "Review & Reputation",
-  functionality_check: "Website Functionality",
-  gbp_check: "Google Business Profile",
-  privacy_policy: "Privacy Policy",
-  footer_logo: "Footer Logo",
-  single_script: "Single Script Features",
-  top_bar_sticky: "Top Bar & Sticky Header",
-  favicon: "Favicon",
-  contact_form: "Contact Form",
-  chatbot_consultation: "Chatbot & Virtual Consultation",
-  logo_chatbot: "Logo on Chatbot",
-  callnow_links: "Call Now & Links",
-  verify_plugin_updates: "Plugin Updates",
-  social_share_heading: "Social Share Heading",
-  learn_more_buttons: "Learn More Buttons",
-  url_tab_compare: "URL & Tab Comparison",
-  url_matching: "URL Matching",
-  text_share: "Text Share Metadata",
-  gsr_check: "General Search Result (GSR)",
-  page_speed: "Page Speed (PageSpeed Insights)",
-  project_plan: "Project Plan",
-  paid_media: "Paid Media",
-  cro_audit: "CRO (Conversion Review)",
-  spelling: "Spelling",
-  grammar: "Grammar",
-  meta_tags: "Meta Tags",
-  dummy_content: "Dummy Content",
-  console_errors: "Console Errors",
-  image_compliance: "Image Compliance",
-  accessibility: "Accessibility",
-  accessibility_check: "Full Accessibility",
-  accessibility_features: "Accessibility",
-  visual_regression: "Visual Regression",
-  // QA-gap checks (packages/shared/src/gapChecks.ts).
-  ...GAP_LABELS,
-}
+// Check display names live in @qacc/shared so the API's TED comments use the same words.
+import { CHECK_LABELS } from "@qacc/shared"
+export const FRIENDLY: Record<string, string> = CHECK_LABELS
 
 // Per-check action shown on a subtask that FAILED and was NOT auto-fixed, next
 // to its "In Progress" status. Keyed by check factor. Source of truth is
