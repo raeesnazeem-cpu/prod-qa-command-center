@@ -4628,7 +4628,23 @@ webhookRouter.get("/ted/runs/:runId/events", async (req: Request, res: Response)
     .order("id", { ascending: false })
     .limit(limit)
   if (error) return res.status(500).json({ error: error.message })
-  return res.status(200).json({ status: 200, data: { events: (data || []).reverse() } })
+  // The trigger's own steps (received, project, URL) are logged before the run row exists, so
+  // they carry only the task id. Pull those from the two minutes before the run was created.
+  let pre: any[] = []
+  const { data: run } = await supabase.from("qa_runs").select("ted_task_id, created_at").eq("id", runId).maybeSingle()
+  if (run?.ted_task_id && run?.created_at) {
+    const created = new Date(run.created_at as string)
+    const { data: p } = await supabase
+      .from("run_events")
+      .select("at, kind, status, message, detail")
+      .eq("ted_task_id", String(run.ted_task_id))
+      .is("run_id", null)
+      .gte("at", new Date(created.getTime() - 120_000).toISOString())
+      .lte("at", new Date(created.getTime() + 5_000).toISOString())
+      .order("at", { ascending: true })
+    pre = p || []
+  }
+  return res.status(200).json({ status: 200, data: { events: [...pre, ...(data || []).reverse()] } })
 })
 
 webhookRouter.get("/ted/tasks/:taskId/latest-run", async (req: Request, res: Response) => {
