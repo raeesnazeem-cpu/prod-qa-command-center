@@ -1,6 +1,6 @@
 import { useForm, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
-import { CreateRunSchema, CreateRunInput } from "@qacc/shared"
+import { CreateRunSchema, CreateRunInput, GAP_CHECKS } from "@qacc/shared"
 import {
   useCreateRun,
   useUpdateRunStatus,
@@ -388,6 +388,13 @@ export const StartRunModal = ({
         "Download each real content image and flag watermarks (AI vision) and blurry images (deterministic sharpness metric). Attaches the offending image to each finding.",
       category: "general",
     },
+    // QA-gap checks (packages/shared/src/gapChecks.ts).
+    ...GAP_CHECKS.filter((c) => c.pre.length > 0).map((c) => ({
+      id: c.key,
+      label: c.label,
+      description: c.notFixed.replace(/^Mention to /, "Checks: "),
+      category: "general",
+    })),
   ]
 
   const POST_RELEASE_CHECKS = [

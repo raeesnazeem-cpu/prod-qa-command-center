@@ -37,6 +37,12 @@ import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkImageRelevance } from "../checks/imageRelevanceCheck"
 import { checkMediaCrop } from "../checks/mediaCropCheck"
 import { checkBlogSidebar } from "../checks/blogSidebarCheck"
+import { gapKeysByScope } from "@qacc/shared"
+import { checkPageGaps } from "../checks/gaps/pageGapsCheck"
+import { checkResponsiveGaps, RESPONSIVE_KEYS } from "../checks/gaps/responsiveGapsCheck"
+import { checkHomepageGaps, HOMEPAGE_KEYS } from "../checks/gaps/homepageGapsCheck"
+import { runSiteConsistencyChecks } from "../checks/gaps/siteConsistencyCheck"
+import { releaseFacts, sweepFacts } from "../checks/gaps/factsStore"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
 import { checkAccessibility } from "../checks/accessibilityCheck"
@@ -134,8 +140,13 @@ function lapse(checkFactor: string) {
   }
 }
 
+// QA-gap checks by where they run (registry: packages/shared/src/gapChecks.ts).
+const GAP_PAGE_KEYS = gapKeysByScope("page")
+const GAP_RUN_KEYS = gapKeysByScope("run")
+
 // Checks that only run on the homepage (see the HOMEPAGE-ONLY block below).
 const HOMEPAGE_ONLY_KEYS = new Set([
+  ...gapKeysByScope("homepage"),
   "hero_media", "privacy_policy", "footer_logo", "hamburger_menu", "blog_verification",
   "top_bar_sticky", "favicon", "chatbot_consultation", "logo_chatbot", "text_share",
   "callnow_links", "url_tab_compare", "verify_plugin_updates", "plugin_number",
@@ -143,7 +154,8 @@ const HOMEPAGE_ONLY_KEYS = new Set([
   "gbp_check", "social_share_heading", "single_script", "gsr_check",
 ])
 // Standalone API checks run as their own jobs, never per page.
-const NON_PAGE_KEYS = new Set(["project_plan", "paid_media", "cro_audit", "video_recording"])
+// Run-level gap checks (judged once at run end) are not per page either.
+const NON_PAGE_KEYS = new Set(["project_plan", "paid_media", "cro_audit", "video_recording", ...GAP_RUN_KEYS])
 
 const sameSiteUrl = (u: string) =>
   String(u || "")
@@ -589,6 +601,52 @@ export async function processCrawlPageJob(job: Job) {
             return lapse("blog_sidebar")(e)
           }),
         )
+      }
+
+      // QA-gap checks.
+      //  • Page read — on the shared page, right after blog_sidebar so it sees
+      //    the page as crawled. Read-only. Also runs (silently) when only the
+      //    run-end checks are enabled: they need every page's facts.
+      //  • Tablet/mobile layout — own context, concurrent lane.
+      //  • Homepage extras (header widths, Safari, 404, menus) — own contexts.
+      {
+        const gapEnabled = new Set<string>(enabledChecks)
+        const homeForGaps =
+          sameSiteUrl(pageUrl) === sameSiteUrl(run.site_url)
+        const wantsPageRead =
+          GAP_PAGE_KEYS.some((k) => gapEnabled.has(k)) ||
+          GAP_RUN_KEYS.some((k) => gapEnabled.has(k)) ||
+          (homeForGaps && gapEnabled.has("footer_copyright"))
+        if (wantsPageRead && page) {
+          scheduleOnSharedPage("qa_gaps_page", () =>
+            checkPageGaps(page, {
+              runId,
+              pageId,
+              pageUrl,
+              isHome: homeForGaps,
+              enabled: gapEnabled,
+            }).catch((e) => {
+              logger.error("QA-gap page checks failed:", e)
+              return GAP_PAGE_KEYS.filter((k) => gapEnabled.has(k)).flatMap((k) => lapse(k)(e))
+            }),
+          )
+        }
+        if (RESPONSIVE_KEYS.some((k) => gapEnabled.has(k))) {
+          schedule("qa_gaps_responsive", () =>
+            checkResponsiveGaps(pageUrl, runId, browser, gapEnabled, homeForGaps).catch((e) => {
+              logger.error("QA-gap responsive checks failed:", e)
+              return RESPONSIVE_KEYS.filter((k) => gapEnabled.has(k) && k !== "mobile_order").flatMap((k) => lapse(k)(e))
+            }),
+          )
+        }
+        if (homeForGaps && HOMEPAGE_KEYS.some((k) => gapEnabled.has(k))) {
+          schedule("qa_gaps_homepage", () =>
+            checkHomepageGaps(pageUrl, runId, browser, gapEnabled).catch((e) => {
+              logger.error("QA-gap homepage checks failed:", e)
+              return HOMEPAGE_KEYS.filter((k) => gapEnabled.has(k)).flatMap((k) => lapse(k)(e))
+            }),
+          )
+        }
       }
 
       // Fetch project details and settings for pre-release checks
@@ -1572,6 +1630,14 @@ export async function finalizeRun(runId: string): Promise<void> {
     .single()
   if (!run) return
 
+  // Run-level QA-gap checks (cross-page consistency). Before the TED report
+  // so their findings are in it. Best-effort: a failure writes lapse rows.
+  const gapStart = Date.now()
+  await runGapSiteChecks(runId).catch((e) =>
+    logger.error({ runId, error: e?.message }, "QA-gap site checks failed"),
+  )
+  recordTiming(runId, "qa_gaps_site", run.site_url, Date.now() - gapStart)
+
   // Run-level cross-browser visual check (no-op unless enabled). Runs
   // before the TED report so its findings are included in the summary.
   const cbStart = Date.now()
@@ -1620,6 +1686,40 @@ export async function finalizeRun(runId: string): Promise<void> {
   // (ted_task_id path) or is held by another run.
   if (run.run_type === "full_scan") {
     await releaseRunSlot(runId).catch(() => {})
+  }
+}
+
+/**
+ * The run-end QA-gap checks: compare every page's collected facts (factsStore)
+ * and write the findings against the homepage row. Releases the facts.
+ */
+async function runGapSiteChecks(runId: string): Promise<void> {
+  sweepFacts()
+  try {
+    const { data: run } = await supabase
+      .from("qa_runs")
+      .select("id, site_url, live_site_url, run_type, enabled_checks")
+      .eq("id", runId)
+      .single()
+    const enabled = new Set<string>(run?.enabled_checks || [])
+    if (!run || !GAP_RUN_KEYS.some((k) => enabled.has(k))) return
+    const { data: pages } = await supabase.from("pages").select("id, url").eq("run_id", runId)
+    const list = pages || []
+    if (list.length === 0) return
+    const home = list.find((p: any) => sameSiteUrl(p.url) === sameSiteUrl(run.site_url)) || list[0]
+    let findings: any[]
+    try {
+      findings = await runSiteConsistencyChecks(run as any, enabled, list.map((p: any) => p.url))
+    } catch (e: any) {
+      findings = GAP_RUN_KEYS.filter((k) => enabled.has(k)).flatMap((k) => lapse(k)(e))
+    }
+    if (findings.length) {
+      const rows = findings.map((f) => ({ ...f, page_id: home.id, run_id: runId }))
+      const { error } = await supabase.from("findings").insert(rows)
+      if (error) logger.error({ runId, error: error.message }, "QA-gap site checks: insert failed")
+    }
+  } finally {
+    releaseFacts(runId)
   }
 }
 

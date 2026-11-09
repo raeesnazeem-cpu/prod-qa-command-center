@@ -1,3 +1,4 @@
+import { GAP_LABELS } from "@qacc/shared"
 import React from "react"
 import { format } from "date-fns"
 import { XCircle, Zap, ExternalLink } from "lucide-react"
@@ -32,6 +33,7 @@ const FRIENDLY: Record<string, string> = {
   single_script: "Single Script",
   favicon: "Favicon",
   privacy_policy: "Privacy Policy",
+  ...GAP_LABELS,
 }
 const labelFor = (f: string) =>
   FRIENDLY[f] || (f || "other").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())

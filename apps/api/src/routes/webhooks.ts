@@ -6,7 +6,7 @@ import { randomUUID } from "crypto"
 import { execFile } from "child_process"
 import { promisify } from "util"
 import { transitionRunStatus } from "../lib/runControl"
-import { isRealDefect } from "@qacc/shared"
+import { isRealDefect, withGapChecks, gapKeysForSuite, GAP_CHECK_KEYS } from "@qacc/shared"
 import { getCheckBreakdown } from "../lib/runCheckBreakdown"
 import { nonGrowth99Checks } from "../lib/fullScanChecks"
 import { isSubtaskEvent } from "../lib/tedSubtaskEvent"
@@ -814,6 +814,8 @@ const PRE_RELEASE_DEFAULT_CHECKS = [
   // recordingTrigger / the tedSync barrier) is left fully intact for that future
   // manual wiring — only the wiring into this trigger's check list is removed.
   "cross_browser",
+  // QA-gap checks (packages/shared/src/gapChecks.ts).
+  ...gapKeysForSuite("pre"),
 ]
 
 // The `release.qa_pre` SUBTASKS → the QACC check(s) that report into each.
@@ -828,7 +830,7 @@ const PRE_RELEASE_DEFAULT_CHECKS = [
 // that check's section to every owning subtask. "Accelerator reviews" →
 // project_plan, "Blog" → blog_verification, and the "Video recording" reminder
 // → video_recording are wired below. Mirrors INTERNAL_QA_SECTIONS.
-const PRE_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
+const PRE_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = withGapChecks([
   // Logo-on-chatbot MUST precede chatbot_consultation: its title also says
   // "chatbot", so it would otherwise be swallowed by the chatbot section.
   { matchers: ["websitelogo", "addedtothechatbot"], checks: ["logo_chatbot"] },
@@ -873,7 +875,7 @@ const PRE_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   // the video_recording barrier. It will become a separate, manually triggered
   // TED task; the barrier logic is left intact for that future wiring.
   { matchers: ["herosection", "fallbackimage"], checks: ["hero_media"] },
-]
+], "pre")
 
 // =====================================================================
 // POST-RELEASE (release.qa_post) SUBTASK ROUTING
@@ -901,6 +903,8 @@ const POST_RELEASE_DEFAULT_CHECKS = [
   "page_speed",
   "contact_form",
   "dummy_content",
+  // QA-gap checks (packages/shared/src/gapChecks.ts).
+  ...gapKeysForSuite("post"),
 ]
 
 // The `release.qa_post` SUBTASKS → the QACC check(s) that report into each,
@@ -912,7 +916,7 @@ const POST_RELEASE_DEFAULT_CHECKS = [
 // AND contact_form: the contact_form check runs the full live flow (find → fill
 // → submit → thank-you) on the contact page, submitting a clearly test-labelled
 // lead. Mirrors PRE_RELEASE_SECTIONS.
-const POST_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
+const POST_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = withGapChecks([
   // dummy_content reports as an extra section in the same live-website
   // subtask comment — it has no subtask of its own.
   {
@@ -938,7 +942,7 @@ const POST_RELEASE_SECTIONS: { matchers: string[]; checks: string[] }[] = [
   // subtask now goes unmatched (a human already owns it) instead of enabling the
   // video_recording barrier. It will become a separate, manually triggered TED
   // task; the barrier logic is left intact for that future wiring.
-]
+], "post")
 
 // --- TED Webhook Receiver ---
 // This endpoint will be available at POST /webhooks/ted
@@ -1584,6 +1588,8 @@ const INTERNAL_QA_DEFAULT_CHECKS = [
   "image_quality",
   "false_breakpoint",
   "cross_browser",
+  // QA-gap checks (packages/shared/src/gapChecks.ts).
+  ...gapKeysForSuite("internal"),
 ]
 
 // The 7 Internal QA SECTION subtasks → the QACC checks that report into each.
@@ -1594,7 +1600,7 @@ const INTERNAL_QA_DEFAULT_CHECKS = [
 // Breakpoints), so a single check can post back to MULTIPLE subtasks. Only
 // login-free checks appropriate for a beta-site scan are listed here
 // (backend_check etc. that need the WP admin password are intentionally omitted).
-const INTERNAL_QA_SECTIONS: { matchers: string[]; checks: string[] }[] = [
+const INTERNAL_QA_SECTIONS: { matchers: string[]; checks: string[] }[] = withGapChecks([
   {
     matchers: ["browserdeviceview", "browserdevice", "deviceview", "browser"],
     checks: ["cross_browser", "false_breakpoint"],
@@ -1628,7 +1634,7 @@ const INTERNAL_QA_SECTIONS: { matchers: string[]; checks: string[] }[] = [
     matchers: ["headerbreakpoints", "headerbreakpoint", "breakpoint"],
     checks: ["false_breakpoint"],
   },
-]
+], "internal")
 
 // =====================================================================
 // FULL SCAN (run_type = 'full_scan') — the curated standalone check suite.
@@ -1711,6 +1717,8 @@ const FULL_SCAN_CHECKS = [
   // Live/released-site checks.
   "plugin_number",
   "page_speed",
+  // QA-gap checks (packages/shared/src/gapChecks.ts).
+  ...GAP_CHECK_KEYS,
 ]
 
 const normalizeTitle = (s: unknown): string =>

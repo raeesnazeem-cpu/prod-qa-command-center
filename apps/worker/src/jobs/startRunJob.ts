@@ -1,4 +1,5 @@
 import { Job } from "bullmq"
+import { gapKeysByScope } from "@qacc/shared"
 import { supabase } from "../lib/supabase"
 import { qaQueue } from "../lib/queue"
 import { crawlSitemap } from "../crawlers/sitemapCrawler"
@@ -186,9 +187,14 @@ export async function processStartRunJob(job: Job) {
       "grammar",
       "accessibility_check",
       "accessibility_features",
+      // QA-gap checks that need every page (page read, tablet/mobile pass, run-end comparisons).
+      ...gapKeysByScope("page"),
+      ...gapKeysByScope("responsive"),
+      ...gapKeysByScope("run"),
     ]
 
     const HOMEPAGE_ONLY_CHECKS = [
+      ...gapKeysByScope("homepage"),
       "privacy_policy",
       "callnow_links",
       "hero_media",
