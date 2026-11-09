@@ -27,6 +27,7 @@ import {
 
 const execFileAsync = promisify(execFile)
 
+import { TED_BASE } from "../lib/tedApi"
 export const webhookRouter: Router = Router()
 
 // =====================================================================
@@ -583,7 +584,7 @@ async function postTedComment(
   if (xApiKey) {
     try {
       const r = await fetch(
-        `https://ted.growth99.com/api/tasks/${taskId}/comments/ai`,
+        `${TED_BASE}/api/tasks/${taskId}/comments/ai`,
         {
           method: "POST",
           headers: {
@@ -622,7 +623,7 @@ async function postTedComment(
   }
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${taskId}/comments`,
+      `${TED_BASE}/api/tasks/${taskId}/comments`,
       {
         method: "POST",
         headers: {
@@ -2069,7 +2070,7 @@ async function setTedTaskStatus(
   }
   try {
     const res = await fetch(
-      `https://ted.growth99.com/api/tasks/${taskId}/status`,
+      `${TED_BASE}/api/tasks/${taskId}/status`,
       {
         method: "PUT",
         headers: {

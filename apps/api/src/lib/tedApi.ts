@@ -18,7 +18,8 @@
 //                       unrelated links (GitHub, beta, QACC report links).
 // =====================================================================
 
-export const TED_BASE = "https://ted.growth99.com"
+// TED_API_BASE points a local QACC at a local TED (e.g. http://localhost:8091); production leaves it unset.
+export const TED_BASE = (process.env.TED_API_BASE || "https://ted.growth99.com").replace(/\/+$/, "")
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 

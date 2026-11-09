@@ -1,5 +1,6 @@
 import { supabase } from "./supabase"
 import { logRunEvent } from "./runEvents"
+import { TED_BASE } from "./tedClient"
 import { GAP_LABELS, GAP_NOT_FIXED } from "@qacc/shared"
 import { getClientDomain } from "./tedClient"
 import { qaQueue } from "./queue"
@@ -258,7 +259,7 @@ export async function postTedComment(
   if (xApiKey) {
     try {
       const r = await fetch(
-        `https://ted.growth99.com/api/tasks/${tedTaskId}/comments/ai`,
+        `${TED_BASE}/tasks/${tedTaskId}/comments/ai`,
         {
           method: "POST",
           headers: {
@@ -304,7 +305,7 @@ export async function postTedComment(
   }
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${tedTaskId}/comments`,
+      `${TED_BASE}/tasks/${tedTaskId}/comments`,
       {
         method: "POST",
         headers: {
@@ -378,7 +379,7 @@ export async function postTedStatus(
   }
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${tedTaskId}/status`,
+      `${TED_BASE}/tasks/${tedTaskId}/status`,
       {
         method: "PUT",
         headers: {
@@ -456,7 +457,7 @@ async function closeManualPostReleaseSubtasks(
   let subtasks: { id: string; title: string }[] = []
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${parentTaskId}/subtasks`,
+      `${TED_BASE}/tasks/${parentTaskId}/subtasks`,
       { headers: { Authorization: `Bearer ${bearer}`, Accept: "application/json" } },
     )
     if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) {
