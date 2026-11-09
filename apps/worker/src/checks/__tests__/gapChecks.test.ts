@@ -5,6 +5,33 @@ import { menuParityProblems, offBrandWidgets } from "../gaps/homepageGapsCheck"
 import { serviceMenus, orderProblems, namesMatch } from "../gaps/siteConsistencyCheck"
 import { imageKey, samePageKey, putFacts, getFacts, releaseFacts, emptyFacts, putMobileOrder } from "../gaps/factsStore"
 import { gapFinding, lapseFinding } from "../gaps/findings"
+import { isTestPhaseHost, cartFlowAllowed, pickProduct } from "../gaps/cartFlowCheck"
+
+describe("cart flow guards", () => {
+  it("only beta / staging hosts count as test phase", () => {
+    expect(isTestPhaseHost("https://mcptest2.gogroth.com")).toBe(true)
+    expect(isTestPhaseHost("https://staging.client.com")).toBe(true)
+    expect(isTestPhaseHost("https://client-beta.example.com")).toBe(true)
+    expect(isTestPhaseHost("https://www.glowmedspa.com")).toBe(false)
+    expect(isTestPhaseHost("https://destiny.com")).toBe(false)
+  })
+  it("never runs on post-release; always on pre-release / internal QA; full scan only on test hosts", () => {
+    expect(cartFlowAllowed("post_release", "https://x.gogroth.com").ok).toBe(false)
+    expect(cartFlowAllowed("pre_release", "https://x.gogroth.com").ok).toBe(true)
+    expect(cartFlowAllowed("internal_qa", "https://x.gogroth.com").ok).toBe(true)
+    expect(cartFlowAllowed("full_scan", "https://x.gogroth.com").ok).toBe(true)
+    expect(cartFlowAllowed("full_scan", "https://www.glowmedspa.com").ok).toBe(false)
+  })
+  it("picks an in-stock simple product, skipping variable and out-of-stock ones", () => {
+    const p = pickProduct([
+      { name: "Serum", type: "variable", variations: [{ id: 1 }], permalink: "https://s.test/p/serum", is_in_stock: true },
+      { name: "Cream", type: "simple", is_in_stock: false, permalink: "https://s.test/p/cream" },
+      { name: "SPF <b>50</b>", type: "simple", is_in_stock: true, is_purchasable: true, permalink: "https://s.test/p/spf" },
+    ])
+    expect(p).toEqual({ name: "SPF 50", url: "https://s.test/p/spf" })
+    expect(pickProduct([])).toBeNull()
+  })
+})
 
 const NOW = new Date(2026, 10, 9) // 9 Nov 2026
 

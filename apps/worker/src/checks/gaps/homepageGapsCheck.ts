@@ -2,6 +2,7 @@ import { Browser } from "playwright"
 import { Finding } from "@qacc/shared"
 import { realContextOptions, gotoResilient, looksBlocked, DESKTOP_UA, MOBILE_UA } from "../../lib/browserContext"
 import { gapFinding, lapseFinding } from "./findings"
+import { checkCartFlow, CART_FLOW_KEY } from "./cartFlowCheck"
 
 /**
  * QA-gap checks that only make sense once per site — run on the homepage.
@@ -14,7 +15,7 @@ import { gapFinding, lapseFinding } from "./findings"
  *   safari_check        the homepage in WebKit (Safari's engine): favicon, hero video, layout, script errors
  */
 
-export const HOMEPAGE_KEYS = ["header_breakpoints", "menu_parity", "cta_wording", "widget_style", "page_404", "safari_check"]
+export const HOMEPAGE_KEYS = ["header_breakpoints", "menu_parity", "cta_wording", "widget_style", "page_404", "safari_check", "cart_add_to_cart"]
 
 const WIDTHS = [
   { width: 1470, height: 900 },
@@ -214,7 +215,13 @@ export function offBrandWidgets(brand: string[], widgets: { name: string; color:
     .map((w) => `${w.name} is ${w.color}, which matches none of the site's brand colours (${brand.filter((x) => !isNeutral(rgbOf(x))).slice(0, 3).join(", ")})`)
 }
 
-export async function checkHomepageGaps(pageUrl: string, runId: string, browser: Browser, enabled: Set<string>): Promise<Finding[]> {
+export async function checkHomepageGaps(
+  pageUrl: string,
+  runId: string,
+  browser: Browser,
+  enabled: Set<string>,
+  opts: { runType?: string; isWoo?: boolean } = {},
+): Promise<Finding[]> {
   const keys = HOMEPAGE_KEYS.filter((k) => enabled.has(k))
   if (keys.length === 0) return []
   const f: Finding[] = []
@@ -224,7 +231,7 @@ export async function checkHomepageGaps(pageUrl: string, runId: string, browser:
   }
 
   // ---- Chromium: header widths, menus, CTA wording, widget colours, 404
-  const chromeKeys = keys.filter((k) => k !== "safari_check")
+  const chromeKeys = keys.filter((k) => k !== "safari_check" && k !== CART_FLOW_KEY)
   if (chromeKeys.length) {
     let context: any = null
     try {
@@ -286,6 +293,9 @@ export async function checkHomepageGaps(pageUrl: string, runId: string, browser:
       await context?.close().catch(() => {})
     }
   }
+
+  // ---- Add to Cart at phone size (test phase only; guest cart, no checkout)
+  if (enabled.has(CART_FLOW_KEY)) f.push(...(await checkCartFlow(pageUrl, browser, opts)))
 
   // ---- WebKit (Safari's engine)
   if (enabled.has("safari_check")) f.push(...(await checkSafari(pageUrl)))
