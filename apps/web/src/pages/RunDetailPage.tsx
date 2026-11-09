@@ -1,4 +1,5 @@
 import { createPortal } from "react-dom"
+import { GAP_CHECK_KEYS, GAP_LABELS } from "@qacc/shared"
 import {
   useParams,
   Link,
@@ -1079,6 +1080,7 @@ export const RunDetailPage = () => {
         "grammar",
         "accessibility_check",
         "accessibility_features",
+        ...GAP_CHECK_KEYS,
       ].includes(c),
     )
 
@@ -1872,6 +1874,7 @@ export const RunDetailPage = () => {
                     grammar: "Grammar Check",
                     accessibility_check: "Accessibility Check",
                     accessibility_features: "Accessibility Check",
+                    ...GAP_LABELS,
                   }
                   const checkName =
                     checkNameMap[checkKey] ||

@@ -1,4 +1,5 @@
 import { supabase } from "./supabase"
+import { GAP_LABELS, GAP_NOT_FIXED } from "@qacc/shared"
 import { getClientDomain } from "./tedClient"
 import { qaQueue } from "./queue"
 import { releaseRunSlot } from "./runSlot"
@@ -941,6 +942,8 @@ export const FRIENDLY: Record<string, string> = {
   accessibility_check: "Full Accessibility",
   accessibility_features: "Accessibility",
   visual_regression: "Visual Regression",
+  // QA-gap checks (packages/shared/src/gapChecks.ts).
+  ...GAP_LABELS,
 }
 
 // Per-check action shown on a subtask that FAILED and was NOT auto-fixed, next
@@ -987,6 +990,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   plugin_number: "Mention to verify the plugin count matches the expected set and remove any leftover or dev plugins",
   page_speed: "Mention to optimize page speed (compress images, defer JS, enable caching/CDN, reduce render-blocking)",
   hamburger_menu: "Mention to add or fix the hamburger menu so it appears and toggles open on mobile and tablet (under 1024px) and its links and buttons work",
+  ...GAP_NOT_FIXED,
 }
 
 const titleCase = (s: string) =>
