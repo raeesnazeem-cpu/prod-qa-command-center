@@ -313,6 +313,16 @@ export const GAP_CHECKS: GapCheckDef[] = [
     internal: [FN_INT],
     post: [],
   },
+  {
+    // Test phase only: guest cart, never checks out, never on post-release.
+    key: "cart_add_to_cart",
+    label: "Add to Cart on Mobile",
+    notFixed: "Mention to fix Add to Cart on mobile so 'View cart' appears, the header cart count goes up and the cart page lists the product",
+    scope: "homepage",
+    pre: [FN_PRE],
+    internal: [FN_INT],
+    post: [],
+  },
   // ---------------- whole site, at run end ----------------
   {
     key: "booking_links",

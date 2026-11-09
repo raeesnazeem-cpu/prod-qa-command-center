@@ -641,7 +641,10 @@ export async function processCrawlPageJob(job: Job) {
         }
         if (homeForGaps && HOMEPAGE_KEYS.some((k) => gapEnabled.has(k))) {
           schedule("qa_gaps_homepage", () =>
-            checkHomepageGaps(pageUrl, runId, browser, gapEnabled).catch((e) => {
+            checkHomepageGaps(pageUrl, runId, browser, gapEnabled, {
+              runType: run.run_type,
+              isWoo: !!run.is_woocommerce,
+            }).catch((e) => {
               logger.error("QA-gap homepage checks failed:", e)
               return HOMEPAGE_KEYS.filter((k) => gapEnabled.has(k)).flatMap((k) => lapse(k)(e))
             }),
