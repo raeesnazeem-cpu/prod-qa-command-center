@@ -6,6 +6,31 @@ import { serviceMenus, orderProblems, namesMatch } from "../gaps/siteConsistency
 import { imageKey, samePageKey, putFacts, getFacts, releaseFacts, emptyFacts, putMobileOrder } from "../gaps/factsStore"
 import { gapFinding, lapseFinding } from "../gaps/findings"
 import { isTestPhaseHost, cartFlowAllowed, pickProduct } from "../gaps/cartFlowCheck"
+import { hiddenShare, parseVisionJson, VISION_KEYS } from "../gaps/visionGapsCheck"
+import { aiLapseBlocksPass, aiFailureReason, gapKeysByScope } from "@qacc/shared"
+
+describe("vision gap checks", () => {
+  it("hiddenShare: object-fit cover crop, clipping, and no crop", () => {
+    // 1600x900 file in a 400x400 cover box: 225/400 of the width shows.
+    expect(hiddenShare({ w: 400, h: 400 }, { w: 1600, h: 900 }, "cover", 1)).toBeCloseTo(1 - 900 / 1600, 3)
+    expect(hiddenShare({ w: 400, h: 225 }, { w: 1600, h: 900 }, "fill", 1)).toBe(0)
+    expect(hiddenShare({ w: 400, h: 225 }, { w: 1600, h: 900 }, "fill", 0.5)).toBeCloseTo(0.5, 5)
+  })
+  it("parseVisionJson reads the first JSON object and survives junk", () => {
+    expect(parseVisionJson('Sure! {"readable": false, "confidence": 0.8}')).toEqual({ readable: false, confidence: 0.8 })
+    expect(parseVisionJson("no json here")).toBeNull()
+    expect(parseVisionJson("{broken")).toBeNull()
+  })
+  it("all four are registered as vision-scope checks", () => {
+    expect(gapKeysByScope("vision").sort()).toEqual([...VISION_KEYS].sort())
+  })
+  it("a vision outage on one page blocks a pass (could not complete, not passed)", () => {
+    const lapse = lapseFinding("hero_readability", aiFailureReason("429 quota exceeded"), "https://s.test/a")
+    expect(lapse.description).toMatch(/AI limit exhausted/)
+    expect(aiLapseBlocksPass("hero_readability", [lapse])).toBe(true)
+    expect(resultForCheck("hero_readability", [lapse], true)).toBe("lapsed")
+  })
+})
 
 describe("cart flow guards", () => {
   it("only beta / staging hosts count as test phase", () => {

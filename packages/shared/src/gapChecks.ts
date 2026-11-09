@@ -13,13 +13,14 @@
  *   responsive  own browser context, every page, at tablet + mobile widths
  *   homepage    homepage only
  *   run         once at the end of the run, across every page's collected data
+ *   vision      own browser context, every page, judged by AI vision (needs a vision key)
  *
  * Section homes name a TED subtask section by its FIRST title matcher in the
  * matching *_SECTIONS table in apps/api/src/routes/webhooks.ts. A check with
  * no specific home goes to the functionality-testing section.
  */
 
-export type GapScope = "page" | "responsive" | "homepage" | "run"
+export type GapScope = "page" | "responsive" | "homepage" | "run" | "vision"
 
 export interface GapCheckDef {
   key: string
@@ -322,6 +323,43 @@ export const GAP_CHECKS: GapCheckDef[] = [
     pre: [FN_PRE],
     internal: [FN_INT],
     post: [],
+  },
+  // ---------------- every page, AI vision ----------------
+  {
+    key: "hero_readability",
+    label: "Hero Text Readable",
+    notFixed: "Mention to add an overlay or change the text colour so the hero text is readable on its image / video (desktop and mobile)",
+    scope: "vision",
+    pre: ["herosection"],
+    internal: ["herosection"],
+    post: [FN_POST],
+  },
+  {
+    key: "hero_video_quality",
+    label: "Hero Video Quality",
+    notFixed: "Mention to upload a sharper, compressed hero video that plays smoothly without stopping",
+    scope: "vision",
+    pre: ["herosection"],
+    internal: ["herosection"],
+    post: [FN_POST],
+  },
+  {
+    key: "image_text_cutoff",
+    label: "Text Inside Images Cut Off (Mobile)",
+    notFixed: "Mention to set the focus point or use a mobile version of the listed images so their text is not cut off on phones",
+    scope: "vision",
+    pre: ["watermark"],
+    internal: [FN_INT],
+    post: [FN_POST],
+  },
+  {
+    key: "logo_visibility",
+    label: "Header Logo Clearly Visible",
+    notFixed: "Mention to use the right logo version (colour / white) and size so the header logo is clear on its background",
+    scope: "vision",
+    pre: [FN_PRE],
+    internal: [FN_INT],
+    post: [FN_POST],
   },
   // ---------------- whole site, at run end ----------------
   {
