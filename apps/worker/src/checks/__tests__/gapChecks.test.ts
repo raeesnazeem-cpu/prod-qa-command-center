@@ -7,6 +7,54 @@ import { imageKey, samePageKey, putFacts, getFacts, releaseFacts, emptyFacts, pu
 import { gapFinding, lapseFinding } from "../gaps/findings"
 import { isTestPhaseHost, cartFlowAllowed, pickProduct } from "../gaps/cartFlowCheck"
 import { hiddenShare, parseVisionJson, VISION_KEYS } from "../gaps/visionGapsCheck"
+import { isKeyPage, compareLayouts, Layout, Box } from "../gaps/safariLayoutDiffCheck"
+
+describe("Safari vs Chrome layout diff", () => {
+  const site = "https://s.gogroth.com"
+  it("only key pages are compared", () => {
+    expect(isKeyPage("https://s.gogroth.com/", site)).toBe(true)
+    expect(isKeyPage("https://s.gogroth.com/contact-us/", site)).toBe(true)
+    expect(isKeyPage("https://s.gogroth.com/services", site)).toBe(true)
+    expect(isKeyPage("https://s.gogroth.com/botox/", site)).toBe(false)
+    expect(isKeyPage("https://s.gogroth.com/blog/some-post/", site)).toBe(false)
+  })
+  const box = (o: Partial<Box>): Box => ({ key: "0", kind: "section", label: "", x: 0, y: 0, w: 1440, h: 600, vis: true, ...o })
+  const lay = (boxes: Box[], o: Partial<Layout> = {}): Layout => ({ vw: 1440, scrollW: 1440, docH: 4000, boxes, ...o })
+  it("same layout in both engines → no differences (small font-width wobble ignored)", () => {
+    const c = lay([box({ key: "1" }), box({ key: "1.2", kind: "heading", label: "Botox", x: 100, w: 400, h: 50 })])
+    const s = lay([box({ key: "1" }), box({ key: "1.2", kind: "heading", label: "Botox", x: 102, w: 410, h: 52 })])
+    expect(compareLayouts(c, s, "Desktop")).toEqual([])
+  })
+  it("flags Safari-only sideways scroll, hidden elements, broken images and moved blocks", () => {
+    const c = lay([
+      box({ key: "1", label: "Hero" }),
+      box({ key: "2", kind: "button", label: "Book Now", x: 600, w: 160, h: 48 }),
+      box({ key: "3", kind: "image", label: "team.jpg", x: 100, w: 400, h: 300 }),
+      box({ key: "4", kind: "heading", label: "Services", x: 100, w: 800, h: 60 }),
+    ])
+    const s = lay(
+      [
+        box({ key: "1", label: "Hero" }),
+        box({ key: "2", kind: "button", label: "Book Now", x: 600, w: 160, h: 48, vis: false }),
+        box({ key: "3", kind: "image", label: "team.jpg", x: 100, w: 400, h: 300, broken: true }),
+        box({ key: "4", kind: "heading", label: "Services", x: 300, w: 500, h: 60 }),
+      ],
+      { scrollW: 1490 },
+    )
+    const t = compareLayouts(c, s, "Desktop").map((i) => i.text).join("\n")
+    expect(t).toMatch(/scrolls sideways only in Safari \(50px/)
+    expect(t).toMatch(/Button "Book Now" shows in Chrome but is hidden/)
+    expect(t).toMatch(/image "team\.jpg" fails to load only in Safari/)
+    expect(t).toMatch(/Heading "Services" is laid out differently/)
+  })
+  it("reports a moved section once, not each of its children", () => {
+    const c = lay([box({ key: "1", w: 1440 }), box({ key: "1.0", kind: "heading", w: 600 }), box({ key: "1.1", kind: "text", w: 600 })])
+    const s = lay([box({ key: "1", w: 1000 }), box({ key: "1.0", kind: "heading", w: 300 }), box({ key: "1.1", kind: "text", w: 300 })])
+    const r = compareLayouts(c, s, "iPad")
+    expect(r).toHaveLength(1)
+    expect(r[0].key).toBe("1")
+  })
+})
 import { aiLapseBlocksPass, aiFailureReason, gapKeysByScope } from "@qacc/shared"
 
 describe("vision gap checks", () => {

@@ -14,13 +14,14 @@
  *   homepage    homepage only
  *   run         once at the end of the run, across every page's collected data
  *   vision      own browser context, every page, judged by AI vision (needs a vision key)
+ *   keypage     own browser contexts, only a few key pages per scan (home, contact, about, services)
  *
  * Section homes name a TED subtask section by its FIRST title matcher in the
  * matching *_SECTIONS table in apps/api/src/routes/webhooks.ts. A check with
  * no specific home goes to the functionality-testing section.
  */
 
-export type GapScope = "page" | "responsive" | "homepage" | "run" | "vision"
+export type GapScope = "page" | "responsive" | "homepage" | "run" | "vision" | "keypage"
 
 export interface GapCheckDef {
   key: string
@@ -359,6 +360,16 @@ export const GAP_CHECKS: GapCheckDef[] = [
     scope: "vision",
     pre: [FN_PRE],
     internal: [FN_INT],
+    post: [FN_POST],
+  },
+  // ---------------- key pages, Chrome vs Safari ----------------
+  {
+    key: "safari_layout_diff",
+    label: "Safari vs Chrome Layout (Desktop / iPad / iPhone)",
+    notFixed: "Mention to fix the listed Safari-only layout differences (check them on an iPhone / iPad or in Safari)",
+    scope: "keypage",
+    pre: [FN_PRE],
+    internal: ["browserdeviceview"],
     post: [FN_POST],
   },
   // ---------------- whole site, at run end ----------------
