@@ -908,54 +908,9 @@ async function renderImageGrid(
 // <p>/<strong>/<ul>/<li> cleanly (the format the TED team itself uses). So we
 // use plain grouped lists, one heading per check.
 
-export const FRIENDLY: Record<string, string> = {
-  dead_links: "Dead Links & Broken Anchors",
-  broken_links: "Broken Links",
-  external_links: "External Links",
-  image_quality: "Image Quality (Watermark & Blur)",
-  image_relevance: "Image Relevance (Service Pages)",
-  media_crop: "Image & Video Cropping (Desktop / Tablet / Mobile)",
-  blog_sidebar: "Blog Post Sidebar",
-  hero_media: "Hero Video & Image Load",
-  false_breakpoint: "False Breaking Points",
-  cross_browser: "Cross-Browser Visual",
-  backend_check: "Backend / WordPress",
-  review_reputation_check: "Review & Reputation",
-  functionality_check: "Website Functionality",
-  gbp_check: "Google Business Profile",
-  privacy_policy: "Privacy Policy",
-  footer_logo: "Footer Logo",
-  single_script: "Single Script Features",
-  top_bar_sticky: "Top Bar & Sticky Header",
-  favicon: "Favicon",
-  contact_form: "Contact Form",
-  chatbot_consultation: "Chatbot & Virtual Consultation",
-  logo_chatbot: "Logo on Chatbot",
-  callnow_links: "Call Now & Links",
-  verify_plugin_updates: "Plugin Updates",
-  social_share_heading: "Social Share Heading",
-  learn_more_buttons: "Learn More Buttons",
-  url_tab_compare: "URL & Tab Comparison",
-  url_matching: "URL Matching",
-  text_share: "Text Share Metadata",
-  gsr_check: "General Search Result (GSR)",
-  page_speed: "Page Speed (PageSpeed Insights)",
-  project_plan: "Project Plan",
-  paid_media: "Paid Media",
-  cro_audit: "CRO (Conversion Review)",
-  spelling: "Spelling",
-  grammar: "Grammar",
-  meta_tags: "Meta Tags",
-  dummy_content: "Dummy Content",
-  console_errors: "Console Errors",
-  image_compliance: "Image Compliance",
-  accessibility: "Accessibility",
-  accessibility_check: "Full Accessibility",
-  accessibility_features: "Accessibility",
-  visual_regression: "Visual Regression",
-  // QA-gap checks (packages/shared/src/gapChecks.ts).
-  ...GAP_LABELS,
-}
+// Check display names live in @qacc/shared so the API's TED comments use the same words.
+import { CHECK_LABELS } from "@qacc/shared"
+export const FRIENDLY: Record<string, string> = CHECK_LABELS
 
 // Per-check action shown on a subtask that FAILED and was NOT auto-fixed, next
 // to its "In Progress" status. Keyed by check factor. Source of truth is

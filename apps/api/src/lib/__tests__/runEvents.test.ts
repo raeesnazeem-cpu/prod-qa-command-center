@@ -99,11 +99,17 @@ describe("TriggerTracker", () => {
 
 describe("comment texts", () => {
   it("could-not-start says the reason and the fix", () => {
-    expect(couldNotStartText("No project.", "create it.")).toBe("Could not start the test run. No project. To fix: create it.")
+    expect(couldNotStartText("No project.", "create it.")).toBe(
+      "<p><strong>Could not start the test run.</strong></p><p>No project.</p><p><strong>To fix:</strong> create it.</p>",
+    )
   })
   it("started names url, source, checks and run", () => {
-    expect(startedText("https://a.com", "release task", ["links", "forms"], "r9")).toBe(
-      "Test run started on https://a.com (URL from release task). Checks: links, forms. Run r9.",
-    )
+    const html = startedText("https://a.com", "release task", ["accessibility_check", "made_up_check"], "r9", "Fallback <URL> used")
+    expect(html).toContain("<p><strong>Test run started.</strong></p>")
+    expect(html).toContain('<a href="https://a.com">https://a.com</a>')
+    expect(html).toContain("<strong>URL from:</strong> release task")
+    expect(html).toContain("<strong>Checks (2):</strong></p><ul><li>Full Accessibility</li><li>made_up_check</li></ul>")
+    expect(html).toContain("<p>Fallback &lt;URL&gt; used</p>")
+    expect(html).toContain("<code>r9</code>")
   })
 })

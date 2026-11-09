@@ -1,3 +1,4 @@
+import { CHECK_LABELS } from "@qacc/shared"
 // Step log for QA runs (table run_events). TED's "View run log" panel reads it
 // through GET /webhooks/ted/runs/:runId/events, so every message here is shown
 // to people: keep it one plain line.
@@ -118,12 +119,37 @@ export class TriggerTracker {
   }
 }
 
+const esc = (v: string) =>
+  String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
+
+// TED renders <p>/<strong>/<ul>/<li>/<a>/<code> (its sanitizer strips inline styles),
+// so comments are built from those only.
 export function couldNotStartText(reason: string, fix: string): string {
-  return `Could not start the test run. ${reason.trim()} To fix: ${fix.trim()}`
+  return (
+    `<p><strong>Could not start the test run.</strong></p>` +
+    `<p>${esc(reason.trim())}</p>` +
+    `<p><strong>To fix:</strong> ${esc(fix.trim())}</p>`
+  )
 }
 
-export function startedText(url: string, source: string, checks: string[], runId: string): string {
-  const from = source ? ` (URL from ${source})` : ""
-  const list = checks.length ? checks.join(", ") : "default suite"
-  return `Test run started on ${url}${from}. Checks: ${list}. Run ${runId}.`
+export function startedText(
+  url: string,
+  source: string,
+  checks: string[],
+  runId: string,
+  warning?: string,
+): string {
+  const names = checks.map((c) => CHECK_LABELS[c] || c)
+  const list = names.length
+    ? `<p><strong>Checks (${names.length}):</strong></p><ul>${names.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`
+    : `<p><strong>Checks:</strong> default suite</p>`
+  return (
+    `<p><strong>Test run started.</strong></p>` +
+    `<p><strong>Site:</strong> <a href="${esc(url)}">${esc(url)}</a>` +
+    (source ? `<br><strong>URL from:</strong> ${esc(source)}` : "") +
+    `</p>` +
+    (warning ? `<p>${esc(warning.trim())}</p>` : "") +
+    list +
+    `<p>Run <code>${esc(runId)}</code>. Open <strong>View run log</strong> on the task to follow it.</p>`
+  )
 }

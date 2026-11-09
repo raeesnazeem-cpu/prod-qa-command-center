@@ -3463,8 +3463,7 @@ webhookRouter.post(
                 await addRunJob(run.id)
                 await tr.started(run.id, { checks: postReleaseChecks, url: runSiteUrl })
                 scanStartComment =
-                  startedText(runSiteUrl as string, siteUrlSource, postReleaseChecks, run.id) +
-                  (urlWarning ? `\n\n${urlWarning}` : "")
+                  startedText(runSiteUrl as string, siteUrlSource, postReleaseChecks, run.id, urlWarning || undefined)
                 console.log(
                   `✅ Post-release General Checks run for ${project.name} is now STARTING.`,
                 )
