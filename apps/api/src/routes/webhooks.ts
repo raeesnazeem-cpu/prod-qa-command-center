@@ -561,6 +561,42 @@ async function resolveTaskIdByTemplateKeyFromTED(
   }
 }
 
+// Post one comment as "TED QA Agent" through /comments/ai (X-Api-Key + idempotent
+// eventKey). No fallback: returns false when the key is missing or TED refuses.
+// Also used by the worker, which relays its comments here (routes/internal.ts).
+export async function postTedAiComment(
+  taskId: string | number,
+  text: string,
+  eventKey: string,
+  extra: Record<string, unknown> = {},
+): Promise<boolean> {
+  const xApiKey = process.env.X_API_KEY
+  if (!xApiKey) return false
+  try {
+    const r = await fetch(`${TED_BASE}/api/tasks/${taskId}/comments/ai`, {
+      method: "POST",
+      headers: {
+        "X-Api-Key": xApiKey,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      // agentName: TED shows the comment as "TED QA Agent" (older TED ignores it).
+      body: JSON.stringify({ ...extra, text, eventKey, agentName: TED_QA_AGENT_NAME }),
+    })
+    if (r.ok && (r.headers.get("content-type") || "").includes("application/json")) {
+      console.log(`✅ Posted comment to TED #${taskId} via /comments/ai.`)
+      return true
+    }
+    const preview = (await r.text().catch(() => "")).slice(0, 200)
+    console.warn(
+      `⚠️ /comments/ai refused #${taskId} (HTTP ${r.status}, content-type "${r.headers.get("content-type") || ""}"). Body: ${preview}`,
+    )
+  } catch (err) {
+    console.warn(`⚠️ /comments/ai threw for #${taskId}:`, err)
+  }
+  return false
+}
+
 // Post a comment to a TED task, preferring the newer /comments/ai endpoint
 // (X-Api-Key + idempotent eventKey). If that endpoint is unavailable/errors,
 // fall back to the proven /comments endpoint (Bearer). Returns true on success.
@@ -574,42 +610,15 @@ async function postTedComment(
     return recordLocalTedWrite(taskId, text, eventKey, "report", runId)
   }
 
-  const xApiKey = process.env.X_API_KEY
   const bearer = process.env.TED_API_TOKEN
 
   const isJsonOk = (r: globalThis.Response) =>
     r.ok && (r.headers.get("content-type") || "").includes("application/json")
 
   // 1. Preferred: /comments/ai with X-Api-Key + eventKey (idempotent).
-  if (xApiKey) {
-    try {
-      const r = await fetch(
-        `${TED_BASE}/api/tasks/${taskId}/comments/ai`,
-        {
-          method: "POST",
-          headers: {
-            "X-Api-Key": xApiKey,
-            Accept: "application/json",
-            "Content-Type": "application/json",
-          },
-          // agentName: TED shows the comment as "TED QA Agent" (older TED ignores it).
-          body: JSON.stringify({ text, eventKey, agentName: TED_QA_AGENT_NAME }),
-        },
-      )
-      if (isJsonOk(r)) {
-        console.log(`✅ Posted comment to TED #${taskId} via /comments/ai.`)
-        return true
-      }
-      const preview = (await r.text().catch(() => "")).slice(0, 200)
-      console.warn(
-        `⚠️ /comments/ai unavailable for #${taskId} (HTTP ${r.status}, content-type "${r.headers.get("content-type") || ""}"). Falling back to /comments. Body: ${preview}`,
-      )
-    } catch (err) {
-      console.warn(
-        `⚠️ /comments/ai threw for #${taskId}; falling back to /comments:`,
-        err,
-      )
-    }
+  if (process.env.X_API_KEY) {
+    if (await postTedAiComment(taskId, text, eventKey)) return true
+    console.warn(`⚠️ /comments/ai did not take #${taskId}; falling back to /comments.`)
   } else {
     console.log("ℹ️ X_API_KEY not set; using /comments (Bearer) directly.")
   }

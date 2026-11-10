@@ -9,3 +9,4 @@ export * from './findingVerdict';
 export * from './gsrVerdict';
 export * from './gapChecks';
 export * from './displayNames';
+export * from './internalAuth';
