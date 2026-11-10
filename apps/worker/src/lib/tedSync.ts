@@ -1,7 +1,7 @@
 import { supabase } from "./supabase"
 import { logRunEvent } from "./runEvents"
 import { TED_BASE } from "./tedClient"
-import { GAP_LABELS, GAP_NOT_FIXED } from "@qacc/shared"
+import { GAP_LABELS, GAP_NOT_FIXED, INTERNAL_TOKEN_HEADER, internalToken } from "@qacc/shared"
 import { getClientDomain } from "./tedClient"
 import { qaQueue } from "./queue"
 import { releaseRunSlot } from "./runSlot"
@@ -215,8 +215,44 @@ export async function postQaccInternalNote(
   })
 }
 
+// The QACC API's base URL. Defaults to production only when this worker talks to
+// production TED; a local worker (TED_API_BASE set) must name its API explicitly.
+function qaccApiBase(): string | null {
+  const explicit = process.env.QACC_API_URL
+  if (explicit) return explicit.replace(/\/+$/, "")
+  return process.env.TED_API_BASE ? null : "https://api.qacc.raees.dev"
+}
+
+// POST the comment to the API's /internal/ted-comment. True when TED took it.
+export async function relayTedCommentViaApi(
+  tedTaskId: string,
+  text: string,
+  eventKey: string,
+  aiAssigned: boolean,
+): Promise<boolean> {
+  const base = qaccApiBase()
+  const token = internalToken("ted-comment")
+  if (!base || !token) return false
+  try {
+    const r = await fetch(`${base}/internal/ted-comment`, {
+      method: "POST",
+      headers: { [INTERNAL_TOKEN_HEADER]: token, "Content-Type": "application/json" },
+      body: JSON.stringify({ taskId: tedTaskId, text, eventKey, ...(aiAssigned ? { aiAssigned: true } : {}) }),
+    })
+    if (r.ok) {
+      logger.info({ tedTaskId }, "Posted TED comment via the QACC API relay.")
+      return true
+    }
+    logger.warn({ tedTaskId, status: r.status }, "QACC API relay did not post the comment.")
+  } catch (err: any) {
+    logger.warn({ tedTaskId, error: err?.message }, "QACC API relay threw.")
+  }
+  return false
+}
+
 // Post a comment to a TED task, preferring the newer /comments/ai endpoint
-// (X-Api-Key + idempotent eventKey); fall back to the proven /comments (Bearer).
+// (X-Api-Key + idempotent eventKey), then the QACC API relay, then the proven
+// /comments (Bearer).
 // Returns true on success.
 export async function postTedComment(
   tedTaskId: string,
@@ -291,14 +327,15 @@ export async function postTedComment(
         "/comments/ai threw; falling back to /comments (Bearer).",
       )
     }
-  } else {
-    logger.info(
-      { tedTaskId },
-      "X_API_KEY not set in worker; using /comments (Bearer) directly.",
-    )
   }
 
-  // 2. Fallback: /comments with Bearer (the currently-working endpoint).
+  // 2. Relay through the QACC API, which holds a working X_API_KEY — so the
+  // comment still shows as "TED QA Agent" when this worker has no key of its own.
+  if (await relayTedCommentViaApi(tedTaskId, clientText, eventKey, ctx.aiAssigned === true)) {
+    return true
+  }
+
+  // 3. Fallback: /comments with Bearer (posts under the token owner's name).
   if (!bearer) {
     logger.error({ tedTaskId }, "No TED_API_TOKEN for /comments fallback.")
     return false
