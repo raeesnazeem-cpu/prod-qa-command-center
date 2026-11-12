@@ -56,6 +56,7 @@ const AREA_OF: Record<string, CheckArea> = {
   cart_mobile: "Layout (tablet / mobile)",
   cart_add_to_cart: "Layout (tablet / mobile)",
   // Menus & navigation
+  hamburger_menu: "Menus & navigation",
   menu_parity: "Menus & navigation",
   menu_coverage: "Menus & navigation",
   active_menu: "Menus & navigation",
