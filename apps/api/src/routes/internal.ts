@@ -1,5 +1,5 @@
 import { Router, Request, Response } from "express"
-import { INTERNAL_TOKEN_HEADER, isValidInternalToken } from "@qacc/shared"
+import { INTERNAL_TOKEN_HEADER, isValidInternalToken } from "@qacc/shared/internalAuth"
 import { postTedAiComment } from "./webhooks"
 
 /**
