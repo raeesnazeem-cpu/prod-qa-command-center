@@ -226,6 +226,57 @@ async function findProjectByTedClient(
   return null
 }
 
+// Create the client's ONE QACC project from TED details when none exists yet.
+// A client has a single project that every stage (pre-release, internal QA,
+// post-release, full scan) reuses — the stage flags just flip on that row. Used
+// by post-release, so a client whose earlier triggers never reached QACC can
+// still start. Returns the new row, or null when it could not be created.
+async function autoCreateProjectFromTed(opts: {
+  clientId: string | number | null | undefined
+  clientName: string
+  siteUrl: string | null
+  stage: "is_pre_release" | "is_internal_qa" | "is_post_release"
+  liveSiteUrl?: string | null
+}): Promise<any | null> {
+  console.log(
+    `⚠️ No QACC project for "${opts.clientName}" (TED client ${opts.clientId ?? "?"}). Creating one from TED details...`,
+  )
+  // Company tool: one org. Attach to the first org that has users.
+  const { data: orgData } = await supabase
+    .from("users")
+    .select("org_id")
+    .not("org_id", "is", null)
+    .limit(1)
+    .single()
+  if (!orgData?.org_id) {
+    console.log("❌ Cannot auto-create project: no default org_id in QACC.")
+    return null
+  }
+  const insertPayload: any = {
+    name: opts.clientName,
+    client_name: opts.clientName,
+    ted_client_id: opts.clientId != null ? String(opts.clientId) : null,
+    org_id: orgData.org_id,
+    status: "active",
+    // site_url is NOT NULL; empty when TED gave no URL (the run is then
+    // cancelled for lack of a URL, and a later trigger fills it in).
+    site_url: opts.siteUrl || "",
+    [opts.stage]: true,
+  }
+  if (opts.liveSiteUrl) insertPayload.live_site_url = opts.liveSiteUrl
+  const { data, error } = await supabase
+    .from("projects")
+    .insert(insertPayload)
+    .select()
+    .single()
+  if (error) {
+    console.error("❌ Failed to auto-create project in database:", error)
+    return null
+  }
+  console.log(`✅ Auto-created QACC project: ${data.name} (ID: ${data.id})`)
+  return data
+}
+
 // Resolve the QACC user id to attribute a TED-triggered run to. Mirrors the
 // inline logic the parent flows use: match the TED assignee by name, else
 // auto-create a "ghost" user so their name shows on the run, else fall back to
@@ -3248,19 +3299,28 @@ webhookRouter.post(
             )
           }
 
-          // The project must already exist in QACC (per requirement).
           // Resolve ID-first (ted_client_id), name fallback with backfill.
+          // A client whose earlier triggers never reached QACC has no project
+          // yet — create its one project here, as pre-release does.
           tr.setTask(scanTaskId)
-          const project = await findProjectByTedClient(task.clientId, clientName)
+          const project =
+            (await findProjectByTedClient(task.clientId, clientName)) ||
+            (await autoCreateProjectFromTed({
+              clientId: task.clientId,
+              clientName,
+              siteUrl: liveSiteUrl,
+              liveSiteUrl,
+              stage: "is_post_release",
+            }))
 
           if (!project) {
             console.log(
-              `⚠️ No existing QACC project named "${clientName}" — skipping post-release run (project must already exist).`,
+              `⚠️ No QACC project for "${clientName}" and auto-create failed — skipping post-release run.`,
             )
             await tr.fail(
               "project.missing",
-              `There is no QACC project for ${clientName} (TED client ${task.clientId ?? "?"}).`,
-              fixNoProject(task.clientId),
+              `There is no QACC project for ${clientName} (TED client ${task.clientId ?? "?"}) and QACC could not create one.`,
+              FIX_NO_ORG,
             )
           } else {
             await tr.step("project.found", "ok", `Project found: ${project.name}`, {
