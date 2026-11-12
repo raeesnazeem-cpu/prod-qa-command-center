@@ -9,4 +9,5 @@ export * from './findingVerdict';
 export * from './gsrVerdict';
 export * from './gapChecks';
 export * from './displayNames';
-export * from './internalAuth';
+// internalAuth uses Node's crypto, so it is NOT exported here (the web bundle
+// imports this file). Server code imports "@qacc/shared/internalAuth".

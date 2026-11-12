@@ -5,7 +5,7 @@ jest.mock("@qacc/ai", () => ({}), { virtual: true })
 process.env.TED_PREVIEW_ONLY = "false"
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { postTedComment } = require("../tedSync")
-import { INTERNAL_TOKEN_HEADER, isValidInternalToken } from "@qacc/shared"
+import { INTERNAL_TOKEN_HEADER, isValidInternalToken } from "@qacc/shared/internalAuth"
 
 // Prod 2026-11-10: the worker had no working X_API_KEY, so every run report fell
 // back to the Bearer token and showed under that person's name.

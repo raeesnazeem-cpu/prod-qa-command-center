@@ -1,6 +1,6 @@
 import express from "express"
 import request from "supertest"
-import { internalToken, INTERNAL_TOKEN_HEADER } from "@qacc/shared"
+import { internalToken, INTERNAL_TOKEN_HEADER } from "@qacc/shared/internalAuth"
 
 const postTedAiComment = jest.fn()
 jest.mock("../webhooks", () => ({ postTedAiComment: (...a: any[]) => postTedAiComment(...a) }))
