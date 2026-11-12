@@ -17,6 +17,7 @@ import {
   startedText,
 } from "../lib/runEvents"
 import { buildRunProgress, pickLatestRun, NOT_STARTED_KINDS } from "../lib/runProgress"
+import { findResumableRun, queueResume, resumeMessage } from "../lib/runResume"
 import {
   tedGetJson,
   getTedClientProfile,
@@ -1487,21 +1488,25 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
               runCreatorId = adminUser?.id || null
             }
 
-            // Dedupe guard (see findBlockingRun): no second run while one is
-            // active, nor within the cooldown unless TED sends force: true.
+            // Resume a run for this task that died midway (see tryResumeTedRun),
+            // else the dedupe guard (see findBlockingRun): no second run while
+            // one is active, nor within the cooldown unless TED sends force: true.
+            let resumedRunId: string | null = null
             if (preReleaseTaskId) {
-              const blocking = await findBlockingRun(
-                String(preReleaseTaskId),
-                isForcedTrigger(payload),
-              )
+              resumedRunId = await tryResumeTedRun(String(preReleaseTaskId), "pre_release", tedSiteUrl || null, "pre-release", tr)
+              const blocking = resumedRunId
+                ? null
+                : await findBlockingRun(String(preReleaseTaskId), isForcedTrigger(payload))
               if (blocking)
                 return skipDuplicateTrigger(res, String(preReleaseTaskId), blocking, "pre-release", tr)
             }
 
+            if (resumedRunId) {
+              createdRunId = resumedRunId
+            } else if (!tedSiteUrl) {
             // 3. No beta site URL resolved → do NOT scan. Record a visible
             // `failed` run and post a plain-language cancellation notice to TED.
             // (Replaces the old silent fallback to the local demo site.)
-            if (!tedSiteUrl) {
               scanAborted = true
               const abortedRunId = await createAbortedRun({
                 projectId: project.id,
@@ -2061,6 +2066,45 @@ async function findBlockingRun(
   return recent?.length
     ? { id: recent[0].id, reason: "cooldown", createdAt: recent[0].created_at }
     : null
+}
+
+// Retrigger of a task whose last run died midway → finish THAT run instead of
+// starting over (see lib/runResume). Cancelled, paused and aborted runs are
+// never resumed. Returns the resumed run id, or null to continue as normal
+// (duplicate check, then a fresh run). Posts its own TED comment: the flows'
+// start comment is keyed by run id, so TED would drop a second one.
+async function tryResumeTedRun(
+  tedTaskId: string,
+  runType: "pre_release" | "internal_qa" | "post_release",
+  siteUrl: string | null,
+  flow: string,
+  tr: TriggerTracker,
+): Promise<string | null> {
+  const r = await findResumableRun(tedTaskId, runType, siteUrl)
+  if (!r) return null
+  try {
+    await queueResume(r)
+  } catch (e: any) {
+    console.error(`❌ [TED ${flow}] Could not queue the resume (starting fresh):`, e?.message || e)
+    return null
+  }
+  const msg = resumeMessage(r)
+  console.log(`♻️ [TED ${flow}] ${msg}`)
+  tr.setTask(tedTaskId)
+  await tr.started(r.run.id, { resumed: true, stage: r.stage })
+  await tr.step("run.resumed", "ok", msg, {
+    stage: r.stage,
+    pages: r.pages.rows,
+    pagesLeft: r.pages.unfinished,
+  })
+  const safe = msg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  await postTedComment(
+    tedTaskId,
+    `<p>♻️ <strong>Test run resumed.</strong></p><p>${safe}</p>`,
+    `ext:qacc-run-resumed-${r.run.id}-${Date.now()}`,
+    r.run.id,
+  ).catch(() => {})
+  return r.run.id
 }
 
 // Tell TED why the trigger did nothing (once per blocking run, so repeat clicks
@@ -2858,21 +2902,25 @@ webhookRouter.post(
               runCreatorId = adminUser?.id || null
             }
 
-            // Dedupe guard (see findBlockingRun): no second run while one is
-            // active, nor within the cooldown unless TED sends force: true.
+            // Resume a run for this task that died midway (see tryResumeTedRun),
+            // else the dedupe guard (see findBlockingRun): no second run while
+            // one is active, nor within the cooldown unless TED sends force: true.
+            let resumedRunId: string | null = null
             if (targetTaskId) {
-              const blocking = await findBlockingRun(
-                String(targetTaskId),
-                isForcedTrigger(payload),
-              )
+              resumedRunId = await tryResumeTedRun(String(targetTaskId), "internal_qa", tedSiteUrl || null, "internal-QA", tr)
+              const blocking = resumedRunId
+                ? null
+                : await findBlockingRun(String(targetTaskId), isForcedTrigger(payload))
               if (blocking)
                 return skipDuplicateTrigger(res, String(targetTaskId), blocking, "internal-QA", tr)
             }
 
+            if (resumedRunId) {
+              createdRunId = resumedRunId
+            } else if (!tedSiteUrl) {
             // No beta site URL resolved → do NOT scan. Record a visible
             // `failed` run and post a plain-language cancellation notice to TED.
             // (Replaces the old silent fallback to the local demo site.)
-            if (!tedSiteUrl) {
               scanAborted = true
               const abortedRunId = await createAbortedRun({
                 projectId: project.id,
@@ -3435,17 +3483,21 @@ webhookRouter.post(
                 `⚠️ Fallback URL in use: no released domain was found on the "Complete website security and release" task ` +
                 `(neither in its automation payload nor its comments), so the TED client page Website URL (${liveSiteUrl}) is being scanned instead.`
             }
-            // Dedupe guard (see findBlockingRun): no second run while one is
-            // active, nor within the cooldown unless TED sends force: true.
+            // Resume a run for this task that died midway (see tryResumeTedRun),
+            // else the dedupe guard (see findBlockingRun): no second run while
+            // one is active, nor within the cooldown unless TED sends force: true.
+            let resumedRunId: string | null = null
             if (scanTaskId) {
-              const blocking = await findBlockingRun(
-                String(scanTaskId),
-                isForcedTrigger(payload),
-              )
+              resumedRunId = await tryResumeTedRun(String(scanTaskId), "post_release", runSiteUrl || null, "post-release", tr)
+              const blocking = resumedRunId
+                ? null
+                : await findBlockingRun(String(scanTaskId), isForcedTrigger(payload))
               if (blocking)
                 return skipDuplicateTrigger(res, String(scanTaskId), blocking, "post-release", tr)
             }
-            if (!runSiteUrl) {
+            if (resumedRunId) {
+              createdRunId = resumedRunId
+            } else if (!runSiteUrl) {
               scanAborted = true
               const abortedRunId = await createAbortedRun({
                 projectId: project.id,

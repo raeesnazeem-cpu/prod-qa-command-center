@@ -22,6 +22,75 @@ const logger = pino({
   },
 })
 
+// Standalone API checks (each its own job, outside the page scan).
+// cro_audit (G99 WebAudit CRO review) is full-scan only.
+const API_CHECKS = ["project_plan", "paid_media", "cro_audit"]
+
+export function enabledApiChecksFor(run: { enabled_checks?: string[] | null; run_type?: string | null }): string[] {
+  return (run.enabled_checks || []).filter(
+    (c: string) => API_CHECKS.includes(c) && (c !== "cro_audit" || run.run_type === "full_scan"),
+  )
+}
+
+/** Queue the page scan for these pages: one job per page, or a batch of up to 10. */
+export async function enqueuePageJobs(
+  run: { id: string; project_id: string; enabled_checks?: string[] | null },
+  pages: { id: string; url: string }[],
+  wpPassword?: string,
+): Promise<void> {
+  const runId = run.id
+  const BATCH_SIZE = 10
+  const chunks: { id: string; url: string }[][] = []
+  for (let i = 0; i < pages.length; i += BATCH_SIZE) chunks.push(pages.slice(i, i + BATCH_SIZE))
+  const jobs = chunks.map((chunk) =>
+    chunk.length === 1
+      ? {
+          name: "crawl_page",
+          data: {
+            runId,
+            pageId: chunk[0].id,
+            url: chunk[0].url,
+            projectId: run.project_id,
+            enabledChecks: run.enabled_checks,
+            wpPassword,
+          },
+          opts: { attempts: 3, backoff: { type: "exponential", delay: 5000 } },
+        }
+      : {
+          name: "crawl_batch",
+          data: {
+            runId,
+            pages: chunk.map((p) => ({ id: p.id, url: p.url })),
+            projectId: run.project_id,
+            wpPassword,
+          },
+          opts: {
+            attempts: 3,
+            backoff: { type: "exponential", delay: 5000 },
+            lockDuration: 600000,
+          },
+        },
+  )
+  await qaQueue.addBulk(jobs as any)
+}
+
+/** Queue the standalone API checks. */
+export async function enqueueApiCheckJobs(runId: string, projectId: string, checks: string[]): Promise<void> {
+  for (const check of checks) {
+    const jobName = `check_${check}`
+    await qaQueue.add(
+      jobName,
+      { runId, projectId },
+      // cro_audit retries each page itself and records "could not complete"
+      // rows; a job-level retry would just call WebAudit again for every page.
+      check === "cro_audit"
+        ? { attempts: 1 }
+        : { attempts: 3, backoff: { type: "exponential", delay: 5000 } },
+    )
+    logger.info({ runId, jobName }, `Enqueued ${jobName} job successfully`)
+  }
+}
+
 export async function processStartRunJob(job: Job) {
   const { runId } = job.data
   const wpPassword = job.data.wpPassword || job.data.wp_password
@@ -415,13 +484,7 @@ export async function processStartRunJob(job: Job) {
 
     // Add jobs to queue for each page discovered
     // Standalone API checks enabled on this run (each is its own job).
-    // cro_audit (G99 WebAudit CRO review) is full-scan only.
-    const API_CHECKS = ["project_plan", "paid_media", "cro_audit"]
-    const enabledApiChecks: string[] = (run.enabled_checks || []).filter(
-      (c: string) =>
-        API_CHECKS.includes(c) &&
-        (c !== "cro_audit" || run.run_type === "full_scan"),
-    )
+    const enabledApiChecks = enabledApiChecksFor(run)
 
     if (needsPageScan && insertedPages && insertedPages.length > 0) {
       // Pages and API checks run in parallel — arm the gate BEFORE enqueuing
@@ -430,51 +493,7 @@ export async function processStartRunJob(job: Job) {
 
       logger.info({ runId, count: insertedPages.length }, "Enqueuing scan jobs")
 
-      const BATCH_SIZE = 10
-      const chunks = []
-      for (let i = 0; i < insertedPages.length; i += BATCH_SIZE) {
-        chunks.push(insertedPages.slice(i, i + BATCH_SIZE))
-      }
-
-      const jobs = chunks.map((chunk) => {
-        if (chunk.length === 1) {
-          const page = chunk[0]
-          return {
-            name: "crawl_page",
-            data: {
-              runId,
-              pageId: page.id,
-              url: page.url,
-              projectId: run.project_id,
-              enabledChecks: run.enabled_checks,
-              wpPassword,
-            },
-
-            opts: {
-              attempts: 3,
-              backoff: { type: "exponential", delay: 5000 },
-            },
-          }
-        } else {
-          return {
-            name: "crawl_batch",
-            data: {
-              runId,
-              pages: chunk.map((p) => ({ id: p.id, url: p.url })),
-              projectId: run.project_id,
-              wpPassword,
-            },
-
-            opts: {
-              attempts: 3,
-              backoff: { type: "exponential", delay: 5000 },
-              lockDuration: 600000,
-            },
-          }
-        }
-      })
-
-      await qaQueue.addBulk(jobs)
+      await enqueuePageJobs(run, insertedPages, wpPassword)
       await logRunEvent({
         runId,
         kind: "checks.running",
@@ -482,29 +501,11 @@ export async function processStartRunJob(job: Job) {
         message: `Running ${(run.enabled_checks || []).length} checks on ${insertedPages.length} pages`,
         detail: { checks: run.enabled_checks || [], pages: insertedPages.length },
       })
-      logger.info(
-        { runId, jobCount: jobs.length },
-        "Enqueued scan jobs successfully",
-      )
+      logger.info({ runId }, "Enqueued scan jobs successfully")
     }
 
     // Enqueue standalone API checks if they are enabled
-    for (const check of enabledApiChecks) {
-      const jobName = `check_${check}`
-      await qaQueue.add(
-        jobName,
-        { runId, projectId: run.project_id },
-        // cro_audit retries each page itself and records "could not complete"
-        // rows; a job-level retry would just call WebAudit again for every page.
-        check === "cro_audit"
-          ? { attempts: 1 }
-          : {
-              attempts: 3,
-              backoff: { type: "exponential", delay: 5000 },
-            },
-      )
-      logger.info({ runId, jobName }, `Enqueued ${jobName} job successfully`)
-    }
+    await enqueueApiCheckJobs(runId, run.project_id, enabledApiChecks)
   } catch (error: any) {
     logger.error({ runId, error: error.message }, "Error during sitemap crawl")
     await logRunEvent({
