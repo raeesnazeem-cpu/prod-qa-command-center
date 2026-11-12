@@ -2159,25 +2159,28 @@ export async function checkGrowth99ContactForm(
   let context: any = null
   let page: any = null
 
-  if (
-    sharedBrowser &&
-    sharedBrowser.contexts().length > 0 &&
-    sharedBrowser.contexts()[0].pages().length > 0
-  ) {
-    page = sharedBrowser.contexts()[0].pages()[0]
+  // Reuse the crawled page only when it really is THIS url. Other checks open
+  // their own contexts on the same browser, so contexts()[0].pages()[0] can be
+  // another page (a 404 probe, a previous page) — reading that reported "no
+  // contact form" on every page of a site that has one.
+  const samePage = (a: string, b: string) =>
+    normalizeSiteUrl(String(a || "").split(/[?#]/)[0]) ===
+    normalizeSiteUrl(String(b || "").split(/[?#]/)[0])
+  if (sharedBrowser) {
+    const candidate = sharedBrowser
+      .contexts()
+      .flatMap((c: any) => c.pages())
+      .find((p: any) => samePage(p.url(), url))
+    if (candidate) page = candidate
   }
 
-  try {
-    if (!page) {
-      context = await newRealContext(browser)
-      page = await context.newPage()
-    }
-    if (onProgress)
-      await onProgress(10, "Checking page source for contact form...")
-
-    if (context) {
-      await gotoResilient(page, url, { timeout: 30000 })
-    }
+  // Open a fresh page on `url` (own context, closed in finally).
+  const openFreshPage = async () => {
+    context = await newRealContext(browser)
+    page = await context.newPage()
+    await gotoResilient(page, url, { timeout: 30000 })
+  }
+  const readFormSource = async () => {
     // Give a lazily-injected form a short chance to attach before reading the
     // source (the Growth99 iframe or any other form/embed).
     await page
@@ -2186,9 +2189,25 @@ export async function checkGrowth99ContactForm(
         state: "attached",
       })
       .catch(() => {})
-    const content = await page.content().catch(() => "")
+    return (await page.content().catch(() => "")) as string
+  }
 
+  try {
+    if (onProgress)
+      await onProgress(10, "Checking page source for contact form...")
+
+    if (!page) await openFreshPage()
+    let content = await readFormSource()
     hasForm = GROWTH99_FORM_SRCS.some((s) => content.includes(s))
+
+    // Not found on the shared crawled page → confirm on a fresh load before
+    // reporting "not found" (the shared page may have been changed by an
+    // earlier check, or the form loaded late).
+    if (!hasForm && !context) {
+      await openFreshPage()
+      content = await readFormSource()
+      hasForm = GROWTH99_FORM_SRCS.some((s) => content.includes(s))
+    }
     // Not the Growth99 widget: note any other contact form so a site built on
     // another form tool isn't reported as having no form at all.
     if (!hasForm) {

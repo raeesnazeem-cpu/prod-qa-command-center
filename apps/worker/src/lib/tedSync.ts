@@ -543,7 +543,34 @@ export async function parentHeldOpen(runId: string, parentTaskId: string): Promi
     .select("id")
     .eq("event_key", heldOpenKey(String(parentTaskId), runId))
     .limit(1)
-  return !!data && data.length > 0
+  if (data && data.length > 0) return true
+  // Safety net: any subtask whose LATEST status this run is still In Progress
+  // means a person has work left, so the parent must not close.
+  return (await openSubtaskIds(runId, String(parentTaskId))).length > 0
+}
+
+// Subtasks (not the parent) whose latest status row for this run is In Progress.
+export async function openSubtaskIds(runId: string, parentTaskId: string): Promise<string[]> {
+  const { data } = await supabase
+    .from("ted_comments")
+    .select("ted_task_id, event_key, created_at")
+    .eq("qa_run_id", runId)
+    .like("event_key", "status:%")
+    .order("created_at", { ascending: true })
+  return latestOpenSubtasks(data || [], parentTaskId)
+}
+
+export function latestOpenSubtasks(
+  rows: { ted_task_id: string | null; event_key: string }[],
+  parentTaskId: string,
+): string[] {
+  const latest = new Map<string, string>()
+  for (const r of rows) {
+    const id = String(r.ted_task_id || "")
+    if (!id || id === String(parentTaskId)) continue
+    latest.set(id, String(r.event_key).split(":")[2] || "")
+  }
+  return [...latest].filter(([, st]) => st === TED_STATUS_IN_PROGRESS).map(([id]) => id)
 }
 
 // Close out a finished run in TED: mark the parent scan task Completed, and —
@@ -2245,12 +2272,17 @@ export async function postSectionedReport(opts: {
   // Checks a person still has to act on: failed with no fix applied (the
   // no-result loop below adds the checks that could not complete). Any of these
   // keeps the PARENT task open — see markParentOpenIfIssues.
-  const appliedFor = (factor: string) =>
+  // One applied fix must not close a check whose other issues are still open:
+  // a failed check stays open while ANY real issue has no applied fix.
+  const unfixedFor = (factor: string) =>
     (byCheck.get(factor) || []).filter(
-      (f: any) => f?.id && fixMap.get(String(f.id))?.applied,
+      (f: any) => isRealDefect(f) && !(f?.id && fixMap.get(String(f.id))?.applied),
     ).length
+  const stillOpen = (s: { factor: string; status: string }) =>
+    s.status === "failed" &&
+    (unfixedFor(s.factor) > 0 || !(byCheck.get(s.factor) || []).some(isRealDefect))
   let openIssues = sections.filter(
-    (s) => s.factor !== "video_recording" && s.status === "failed" && appliedFor(s.factor) === 0,
+    (s) => s.factor !== "video_recording" && stillOpen(s),
   ).length
 
   if (hasSubtasks) {
@@ -2318,8 +2350,9 @@ export async function postSectionedReport(opts: {
       }
       // A check that FAILED with no fix APPLIED is "failed and not fixed": leave
       // its subtask In Progress (not Completed) and append the per-check action a
-      // person must take. Pass, or fail-with-applied-fix, stay Completed.
-      const notFixed = sec.status === "failed" && applied === 0
+      // person must take. Only a pass, or a fail where EVERY issue got an
+      // applied fix, is Completed.
+      const notFixed = stillOpen(sec)
       const notFixedNote =
         notFixed && NOT_FIXED_MESSAGE[sec.factor]
           ? `<p>🔸 <strong>Not auto-fixed — action needed:</strong> ${esc(NOT_FIXED_MESSAGE[sec.factor])}.</p>`
