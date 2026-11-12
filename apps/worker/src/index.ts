@@ -3,6 +3,7 @@ import { Queue, Worker, Job } from "bullmq"
 import pino from "pino"
 import { processTestJob } from "./jobs/testJob"
 import { processStartRunJob } from "./jobs/startRunJob"
+import { processResumeRunJob } from "./jobs/resumeRunJob"
 import { processCrawlPageJob, finalizeRun } from "./jobs/crawlPageJob"
 import { processCaptureScreenshotJob } from "./jobs/captureScreenshotJob"
 import { processCrawlBatchJob } from "./jobs/crawlBatchJob"
@@ -78,6 +79,9 @@ const worker = new Worker(
       switch (name) {
         case "start_run":
           await processStartRunJob(job)
+          break
+        case "resume_run":
+          await processResumeRunJob(job)
           break
         case "crawl_page":
           await processCrawlPageJob(job)
