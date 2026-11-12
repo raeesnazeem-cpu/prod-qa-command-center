@@ -8,6 +8,7 @@ import { qaQueue } from "./queue"
 import { releaseRunSlot } from "./runSlot"
 import { parseCroContext, CroPageReport } from "./croReport"
 import pino from "pino"
+import { renderTestCaseSummary, type TestCaseRow } from "./resultSummary"
 import sharp from "sharp"
 
 const logger = pino({
@@ -2175,14 +2176,10 @@ export async function buildSectionedReport(opts: {
     `<strong>${kind} QA — Report</strong><br>` +
     fullScanStamp +
     (runMeta?.site_url ? `Site: ${esc(runMeta.site_url)}<br>` : "")
-  // High-level test-case roll-up: one line per check (subtask) → Passed/Failed,
-  // failed first (sections are already sorted failed→passed). Deliberately icon-
-  // light — a single count line, then a plain-text list, so the summary reads as
-  // results, not a wall of emoji.
+  // Test-case summary: verdict, counts and the failed / could-not-run names up
+  // front; "Show full summary" opens the full pass/fail tables grouped by area.
   // One short reason per failed check, pulled from its first real defect
-  // (title, else the description) — HTML stripped and clipped to one sentence —
-  // so the roll-up reads "Contact Form — Failed: No contact form found" instead
-  // of a bare "Failed" the reader has to scroll down to explain.
+  // (title, else the description), HTML stripped and clipped to one sentence.
   const failReason = (factor: string): string => {
     const real = (byCheck.get(factor) || []).filter(isRealDefect)
     if (!real.length) return ""
@@ -2193,22 +2190,16 @@ export async function buildSectionedReport(opts: {
       .trim()
     return clipText(raw, 140)
   }
-  const rollupItems = sections
-    .map((s) => {
-      const label = esc(FRIENDLY[s.factor] || titleCase(s.factor))
-      if (s.status === "failed") {
-        const reason = failReason(s.factor)
-        return `<li>${label} — Failed${reason ? `: ${esc(reason)}` : ""}</li>`
-      }
-      if (s.status === "errored") return `<li>${label} — ${couldNotRunText(s.factor, byCheck.get(s.factor) || [])}</li>`
-      return `<li>${label} — Passed</li>`
-    })
-    .join("")
-  // Could-not-run checks that carry a visible reason (GSR) are listed too.
-  const shownErrored = sections.filter((s) => s.status === "errored").length
-  const overview =
-    `<p><strong>Test cases:</strong> ${tally.failed + tally.passed + shownErrored} total — ${tally.failed} failed, ${tally.passed} passed${shownErrored ? `, ${shownErrored} could not run` : ""}.</p>` +
-    (rollupItems ? `<ul>${rollupItems}</ul>` : "")
+  const overview = renderTestCaseSummary(
+    sections.map((s): TestCaseRow => ({
+      factor: s.factor,
+      label: FRIENDLY[s.factor] || titleCase(s.factor),
+      status: s.status,
+      reason: s.status === "failed" ? failReason(s.factor) : undefined,
+      couldNotRunHtml:
+        s.status === "errored" ? couldNotRunText(s.factor, byCheck.get(s.factor) || []) : undefined,
+    })),
+  )
 
   return { byCheck, sections, tally, titleHtml, overview, reportCtx }
 }
@@ -2576,26 +2567,22 @@ export async function postDetectionSummary(runId: string, tedTaskId: string): Pr
       .trim()
     return clipText(raw, 140)
   }
-  // Failed first, then passed — same ordering as the fix summary's roll-up.
-  const rollupItems = [...failed, ...couldNotRun, ...passed]
-    .map((s) => {
-      const label = esc(FRIENDLY[s.factor] || titleCase(s.factor))
-      if (s.status === "failed") {
-        const reason = failReason(s.factor)
-        return `<li>${label} — Failed${reason ? `: ${esc(reason)}` : ""}</li>`
-      }
-      if (s.status === "errored") return `<li>${label} — ${couldNotRunText(s.factor, byCheck.get(s.factor) || [])}</li>`
-      return `<li>${label} — Passed</li>`
-    })
-    .join("")
+  const summary = renderTestCaseSummary(
+    [...failed, ...couldNotRun, ...passed].map((s): TestCaseRow => ({
+      factor: s.factor,
+      label: FRIENDLY[s.factor] || titleCase(s.factor),
+      status: s.status,
+      reason: s.status === "failed" ? failReason(s.factor) : undefined,
+      couldNotRunHtml:
+        s.status === "errored" ? couldNotRunText(s.factor, byCheck.get(s.factor) || []) : undefined,
+    })),
+  )
 
   const kind = runKind(runType)
   const body =
     `<p><strong>${kind} QA — Issues Detected</strong></p>` +
     (runMeta?.site_url ? `<p>Site: ${esc(runMeta.site_url)}</p>` : "") +
-    `<p><strong>Test cases:</strong> ${failed.length + passed.length + couldNotRun.length} total — ` +
-    `${failed.length} failed, ${passed.length} passed${couldNotRun.length ? `, ${couldNotRun.length} could not run` : ""}.</p>` +
-    (rollupItems ? `<ul>${rollupItems}</ul>` : "")
+    summary
 
   // Plain parent comment: NO aiAssigned, and it does not mark the task complete.
   await postTedComment(
