@@ -23,7 +23,8 @@ import {
 } from "lucide-react"
 import { ProjectOverviewTab } from "../components/ProjectOverviewTab"
 import { RunsTab } from "../components/RunsTab"
-import { DryRunsTab } from "../components/DryRunsTab"
+// SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+// import { DryRunsTab } from "../components/DryRunsTab"
 import { TedCommentsTab } from "../components/TedCommentsTab"
 import { SettingsTab } from "../components/SettingsTab"
 import { CanDo } from "../components/CanDo"
@@ -154,7 +155,8 @@ export const ProjectDetailPage = () => {
       minRole: "developer",
     },
     { id: "runs", label: "QA Runs", icon: PlayCircle, minRole: "qa_engineer" },
-    { id: "dry-runs", label: "Dry-run Data", icon: Zap, minRole: "qa_engineer" },
+    // SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+    // { id: "dry-runs", label: "Dry-run Data", icon: Zap, minRole: "qa_engineer" },
     {
       id: "ted-comments",
       label: "TED Comments",
@@ -172,7 +174,9 @@ export const ProjectDetailPage = () => {
       <div className="flex items-center space-x-4">
         <Link
           to={
-            ["runs", "dry-runs", "ted-comments", "settings"].includes(activeTab)
+            // SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+            // (was: ["runs", "dry-runs", "ted-comments", "settings"])
+            ["runs", "ted-comments", "settings"].includes(activeTab)
               ? `/projects/${id}?tab=overview`
               : "/projects"
           }
@@ -189,7 +193,8 @@ export const ProjectDetailPage = () => {
             Projects
           </Link>
           <span>/</span>
-          {["runs", "dry-runs", "ted-comments", "settings"].includes(
+          {/* SCAN-ONLY: fix feature disabled — QACC only scans and reports findings. (was: ["runs", "dry-runs", "ted-comments", "settings"]) */}
+          {["runs", "ted-comments", "settings"].includes(
             activeTab,
           ) ? (
             <>
@@ -203,9 +208,10 @@ export const ProjectDetailPage = () => {
               <span className="text-slate-900 dark:text-slate-200">
                 {activeTab === "runs"
                   ? "QA Runs"
-                  : activeTab === "dry-runs"
-                    ? "Dry-run Data"
-                    : activeTab === "ted-comments"
+                  : // SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+                    // activeTab === "dry-runs"
+                    // ? "Dry-run Data" :
+                    activeTab === "ted-comments"
                       ? "TED Comments"
                       : "Settings"}
               </span>
@@ -332,7 +338,8 @@ export const ProjectDetailPage = () => {
           />
         )}
         {activeTab === "runs" && <RunsTab project={project} />}
-        {activeTab === "dry-runs" && <DryRunsTab project={project} />}
+        {/* SCAN-ONLY: fix feature disabled — QACC only scans and reports findings. */}
+        {/* {activeTab === "dry-runs" && <DryRunsTab project={project} />} */}
         {activeTab === "ted-comments" && <TedCommentsTab project={project} />}
         {activeTab === "settings" && <SettingsTab project={project} />}
       </div>

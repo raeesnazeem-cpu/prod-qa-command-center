@@ -2438,7 +2438,8 @@ export async function checkGrowth99ContactForm(
         {
           check_factor: "contact_form",
           title: "Contact Form Not Found",
-          description: `The Growth99 contact form was not found on this page; a ${otherForm} form is used instead.${isPostRelease ? " No automatic fix for this — check with the team whether to add the form or correct the embed code." : ""}`,
+          // SCAN-ONLY: fix wording removed — was: description: `The Growth99 contact form was not found on this page; a ${otherForm} form is used instead.${isPostRelease ? " No automatic fix for this — check with the team whether to add the form or correct the embed code." : ""}`,
+          description: `The Growth99 contact form was not found on this page; a ${otherForm} form is used instead.`,
           context_text: JSON.stringify(findingData),
           screenshot_url: null,
           status: "open",
@@ -2462,8 +2463,8 @@ export async function checkGrowth99ContactForm(
   // Short, standing note appended to every contact-form failure: there is no
   // blanket auto-fix for the correction decision — a genuinely missing form is a
   // team call (add vs correct the embed).
-  const TEAM_NOTE =
-    " No automatic fix for this — check with the team whether to add the form or correct the embed code."
+  // SCAN-ONLY: fix wording removed — was: const TEAM_NOTE =
+  //   " No automatic fix for this — check with the team whether to add the form or correct the embed code."
 
   // -------------------------------------------------------------------------
   // POST-RELEASE: the check runs on the LIVE site and gates pass/fail on the
@@ -2480,7 +2481,8 @@ export async function checkGrowth99ContactForm(
         {
           check_factor: "contact_form",
           title: "Contact Form Not Found",
-          description: `No contact form was found on the contact page.${TEAM_NOTE}`,
+          // SCAN-ONLY: fix wording removed — was: description: `No contact form was found on the contact page.${TEAM_NOTE}`,
+          description: `No contact form was found on the contact page.`,
           context_text: JSON.stringify(findingData),
           screenshot_url: null,
           status: "open",
@@ -2530,7 +2532,8 @@ export async function checkGrowth99ContactForm(
         {
           check_factor: "contact_form",
           title: "Contact Form Submitted But No Confirmation",
-          description: `The contact form was filled and submitted, but no thank-you/confirmation page or message appeared, so the submission could not be confirmed as successful.${TEAM_NOTE}`,
+          description: `The contact form was filled and submitted, but no thank-you/confirmation page or message appeared, so the submission could not be confirmed as successful.`,
+          // SCAN-ONLY: fix wording removed — was: description: `...so the submission could not be confirmed as successful.${TEAM_NOTE}`,
           context_text: JSON.stringify(findingData),
           screenshot_url: shotUrl,
           status: "open",
@@ -2779,7 +2782,8 @@ export async function checkChatbotAndConsultation(
     {
       check_factor: factor,
       title: "Chatbot & Virtual Consultation not installed",
-      description: `The Cliff Hanger integration script (${INTEGRATION}) was not found in the page source, so the chatbot and virtual consultation are not installed. No automatic fix — first confirm with the client's requirement whether the chatbot and virtual consultation are meant to be added for this client; if they are required, add the Cliff Hanger + Virtual Consultation codes from Basecamp.${otherChatNote}${verdict ? ` Vision: buttons ${buttonsVisible ? "visible" : "not visible"}, chatbot ${chatbotVisible ? "visible" : "not visible"}.` : ""}`,
+      // SCAN-ONLY: fix wording removed — was: description: `The Cliff Hanger integration script (${INTEGRATION}) was not found in the page source, so the chatbot and virtual consultation are not installed. No automatic fix — first confirm with the client's requirement whether the chatbot and virtual consultation are meant to be added for this client; if they are required, add the Cliff Hanger + Virtual Consultation codes from Basecamp.${otherChatNote}...`,
+      description: `The Cliff Hanger integration script (${INTEGRATION}) was not found in the page source, so the chatbot and virtual consultation are not installed.${otherChatNote}${verdict ? ` Vision: buttons ${buttonsVisible ? "visible" : "not visible"}, chatbot ${chatbotVisible ? "visible" : "not visible"}.` : ""}`,
       context_text: ctx,
       screenshot_url: screenshotUrl,
       status: "open",

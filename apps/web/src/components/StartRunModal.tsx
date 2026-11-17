@@ -392,7 +392,12 @@ export const StartRunModal = ({
     ...GAP_CHECKS.filter((c) => c.pre.length > 0).map((c) => ({
       id: c.key,
       label: c.label,
-      description: c.notFixed.replace(/^Mention to /, "Checks: "),
+      // SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+      // Shared gap-check text says "fix ..."; show it as a scan ("flag ...").
+      // (was: description: c.notFixed.replace(/^Mention to /, "Checks: "),)
+      description: c.notFixed
+        .replace(/^Mention to /, "Checks: ")
+        .replace(/\bfix\b/gi, "flag"),
       category: "general",
     })),
   ]

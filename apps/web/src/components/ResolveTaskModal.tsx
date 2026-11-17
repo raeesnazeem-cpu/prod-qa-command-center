@@ -148,7 +148,8 @@ export const ResolveTaskModal = ({
               <textarea
                 value={comment}
                 onChange={(e) => setComment(e.target.value)}
-                placeholder="Describe what was fixed or how to verify..."
+                // SCAN-ONLY: fix wording removed — was "Describe what was fixed or how to verify..."
+                placeholder="Describe how this was resolved or how to verify..."
                 className="w-full bg-slate-50 border border-slate-200 rounded-md px-4 py-4 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 resize-none min-h-[120px] transition-all"
               />
             </div>
