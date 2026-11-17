@@ -1,6 +1,7 @@
 import { Job } from "bullmq"
 import { supabase } from "../lib/supabase"
 import { PageTimeoutError, processCrawlPageJob } from "./crawlPageJob"
+import { BrowserUnavailableError } from "../lib/browserCheck"
 import pino from "pino"
 
 const logger = pino({
@@ -76,6 +77,9 @@ export async function processCrawlBatchJob(job: Job) {
         await processCrawlPageJob({ data: pageJobData } as Job)
       }
     } catch (error: any) {
+      // No browser on this worker: every other page would fail the same way.
+      // Fail the whole batch so the queue retries it (done pages are skipped).
+      if (error instanceof BrowserUnavailableError) throw error
       logger.error(
         { pageId, error: error.message },
         "Error processing page in batch",

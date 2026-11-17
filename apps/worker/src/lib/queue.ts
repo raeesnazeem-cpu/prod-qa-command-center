@@ -1,12 +1,19 @@
 import { Queue, JobsOptions } from 'bullmq';
 import IORedis from 'ioredis';
 import 'dotenv/config';
+import { resolveQueueRedisUrl } from '@qacc/shared/queueGuard';
 
-const redisUrl = process.env.UPSTASH_REDIS_URL;
+const configuredRedisUrl = process.env.UPSTASH_REDIS_URL;
 
-if (!redisUrl) {
+if (!configuredRedisUrl) {
   throw new Error('UPSTASH_REDIS_URL is not defined in environment variables');
 }
+
+// Only a deployed container may use the remote (prod) queue; any local machine
+// falls back to local Redis. See @qacc/shared/queueGuard.
+const queueUrl = resolveQueueRedisUrl(configuredRedisUrl);
+if (queueUrl.warning) console.warn(`[queue] ${queueUrl.warning}`);
+const redisUrl = queueUrl.url;
 
 export const connection = new IORedis(redisUrl, {
   maxRetriesPerRequest: null,

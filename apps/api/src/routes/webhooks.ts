@@ -1494,9 +1494,11 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
             let resumedRunId: string | null = null
             if (preReleaseTaskId) {
               resumedRunId = await tryResumeTedRun(String(preReleaseTaskId), "pre_release", tedSiteUrl || null, "pre-release", tr)
-              const blocking = resumedRunId
+              let blocking = resumedRunId
                 ? null
                 : await findBlockingRun(String(preReleaseTaskId), isForcedTrigger(payload))
+              if (blocking && isManual && (await restartActiveRunOnManualTrigger(String(preReleaseTaskId), blocking, "pre-release", tr)))
+                blocking = null
               if (blocking)
                 return skipDuplicateTrigger(res, String(preReleaseTaskId), blocking, "pre-release", tr)
             }
@@ -2066,6 +2068,50 @@ async function findBlockingRun(
   return recent?.length
     ? { id: recent[0].id, reason: "cooldown", createdAt: recent[0].created_at }
     : null
+}
+
+// TED has no Stop / Start-again button, so a MANUAL "Trigger manually" on a task
+// whose run is still going means "start again": cancel that run and let the
+// trigger start a fresh one. Only once the run is older than
+// TED_RUN_RESTART_AFTER_MINUTES (default 15) — a double-click inside that window
+// is still skipped as a duplicate. Paused runs are left alone (paused on
+// purpose). Set TED_RUN_RESTART_AFTER_MINUTES=-1 to turn this off.
+// Returns true when the active run was cancelled and a fresh run may start.
+async function restartActiveRunOnManualTrigger(
+  tedTaskId: string,
+  blocking: BlockingRun,
+  flow: string,
+  tr: TriggerTracker,
+): Promise<boolean> {
+  if (blocking.reason !== "active") return false
+  const mins = Number(process.env.TED_RUN_RESTART_AFTER_MINUTES ?? 15)
+  if (!Number.isFinite(mins) || mins < 0) return false
+  if (Date.now() - new Date(blocking.createdAt).getTime() < mins * 60 * 1000) return false
+
+  const { data: run } = await supabase.from("qa_runs").select("status").eq("id", blocking.id).maybeSingle()
+  if (!run || run.status === "paused") return false
+
+  const result = await transitionRunStatus(blocking.id, "cancelled")
+  if (!result.ok) {
+    console.warn(`⚠️ [TED ${flow}] Could not cancel run ${blocking.id} for restart: ${result.error}`)
+    return false
+  }
+  // Free the global run slot now so the fresh run doesn't wait for it to go stale.
+  await supabase.rpc("release_run_slot", { p_run_id: blocking.id }).then(
+    () => {},
+    () => {},
+  )
+  const msg = `Trigger manually pressed while run ${blocking.id} was still going: it was stopped and a fresh run is starting.`
+  console.log(`🔁 [TED ${flow}] ${msg}`)
+  tr.setTask(tedTaskId)
+  await tr.step("run.restarted", "ok", msg, { cancelledRunId: blocking.id })
+  await postTedComment(
+    tedTaskId,
+    `<p>🔁 <strong>Test run restarted.</strong></p><p>The previous run (${blocking.id}) was stopped and a fresh run is starting.</p>`,
+    `ext:qacc-run-restarted-${blocking.id}`,
+    blocking.id,
+  ).catch(() => {})
+  return true
 }
 
 // Retrigger of a task whose last run died midway → finish THAT run instead of
@@ -2908,9 +2954,11 @@ webhookRouter.post(
             let resumedRunId: string | null = null
             if (targetTaskId) {
               resumedRunId = await tryResumeTedRun(String(targetTaskId), "internal_qa", tedSiteUrl || null, "internal-QA", tr)
-              const blocking = resumedRunId
+              let blocking = resumedRunId
                 ? null
                 : await findBlockingRun(String(targetTaskId), isForcedTrigger(payload))
+              if (blocking && isManual && (await restartActiveRunOnManualTrigger(String(targetTaskId), blocking, "internal-QA", tr)))
+                blocking = null
               if (blocking)
                 return skipDuplicateTrigger(res, String(targetTaskId), blocking, "internal-QA", tr)
             }
@@ -3489,9 +3537,11 @@ webhookRouter.post(
             let resumedRunId: string | null = null
             if (scanTaskId) {
               resumedRunId = await tryResumeTedRun(String(scanTaskId), "post_release", runSiteUrl || null, "post-release", tr)
-              const blocking = resumedRunId
+              let blocking = resumedRunId
                 ? null
                 : await findBlockingRun(String(scanTaskId), isForcedTrigger(payload))
+              if (blocking && isManual && (await restartActiveRunOnManualTrigger(String(scanTaskId), blocking, "post-release", tr)))
+                blocking = null
               if (blocking)
                 return skipDuplicateTrigger(res, String(scanTaskId), blocking, "post-release", tr)
             }
@@ -4278,6 +4328,15 @@ webhookRouter.post("/ted/full-scan/fix", async (req: Request, res: Response) => 
       data: { acknowledged: true, event: "PING_TEST" },
     })
   }
+  // SCAN-ONLY: the worker skips ai_fix_run, so queueing one would leave the run
+  // stuck at "fix queued" forever. Say so instead. (FULL_SCAN_FIX_ENABLED=true
+  // re-opens this once the worker runs the fix again.)
+  if (process.env.FULL_SCAN_FIX_ENABLED !== "true") return res.status(409).json({
+    status: 409,
+    statusText: "fix_disabled",
+    error: "QACC is scan-only: the AI fix is switched off, so nothing was queued.",
+    data: { acknowledged: false, outcome: "not_started", reason: "The AI fix is switched off (QACC is scan-only)." },
+  })
 
   const runId =
     payload.runId ||
