@@ -83,9 +83,10 @@ function displayHostFor(clientDomain?: string | null, runType?: string | null): 
   return `${label}.gogroth.com`
 }
 
-// Ordered raw→clean wording replacements for the CLIENT copy: strip the local /
-// fallback / clone / could-not-push plumbing and, when a fix landed, say simply
-// "committed and created a pull request". The raw QACC copy is untouched.
+// Ordered raw→clean wording replacements for the CLIENT copy. The raw QACC copy
+// is untouched.
+// SCAN-ONLY: the fix-pass entries (fallback repo / push / pull request wording)
+// are commented out below — QACC only scans, so that text is never produced.
 const CLIENT_WORDING: [RegExp, string][] = [
   // The client SEES that AI vision failed (kept, in plain words) but NOT the raw
   // provider error after the colon — that backend detail lives only in the worker
@@ -95,38 +96,39 @@ const CLIENT_WORDING: [RegExp, string][] = [
     /<br>\s*<small>AI vision unavailable:[\s\S]*?<\/small>/gi,
     "<br><small>⚠️ AI vision could not verify this automatically — flagged for manual review.</small>",
   ],
-  // The whole fallback "Note:" paragraph.
-  [/<p><strong>Note:<\/strong>[^]*?fallback repository and its hosted site[^]*?<\/p>/gi, ""],
-  // Repo label in the header.
-  [/\s*·\s*Repository:\s*<em>Fallback repository<\/em>/gi, ""],
-  [/<em>Fallback repository<\/em>/gi, "the repository"],
-  // Fix-status / push-clause fallback + could-not-push variants → uniform.
-  [/Pushed \d+ fix(?:es)? straight to <code>main<\/code> of the local fallback repository — the local test site now reflects (?:them|it)\./gi, "Committed and created a pull request."],
-  [/Pushed straight to <code>main<\/code> of the local fallback repository — the local test site now reflects it\./gi, "Committed and created a pull request."],
-  [/\d+ attempted fix(?:es)? — committed locally, but could not be pushed to the local fallback repository's <code>main<\/code> \(it may have uncommitted changes\); verified against the code on a clone only\./gi, "Committed and created a pull request."],
-  [/Committed locally, but could not be pushed to the local fallback repository's <code>main<\/code>; verified against the code on a clone only\./gi, "Committed and created a pull request."],
-  [/No code-level fixes were applicable this run — nothing to push to the local fallback repository\./gi, "No code-level fixes were applicable this run."],
-  [/\d+ fix(?:es)? committed locally, but the branch could not be pushed — nothing has reached the repository\./gi, "Committed and created a pull request."],
-  [/Committed locally, but the branch could not be pushed — nothing has reached the repository\./gi, "Committed and created a pull request."],
-  // PR-created / not-opened variants (branch mention) → uniform.
-  [/Pushed to branch <code>[^<]*<\/code>\s*[·;]\s*[Pp]ull request <strong>created<\/strong> — not merged\./gi, "Committed and created a pull request."],
-  [/Pushed to branch <code>[^<]*<\/code>\s*[·;]\s*pull request could not be opened automatically\./gi, "Committed and created a pull request."],
-  // renderFixLine proposed note + "(fallback repo)" banner.
-  [/\s*\(proposed — verified on a clone, not pushed\)/gi, ""],
-  [/\s*<em>\(fallback repo\)<\/em>/gi, ""],
-  [/\s*\(fallback repo\)/gi, ""],
-  // Dry-run leftovers (client rarely sees these).
-  [/\s*—?\s*verified against the repository, nothing pushed\.?/gi, ""],
-  [/Dry run — nothing pushed\.?/gi, ""],
-  // Safety catch-alls for anything not matched verbatim above.
-  [/local fallback repository(?:'s)?/gi, "the repository"],
-  [/could not be pushed[^.<]*\./gi, "committed and created a pull request."],
+  // SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+  // // The whole fallback "Note:" paragraph.
+  // [/<p><strong>Note:<\/strong>[^]*?fallback repository and its hosted site[^]*?<\/p>/gi, ""],
+  // // Repo label in the header.
+  // [/\s*·\s*Repository:\s*<em>Fallback repository<\/em>/gi, ""],
+  // [/<em>Fallback repository<\/em>/gi, "the repository"],
+  // // Fix-status / push-clause fallback + could-not-push variants → uniform.
+  // [/Pushed \d+ fix(?:es)? straight to <code>main<\/code> of the local fallback repository — the local test site now reflects (?:them|it)\./gi, "Committed and created a pull request."],
+  // [/Pushed straight to <code>main<\/code> of the local fallback repository — the local test site now reflects it\./gi, "Committed and created a pull request."],
+  // [/\d+ attempted fix(?:es)? — committed locally, but could not be pushed to the local fallback repository's <code>main<\/code> \(it may have uncommitted changes\); verified against the code on a clone only\./gi, "Committed and created a pull request."],
+  // [/Committed locally, but could not be pushed to the local fallback repository's <code>main<\/code>; verified against the code on a clone only\./gi, "Committed and created a pull request."],
+  // [/No code-level fixes were applicable this run — nothing to push to the local fallback repository\./gi, "No code-level fixes were applicable this run."],
+  // [/\d+ fix(?:es)? committed locally, but the branch could not be pushed — nothing has reached the repository\./gi, "Committed and created a pull request."],
+  // [/Committed locally, but the branch could not be pushed — nothing has reached the repository\./gi, "Committed and created a pull request."],
+  // // PR-created / not-opened variants (branch mention) → uniform.
+  // [/Pushed to branch <code>[^<]*<\/code>\s*[·;]\s*[Pp]ull request <strong>created<\/strong> — not merged\./gi, "Committed and created a pull request."],
+  // [/Pushed to branch <code>[^<]*<\/code>\s*[·;]\s*pull request could not be opened automatically\./gi, "Committed and created a pull request."],
+  // // renderFixLine proposed note + "(fallback repo)" banner.
+  // [/\s*\(proposed — verified on a clone, not pushed\)/gi, ""],
+  // [/\s*<em>\(fallback repo\)<\/em>/gi, ""],
+  // [/\s*\(fallback repo\)/gi, ""],
+  // // Dry-run leftovers (client rarely sees these).
+  // [/\s*—?\s*verified against the repository, nothing pushed\.?/gi, ""],
+  // [/Dry run — nothing pushed\.?/gi, ""],
+  // // Safety catch-alls for anything not matched verbatim above.
+  // [/local fallback repository(?:'s)?/gi, "the repository"],
+  // [/could not be pushed[^.<]*\./gi, "committed and created a pull request."],
 ]
 
 /**
  * Sanitize a report body for the CLIENT-facing TED copy:
  *   • swap the local fallback URL for the client's gogroth (pre) / live (post) host,
- *   • strip all fallback/clone/push plumbing wording → "committed and created a PR".
+ *   • replace raw AI-vision provider errors with a client-safe note.
  * The raw QACC copy is posted separately and is NOT passed through this.
  */
 export function sanitizeClientReport(
@@ -175,7 +177,8 @@ async function recordLocalTedComment(
         body_html: bodyHtml,
         event_key: eventKey,
         source: ctx.source || "report",
-        author: "AI Fix",
+        // SCAN-ONLY: was author "AI Fix".
+        author: "QACC",
       },
       { onConflict: "event_key", ignoreDuplicates: true },
     )
@@ -378,8 +381,8 @@ export async function postTedComment(
 }
 
 // TED statuses QACC writes. A check's subtask is closed "Completed" when it
-// passed, or failed but QACC APPLIED a fix. A check that FAILED and was NOT
-// fixed is left "In Progress" for a person to act on. Both strings must match
+// passed. A check that FAILED (real issues found) is left "In Progress" for a
+// person to act on. (SCAN-ONLY: QACC no longer applies fixes.) Both strings must match
 // TED exactly ("In Progress" is the same status the API writes at scan start;
 // confirm "Completed" against TED before relying on it in production).
 const TED_STATUS_COMPLETED = "Completed"
@@ -426,8 +429,8 @@ export async function postTedStatus(
           Accept: "application/json",
           "Content-Type": "application/json",
         },
-        // QACC auto-fixes every failing check, so any task it closes was
-        // AI-assigned — flag it so TED's release flow records it as such.
+        // Any task QACC closes was handled by the QACC agent — flag it as
+        // AI-assigned so TED's release flow records it as such.
         body: JSON.stringify({ status, aiAssigned: true }),
       },
     )
@@ -465,8 +468,8 @@ export async function postTedStatus(
 // Three release.qa_post subtasks have no safe automated check and are owned by a
 // human ("Send email to client", "Verify backup size", "Two-Way Text Setup"), so
 // QACC never maps or closes them and they linger "Not Started" when the parent
-// closes. For now we close each with a fixed, honest failure reason + a
-// "no fix needed" note so the parent can advance. Matched ID-free on the subtask
+// closes. For now we close each with a set, honest failure reason so the
+// parent can advance. Matched ID-free on the subtask
 // title (normalized: lowercased, non-alphanumerics stripped).
 const POST_RELEASE_MANUAL_CLOSEOUTS: { matchers: string[]; reason: string }[] = [
   {
@@ -484,7 +487,7 @@ const POST_RELEASE_MANUAL_CLOSEOUTS: { matchers: string[]; reason: string }[] = 
 ]
 
 // Fetch a parent's subtasks from TED (read-only), match the human-owned ones
-// above, and close each Completed with its hardcoded reason + "no fix needed".
+// above, and close each Completed with its hardcoded reason.
 // Real-TED only: needs TED_API_TOKEN and a live parent, so it no-ops in local
 // preview (those subtasks only exist in real TED). Best-effort throughout.
 async function closeManualPostReleaseSubtasks(
@@ -519,19 +522,20 @@ async function closeManualPostReleaseSubtasks(
     const n = norm(st.title)
     const hit = POST_RELEASE_MANUAL_CLOSEOUTS.find((c) => c.matchers.some((m) => n.includes(m)))
     if (!hit) continue
-    const body = `<p>${esc(hit.reason)}. - no fix needed</p>`
+    // SCAN-ONLY: was `<p>${esc(hit.reason)}. - no fix needed</p>`
+    const body = `<p>${esc(hit.reason)}.</p>`
     await postTedComment(st.id, body, `ext:qacc-postrelease-manual-closeout-${runId}-${st.id}`, {
       runId,
       targetKind: "subtask",
       source: "status",
     }).catch(() => {})
     await postTedStatus(st.id, TED_STATUS_COMPLETED, runId).catch(() => {})
-    logger.info({ runId, subtaskId: st.id, title: st.title }, "Manual post-release subtask closed (hardcoded no-fix-needed).")
+    logger.info({ runId, subtaskId: st.id, title: st.title }, "Manual post-release subtask closed (hardcoded reason).")
   }
 }
 
 // Did this run's report hold the parent open because issues remain (a check
-// failed with no fix applied, or could not complete)? postSectionedReport writes
+// failed with real issues, or could not complete)? postSectionedReport writes
 // a QACC-only ledger row under this key; its own key so it never collides with
 // the scan-start `status:<id>:In Progress:<runId>` row. Such a parent is left
 // In Progress for a person, never closed.
@@ -575,8 +579,7 @@ export function latestOpenSubtasks(
 
 // Close out a finished run in TED: mark the parent scan task Completed, and —
 // for internal-QA runs only — mark every mapped subtask Completed too. Called at
-// the very end of the run (after the AI-fix pass), so failing checks have already
-// been fixed/proposed and nothing is left "In Progress". Best-effort: a failure
+// the very end of the run, after the scan report is posted. Best-effort: a failure
 // on one task never blocks the others. Pre/post-release runs have no subtask map,
 // so only their parent task is closed.
 export async function markAllTedTasksCompleted(

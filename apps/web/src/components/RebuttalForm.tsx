@@ -157,7 +157,8 @@ export const RebuttalForm: React.FC<RebuttalFormProps> = ({
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder="Explain why this is fixed or not an issue..."
+            // SCAN-ONLY: fix wording removed — was "Explain why this is fixed or not an issue..."
+            placeholder="Explain why this is not an issue..."
             className="w-full bg-slate-50 dark:bg-[#131d22] border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 font-medium focus:outline-none focus:ring-2 focus:ring-red-500/20 focus:border-red-500/40 focus:bg-slate-50 dark:focus:bg-[#131d22] transition-all resize-none min-h-[120px]"
             required
             minLength={20}

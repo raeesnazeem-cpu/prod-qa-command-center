@@ -309,7 +309,8 @@ export async function checkBackend(
         findings.push({
           check_factor: CHECK_FACTOR,
           title: `Custom 404 page has a layout break (${overflowViewport})`,
-          description: `A styled custom 404 page renders, but it overflows horizontally on the ${overflowViewport} view. Fix the responsive layout of the 404 template.`,
+          // SCAN-ONLY: fix wording removed — was: description: `A styled custom 404 page renders, but it overflows horizontally on the ${overflowViewport} view. Fix the responsive layout of the 404 template.`,
+          description: `A styled custom 404 page renders, but it overflows horizontally on the ${overflowViewport} view.`,
           context_text: `Probe URL: ${probeUrl}\nOverflow viewport: ${overflowViewport}`,
           screenshot_url: joined || null,
           status: "open",

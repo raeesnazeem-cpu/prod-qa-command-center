@@ -192,8 +192,9 @@ export async function checkProjectPlan(
       {
         check_factor: "project_plan",
         title: "Project Plan not set",
+        // SCAN-ONLY: fix wording removed — was: "No record for the project plan was found. NO fix possible — plan not available to check. Please set the plan on the TED client page.",
         description:
-          "No record for the project plan was found. NO fix possible — plan not available to check. Please set the plan on the TED client page.",
+          "No record for the project plan was found — plan not available to check. The plan is not set on the TED client page.",
         context_text: `Client: ${clientName} (id: ${client?.id ?? clientKey}) — checked the TED client page \`plan\` field, HubSpot growth99_plan (by HubSpot ID), and the "Growth99 Plan:" line in client notes.`,
         status: "open",
         ai_generated: false,
@@ -235,7 +236,8 @@ export async function checkProjectPlan(
       {
         check_factor: "project_plan",
         title: `Project Plan confirmed: ${planRaw}`,
-        description: `Plan "${planRaw}" confirmed from ${planSource || "TED"} for "${clientName}". This plan has no reviews-widget requirement — plan-confirmation only, no issues found. No fix needed.${addOnLine}${detailLine}`,
+        // SCAN-ONLY: fix wording removed — was: description: `Plan "${planRaw}" confirmed from ${planSource || "TED"} for "${clientName}". This plan has no reviews-widget requirement — plan-confirmation only, no issues found. No fix needed.${addOnLine}${detailLine}`,
+        description: `Plan "${planRaw}" confirmed from ${planSource || "TED"} for "${clientName}". This plan has no reviews-widget requirement — plan-confirmation only, no issues found.${addOnLine}${detailLine}`,
         context_text: ctx,
         screenshot_url: pageRecord?.desktopUrl || null,
         status: "open",
@@ -397,7 +399,8 @@ export async function checkProjectPlan(
       {
         check_factor: "project_plan",
         title: "Reviews widget missing (Accelerator plan)",
-        description: `Plan "${planRaw}" is an Accelerator plan, which requires an active reviews widget on the /reviews page, but the reviews-widget embed was not detected in the page markup. Fix: add the Growth99 reviews widget script to the site footer.${addOnLine}${detailLine}${sourceLine}`,
+        // SCAN-ONLY: fix wording removed — was: description: `Plan "${planRaw}" is an Accelerator plan, which requires an active reviews widget on the /reviews page, but the reviews-widget embed was not detected in the page markup. Fix: add the Growth99 reviews widget script to the site footer.${addOnLine}${detailLine}${sourceLine}`,
+        description: `Plan "${planRaw}" is an Accelerator plan, which requires an active reviews widget on the /reviews page, but the reviews-widget embed was not detected in the page markup.${addOnLine}${detailLine}${sourceLine}`,
         context_text: ctx,
         screenshot_url: screenshotUrl,
         status: "open",
@@ -413,7 +416,8 @@ export async function checkProjectPlan(
       {
         check_factor: "project_plan",
         title: `Project Plan: ${planRaw} — reviews widget present`,
-        description: `Accelerator plan "${planRaw}" confirmed. The reviews widget code is present and the widget is showing on the /reviews page (${rendered ? "measured on the page" : "confirmed by vision"}) — no issues found. No fix needed.${addOnLine}${detailLine}${sourceLine}`,
+        // SCAN-ONLY: fix wording removed — was: description: `Accelerator plan "${planRaw}" confirmed. The reviews widget code is present and the widget is showing on the /reviews page (${rendered ? "measured on the page" : "confirmed by vision"}) — no issues found. No fix needed.${addOnLine}${detailLine}${sourceLine}`,
+        description: `Accelerator plan "${planRaw}" confirmed. The reviews widget code is present and the widget is showing on the /reviews page (${rendered ? "measured on the page" : "confirmed by vision"}) — no issues found.${addOnLine}${detailLine}${sourceLine}`,
         context_text: ctx,
         screenshot_url: screenshotUrl,
         status: "open",

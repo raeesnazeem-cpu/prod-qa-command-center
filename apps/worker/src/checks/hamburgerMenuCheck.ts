@@ -632,8 +632,8 @@ export async function checkHamburgerMenu(
       push(
         "Hamburger menu missing or not toggleable",
         `The hamburger menu must appear in the header and open on tap at both mobile and tablet width (screens under 1024px). Problems found:\n` +
-          problems.join("\n") +
-          `\n\nNo automated fix is available — ask the developer to add or fix the hamburger menu manually so it appears and toggles on screens under 1024px wide (mobile and tablet).`,
+          // SCAN-ONLY: fix wording removed — was: + `\n\nNo automated fix is available — ask the developer to add or fix the hamburger menu manually so it appears and toggles on screens under 1024px wide (mobile and tablet).`
+          problems.join("\n"),
         evidenceShot,
       )
       // Attach the deep in-menu findings (broken links / phone / Book Now / VC)

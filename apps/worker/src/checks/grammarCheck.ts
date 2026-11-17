@@ -84,7 +84,8 @@ export async function checkGrammar(
 
     const system =
       "You are a meticulous website copy editor. Report only CLEAR grammar, spelling, and punctuation mistakes in the copy. Ignore brand/product names, proper nouns, and stylistic choices."
-    const user = `Page: ${pageUrl}\n\nCopy:\n"""${snippet}"""\n\nReturn STRICT JSON only: {"issues":[{"excerpt":"<short quote>","issue":"<what is wrong>","suggestion":"<the fix>"}]}. Empty array if the copy is clean. Max 15 issues.`
+    // SCAN-ONLY: fix wording removed — was: ... "suggestion":"<the fix>" ... (LLM prompt; the suggestion is the corrected text, still shown as "Suggestion: X")
+    const user = `Page: ${pageUrl}\n\nCopy:\n"""${snippet}"""\n\nReturn STRICT JSON only: {"issues":[{"excerpt":"<short quote>","issue":"<what is wrong>","suggestion":"<the corrected text>"}]}. Empty array if the copy is clean. Max 15 issues.`
 
     // Read the reply ONLY when it is valid JSON with an `issues` array. Anything
     // else is unreadable — never an empty list, which would be a false pass.

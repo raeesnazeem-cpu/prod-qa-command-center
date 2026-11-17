@@ -9,7 +9,8 @@ import { processCrawlBatchJob } from "./jobs/crawlBatchJob"
 import { processCheckProjectPlanJob } from "./jobs/checkProjectPlanJob"
 import { processCheckPaidMediaJob } from "./jobs/checkPaidMediaJob"
 import { processCheckCroAuditJob } from "./jobs/checkCroAuditJob"
-import { processAiFixRunJob } from "./jobs/aiFixRunJob"
+// SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+// import { processAiFixRunJob } from "./jobs/aiFixRunJob"
 import {
   processVideoRecordingJob,
   processVideoUrlVerifyJob,
@@ -35,7 +36,7 @@ const queueName = "qa-jobs"
 // Run a standalone API check, then release its part of the run's report gate.
 // Released on success or on the LAST failed attempt (a failed check must not
 // block the report forever); earlier failures retry first. If this check was
-// the last part still running, it finalizes the run (TED report, AI fix).
+// the last part still running, it finalizes the run (TED report).
 async function runApiCheck(
   job: Job,
   check: string,
@@ -94,8 +95,11 @@ const worker = new Worker(
         case "check_cro_audit":
           await runApiCheck(job, "cro_audit", processCheckCroAuditJob)
           break
+        // SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+        // A leftover queued ai_fix_run job is dropped, not run.
         case "ai_fix_run":
-          await processAiFixRunJob(job)
+          // await processAiFixRunJob(job)
+          logger.info({ jobId: job.id }, "ai_fix_run skipped: QACC is scan-only.")
           break
         case "video_recording_check":
           await processVideoRecordingJob(job)

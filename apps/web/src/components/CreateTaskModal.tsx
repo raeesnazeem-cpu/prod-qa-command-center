@@ -205,7 +205,8 @@ export const CreateTaskModal = ({
               </label>
               <input
                 {...register("title")}
-                placeholder="e.g. Fix mobile menu overlap"
+                // SCAN-ONLY: fix wording removed — was "e.g. Fix mobile menu overlap"
+                placeholder="e.g. Mobile menu overlaps content"
                 className={`w-full bg-slate-50 dark:bg-[#1d2a31] border ${
                   errors.title
                     ? "border-red-400/50 dark:border-red-400/50"

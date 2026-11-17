@@ -7,8 +7,9 @@ import { supabase } from "../lib/supabase"
 import { qaQueue } from "../lib/queue"
 import {
   postFinalReportToTED,
-  postScanCompleteComment,
-  postDetectionSummary,
+  // SCAN-ONLY: fix feature disabled — these announced the AI-fix hand-off.
+  // postScanCompleteComment,
+  // postDetectionSummary,
   precomputeFindingMedia,
   markAllTedTasksCompleted,
   postTedComment,
@@ -1653,7 +1654,7 @@ export async function processCrawlPageJob(job: Job) {
 /**
  * Run-level wrap-up once EVERY part of the run is done (all pages + any
  * standalone API checks): cross-browser check, result snapshot, timings,
- * screenshot precompute, then the TED report and AI fix. Called exactly once
+ * screenshot precompute, then the TED report. Called exactly once
  * per run — by the last page, or by the last API check (see reportGate).
  */
 export async function finalizeRun(runId: string): Promise<void> {
@@ -1688,8 +1689,7 @@ export async function finalizeRun(runId: string): Promise<void> {
   // Analytics only: log + persist per-check timings. Never posted to TED.
   await saveTimingReport(runId)
 
-  // Prepare inlined screenshots now (scan time), so the report — whether
-  // posted immediately here or later by the AI-fix pass — is just string
+  // Prepare inlined screenshots now (scan time), so the report is just string
   // assembly, not network I/O on the critical path. Best-effort.
   await precomputeFindingMedia(runId).catch((e) =>
     logger.error("Screenshot precompute failed:", e),
@@ -1717,13 +1717,13 @@ export async function finalizeRun(runId: string): Promise<void> {
         : "Could not post the results to TED",
       detail: report ? { issues: report.issueCount, hasIssues: report.hasIssues } : {},
     })
-    // Only trigger the AI fix when the report actually posted AND there
-    // were real issues. All-passed → say so and skip the fix.
-    await maybeTriggerAiFix(runId, run.ted_task_id, report)
+    // SCAN-ONLY: the scan report is the final word. Close out the TED tasks.
+    // (Was: maybeTriggerAiFix — queued the AI fix when there were issues.)
+    await finishRunAfterReport(runId, run.ted_task_id, report)
   }
 
   // Full scans have no task dependency: one triggered without a
-  // ted_task_id never enters the block above, so maybeTriggerAiFix — the
+  // ted_task_id never enters the block above, so finishRunAfterReport — the
   // ONLY place a full_scan releases the global run slot — is never reached
   // and the slot leaks until the staleness steal, blocking the next scan.
   // Release it here too. Idempotent: a no-op if it was already freed
@@ -1770,15 +1770,6 @@ async function runGapSiteChecks(runId: string): Promise<void> {
 }
 
 /**
- * Decide whether to run the AI fix after a run's TED report is posted.
- * - report === null  → the report didn't post (duplicate path / error): do nothing.
- * - AI fix module off → do nothing (the summary already went out).
- * - real issues found → post the "scan complete, AI Fix running" comment and
- *   queue the ai_fix_run job.
- * - everything passed → post a short "AI Fix skipped, no issues" comment and do
- *   NOT queue the fix.
- */
-/**
  * Build the "AI hit a 429" note for the full-scan TED comment, or "" if no AI
  * check lapsed on a rate limit this run. Reads the persisted lapse findings so
  * it catches BOTH the text chain (grammar) and vision 429s, regardless of the
@@ -1815,19 +1806,25 @@ async function buildAi429Note(runId: string): Promise<string> {
   }
 }
 
-async function maybeTriggerAiFix(
+/**
+ * Close out a run after its TED report is posted. QACC is scan-only: the scan
+ * report is the final word, so there is no fix pass to hand off to.
+ * - report === null  → the report didn't post (duplicate path / error): do nothing.
+ * - full_scan        → post "scan complete", free the run slot, change no TED status.
+ * - everything else  → close out the TED tasks (issues found or not).
+ * (Was maybeTriggerAiFix, which queued the ai_fix_run job when there were issues.)
+ */
+async function finishRunAfterReport(
   runId: string,
   tedTaskId: string,
   report: { hasIssues: boolean; issueCount: number } | null,
 ): Promise<void> {
   if (!report) return
 
-  // Full scan: Test and Fix are separate suites. The scan report has ALREADY been
-  // posted (postFinalReportToTED does not defer for full_scan), so the scan is
-  // done here — do NOT auto-run the fix and do NOT change any TED status (a full
-  // scan is ad-hoc). The fix is a separate, on-demand action
-  // (POST /webhooks/ted/full-scan/fix). Free the global run slot here, since we
-  // skip markAllTedTasksCompleted which normally releases it.
+  // Full scan: the scan report has ALREADY been posted, so the scan is done
+  // here — do NOT change any TED status (a full scan is ad-hoc). Free the
+  // global run slot here, since we skip markAllTedTasksCompleted which
+  // normally releases it.
   const { data: fsRun } = await supabase
     .from("qa_runs")
     .select("run_type")
@@ -1837,45 +1834,52 @@ async function maybeTriggerAiFix(
     await releaseRunSlot(runId).catch(() => {})
     // If any AI-backed check lapsed because the model hit a 429 (quota / rate
     // limit), say so explicitly. Otherwise those checks render as a bare "could
-    // not complete" with no hint it was an AI quota problem the client can wait
-    // out or fix by upgrading the key. Read from the persisted lapse findings
-    // (authoritative) — the in-memory circuit breaker is already cleared by the
-    // releaseRunSlot above and never tracked vision 429s anyway.
+    // not complete" with no hint it was an AI quota problem. Read from the
+    // persisted lapse findings (authoritative) — the in-memory circuit breaker
+    // is already cleared by the releaseRunSlot above and never tracked vision
+    // 429s anyway.
     const ai429Note = await buildAi429Note(runId)
     await postTedComment(
       tedTaskId,
-      `<p>✅ <strong>Full scan complete.</strong> Review the results above. To apply automated (GitOps) fixes, use <em>Send to Fix</em>.</p>${ai429Note}`,
+      // SCAN-ONLY: was `... Review the results above. To apply automated (GitOps) fixes, use <em>Send to Fix</em>.`
+      `<p>✅ <strong>Full scan complete.</strong> Review the results above.</p>${ai429Note}`,
       `ext:qacc-fullscan-scandone-${runId}`,
       { runId },
     ).catch(() => {})
-    logger.info({ runId }, "full_scan: scan report posted; fix left for the on-demand fix endpoint.")
+    logger.info({ runId }, "full_scan: scan report posted.")
     return
   }
 
-  // If the AI-fix module is off, the run is finished here — close out the TED
-  // tasks so nothing is left "In Progress" and the flow can advance.
-  if (process.env.AI_FIX_MODULE_ENABLED !== "true") {
-    await markAllTedTasksCompleted(runId, tedTaskId)
-    return
-  }
+  // SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+  // The scan report is final, so the run always ends here: close out the TED
+  // tasks so the flow can advance (and the video barrier can run).
+  await markAllTedTasksCompleted(runId, tedTaskId)
 
-  if (report.hasIssues) {
-    // Real issues → hand off to the AI-fix pass. It posts the ONE combined
-    // section-wise report (issue → fix → pass) and then calls
-    // markAllTedTasksCompleted itself, so tasks close AFTER the fix.
-    await postScanCompleteComment(tedTaskId, runId)
-    // Break the ~5-min silence: post the DETECTION summary ("here's what we
-    // found") to the main thread now, before the fix pass runs. This is a plain
-    // comment — it carries no aiAssigned flag and does NOT complete the task;
-    // the end-of-run fix summary still owns both of those (Task 2, unchanged).
-    await postDetectionSummary(runId, tedTaskId)
-    qaQueue
-      .add("ai_fix_run", { runId, tedTaskId })
-      .catch((e) => logger.error("Failed to queue ai_fix_run:", e))
-  } else {
-    // Everything passed — postFinalReportToTED already posted the section-wise
-    // report (each check named + how it passed), so there's nothing to add here.
-    // No fix pass runs; just close out the TED tasks.
-    await markAllTedTasksCompleted(runId, tedTaskId)
-  }
+  // SCAN-ONLY: the old AI-fix hand-off, kept for later.
+  // // If the AI-fix module is off, the run is finished here — close out the TED
+  // // tasks so nothing is left "In Progress" and the flow can advance.
+  // if (process.env.AI_FIX_MODULE_ENABLED !== "true") {
+  //   await markAllTedTasksCompleted(runId, tedTaskId)
+  //   return
+  // }
+  //
+  // if (report.hasIssues) {
+  //   // Real issues → hand off to the AI-fix pass. It posts the ONE combined
+  //   // section-wise report (issue → fix → pass) and then calls
+  //   // markAllTedTasksCompleted itself, so tasks close AFTER the fix.
+  //   await postScanCompleteComment(tedTaskId, runId)
+  //   // Break the ~5-min silence: post the DETECTION summary ("here's what we
+  //   // found") to the main thread now, before the fix pass runs. This is a plain
+  //   // comment — it carries no aiAssigned flag and does NOT complete the task;
+  //   // the end-of-run fix summary still owns both of those (Task 2, unchanged).
+  //   await postDetectionSummary(runId, tedTaskId)
+  //   qaQueue
+  //     .add("ai_fix_run", { runId, tedTaskId })
+  //     .catch((e) => logger.error("Failed to queue ai_fix_run:", e))
+  // } else {
+  //   // Everything passed — postFinalReportToTED already posted the section-wise
+  //   // report (each check named + how it passed), so there's nothing to add here.
+  //   // No fix pass runs; just close out the TED tasks.
+  //   await markAllTedTasksCompleted(runId, tedTaskId)
+  // }
 }

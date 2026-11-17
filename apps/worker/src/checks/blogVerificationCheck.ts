@@ -406,7 +406,8 @@ export async function checkBlogVerification(
     {
       check_factor: CHECK_FACTOR,
       title: `Beta site is missing ${missing.length} blog post(s) from the live site`,
-      description: `The beta site's blogs do not match the client's live site: ${missing.length} of ${livePosts.length} live blog post(s) are not present on the beta site. Fix: copy over the missing blog posts manually.`,
+      // SCAN-ONLY: fix wording removed — was: description: `The beta site's blogs do not match the client's live site: ${missing.length} of ${livePosts.length} live blog post(s) are not present on the beta site. Fix: copy over the missing blog posts manually.`,
+      description: `The beta site's blogs do not match the client's live site: ${missing.length} of ${livePosts.length} live blog post(s) are not present on the beta site.`,
       context_text: `Beta site: ${betaOrigin} (${betaPosts.length} posts via ${betaRes.via})\nClient live site: ${liveOrigin} (${livePosts.length} posts via ${liveRes?.via})\nMissing on beta:\n${missingList}${missing.length > 30 ? `\n…and ${missing.length - 30} more` : ""}`,
       screenshot_url: null,
       status: "open",
