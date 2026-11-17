@@ -64,7 +64,11 @@ export function resumeStageFor(run: ResumeRunRow, pages: PageCounts, opts: Resum
   if (opts.now - touched < opts.minIdleSeconds * 1000) return null
 
   if (pages.rows === 0) return status === "completed" ? null : "discover"
-  if (pages.unfinished > 0) return "pages"
+  // A completed run whose report already went to TED is finished, even if a page
+  // row was left half-way (e.g. "screenshotted" after a timeout). Resuming it
+  // re-scans one stray page of an old run; a retrigger means "run it again".
+  const reported = status === "completed" && !!run.ted_report_posted_at
+  if (pages.unfinished > 0 && !reported) return "pages"
   if (run.ted_task_id && !run.ted_report_posted_at) return "finalize"
   if (
     opts.aiFixEnabled &&
@@ -132,7 +136,9 @@ export async function findResumableRun(
       now: Date.now(),
       maxAgeHours: Number(process.env.TED_RUN_RESUME_MAX_HOURS || 72),
       minIdleSeconds: Number(process.env.TED_RUN_RESUME_MIN_IDLE_SECONDS || 120),
-      aiFixEnabled: process.env.AI_FIX_MODULE_ENABLED === "true",
+      // SCAN-ONLY: the worker skips ai_fix_run, so resuming at the AI fix stage
+      // would queue a job that never runs and leave the TED tasks open.
+      aiFixEnabled: false,
     })
     if (!stage) return null
     if (await hasLiveJobs(run.id)) return null // still working → duplicate path

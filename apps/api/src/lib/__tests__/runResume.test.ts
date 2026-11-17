@@ -75,6 +75,15 @@ describe("resumeStageFor — finished, too old, or too fresh", () => {
   it("touched in the last 2 minutes → not resumed (start-up race)", () => {
     expect(resumeStageFor(run({ updated_at: ago(1) }), pages(0, 0), opts)).toBeNull()
   })
+  it("completed + reported run with a stray unfinished page → fresh run", () => {
+    // Prod 2026-11-17: one page stuck "screenshotted" made a finished run look
+    // unfinished, so a manual retrigger resumed it instead of running again.
+    const r = run({ status: "completed", ted_report_posted_at: ago(40), ted_completed_at: ago(35) })
+    expect(resumeStageFor(r, pages(200, 1), opts)).toBeNull()
+  })
+  it("completed but never reported, pages left → still resumed", () => {
+    expect(resumeStageFor(run({ status: "completed" }), pages(200, 1), opts)).toBe("pages")
+  })
   it("completed run with no pages → fresh run", () => {
     expect(resumeStageFor(run({ status: "completed" }), pages(0, 0), opts)).toBeNull()
   })

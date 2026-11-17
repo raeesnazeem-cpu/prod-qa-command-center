@@ -15,6 +15,7 @@ import {
   postTedComment,
 } from "../lib/tedSync"
 import { releaseRunSlot } from "../lib/runSlot"
+import { BrowserUnavailableError, isBrowserMissingError } from "../lib/browserCheck"
 import { releaseReportGate, PAGES_PART } from "../lib/reportGate"
 import { runCrossBrowserCheck } from "../checks/crossBrowserCheck"
 import { checkExternalLinks } from "../checks/externalLinkCheck"
@@ -361,6 +362,9 @@ export async function processCrawlPageJob(job: Job) {
   // page is counted twice and the run completes early.
   let timedOut = false
   const retryPending = () => timedOut && !!job.data.retryOnTimeout
+  // Set when this worker has no usable browser: the page is handed back to the
+  // queue untouched — not marked failed, not counted toward completion.
+  let browserMissing = false
 
   try {
     if (!job.data.overrideChecks) {
@@ -454,14 +458,24 @@ export async function processCrawlPageJob(job: Job) {
     let hasForms = false
 
     if (!isOnlyFastScanChecks) {
-      browser = await chromium.launch({
-        headless: true,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-        ],
-      })
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+          ],
+        })
+      } catch (e: any) {
+        // A machine with no usable browser: not the page's fault. Hand the job
+        // back instead of recording the page as failed (see lib/browserCheck).
+        if (isBrowserMissingError(e)) {
+          browserMissing = true
+          throw new BrowserUnavailableError(String(e?.message || e).split("\n")[0])
+        }
+        throw e
+      }
     }
 
     let pageTimer: NodeJS.Timeout | undefined
@@ -1534,6 +1548,16 @@ export async function processCrawlPageJob(job: Job) {
       "Error during page crawl",
     )
 
+    if (browserMissing) {
+      // Put the page back to pending so a healthy worker scans it from scratch.
+      if (pageId && !job.data.overrideChecks)
+        await supabase
+          .from("pages")
+          .update({ status: "pending", progress: 0, current_step: "Waiting for a worker with a browser" })
+          .eq("id", pageId)
+      throw error
+    }
+
     if (pageId) {
       const errorMessage = error.message.split("\n")[0] || "Unknown error"
       if (!job.data.overrideChecks) {
@@ -1572,7 +1596,7 @@ export async function processCrawlPageJob(job: Job) {
 
     throw error
   } finally {
-    if (!job.data.overrideChecks && !retryPending()) {
+    if (!job.data.overrideChecks && !retryPending() && !browserMissing) {
       // Step 6 & 7: Atomically increment pages_processed and check for run completion
       const { data: isComplete, error: rpcError } = await supabase.rpc(
         "increment_and_check_completion",
