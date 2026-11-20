@@ -1,4 +1,5 @@
 import { Job } from "bullmq"
+import { logRunEvent } from "../lib/runEvents"
 import { checkLearnMoreButtons } from "../checks/learnMoreButtonsCheck"
 import { checkPageSpeed } from "../checks/pageSpeedCheck"
 import { chromium } from "playwright"
@@ -6,13 +7,15 @@ import { supabase } from "../lib/supabase"
 import { qaQueue } from "../lib/queue"
 import {
   postFinalReportToTED,
-  postScanCompleteComment,
-  postDetectionSummary,
+  // SCAN-ONLY: fix feature disabled — these announced the AI-fix hand-off.
+  // postScanCompleteComment,
+  // postDetectionSummary,
   precomputeFindingMedia,
   markAllTedTasksCompleted,
   postTedComment,
 } from "../lib/tedSync"
 import { releaseRunSlot } from "../lib/runSlot"
+import { BrowserUnavailableError, isBrowserMissingError } from "../lib/browserCheck"
 import { releaseReportGate, PAGES_PART } from "../lib/reportGate"
 import { runCrossBrowserCheck } from "../checks/crossBrowserCheck"
 import { checkExternalLinks } from "../checks/externalLinkCheck"
@@ -37,6 +40,14 @@ import { checkImageQuality } from "../checks/imageQualityCheck"
 import { checkImageRelevance } from "../checks/imageRelevanceCheck"
 import { checkMediaCrop } from "../checks/mediaCropCheck"
 import { checkBlogSidebar } from "../checks/blogSidebarCheck"
+import { gapKeysByScope } from "@qacc/shared"
+import { checkPageGaps } from "../checks/gaps/pageGapsCheck"
+import { checkResponsiveGaps, RESPONSIVE_KEYS } from "../checks/gaps/responsiveGapsCheck"
+import { checkHomepageGaps, HOMEPAGE_KEYS } from "../checks/gaps/homepageGapsCheck"
+import { checkVisionGaps, VISION_KEYS, releaseVisionBudget } from "../checks/gaps/visionGapsCheck"
+import { checkSafariLayoutDiff, SAFARI_DIFF_KEY, releaseSafariDiffBudget } from "../checks/gaps/safariLayoutDiffCheck"
+import { runSiteConsistencyChecks } from "../checks/gaps/siteConsistencyCheck"
+import { releaseFacts, sweepFacts } from "../checks/gaps/factsStore"
 import { checkGbp } from "../checks/gbpCheck"
 import { checkGrammar } from "../checks/grammarCheck"
 import { checkAccessibility } from "../checks/accessibilityCheck"
@@ -134,8 +145,14 @@ function lapse(checkFactor: string) {
   }
 }
 
+// QA-gap checks by where they run (registry: packages/shared/src/gapChecks.ts).
+const GAP_PAGE_KEYS = gapKeysByScope("page")
+const GAP_RUN_KEYS = gapKeysByScope("run")
+
 // Checks that only run on the homepage (see the HOMEPAGE-ONLY block below).
 const HOMEPAGE_ONLY_KEYS = new Set([
+  ...gapKeysByScope("homepage"),
+  "logo_visibility", // vision scope, but judged on the homepage only
   "hero_media", "privacy_policy", "footer_logo", "hamburger_menu", "blog_verification",
   "top_bar_sticky", "favicon", "chatbot_consultation", "logo_chatbot", "text_share",
   "callnow_links", "url_tab_compare", "verify_plugin_updates", "plugin_number",
@@ -143,7 +160,10 @@ const HOMEPAGE_ONLY_KEYS = new Set([
   "gbp_check", "social_share_heading", "single_script", "gsr_check",
 ])
 // Standalone API checks run as their own jobs, never per page.
-const NON_PAGE_KEYS = new Set(["project_plan", "paid_media", "video_recording"])
+// Run-level gap checks (judged once at run end) are not per page either.
+// safari_layout_diff only runs on a few key pages, so an unreadable inner page
+// must not get a "could not complete" row for it.
+const NON_PAGE_KEYS = new Set(["project_plan", "paid_media", "cro_audit", "video_recording", ...GAP_RUN_KEYS, "safari_layout_diff"])
 
 const sameSiteUrl = (u: string) =>
   String(u || "")
@@ -342,6 +362,9 @@ export async function processCrawlPageJob(job: Job) {
   // page is counted twice and the run completes early.
   let timedOut = false
   const retryPending = () => timedOut && !!job.data.retryOnTimeout
+  // Set when this worker has no usable browser: the page is handed back to the
+  // queue untouched — not marked failed, not counted toward completion.
+  let browserMissing = false
 
   try {
     if (!job.data.overrideChecks) {
@@ -435,14 +458,24 @@ export async function processCrawlPageJob(job: Job) {
     let hasForms = false
 
     if (!isOnlyFastScanChecks) {
-      browser = await chromium.launch({
-        headless: true,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-        ],
-      })
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+          ],
+        })
+      } catch (e: any) {
+        // A machine with no usable browser: not the page's fault. Hand the job
+        // back instead of recording the page as failed (see lib/browserCheck).
+        if (isBrowserMissingError(e)) {
+          browserMissing = true
+          throw new BrowserUnavailableError(String(e?.message || e).split("\n")[0])
+        }
+        throw e
+      }
     }
 
     let pageTimer: NodeJS.Timeout | undefined
@@ -589,6 +622,72 @@ export async function processCrawlPageJob(job: Job) {
             return lapse("blog_sidebar")(e)
           }),
         )
+      }
+
+      // QA-gap checks.
+      //  • Page read — on the shared page, right after blog_sidebar so it sees
+      //    the page as crawled. Read-only. Also runs (silently) when only the
+      //    run-end checks are enabled: they need every page's facts.
+      //  • Tablet/mobile layout — own context, concurrent lane.
+      //  • Homepage extras (header widths, Safari, 404, menus) — own contexts.
+      {
+        const gapEnabled = new Set<string>(enabledChecks)
+        const homeForGaps =
+          sameSiteUrl(pageUrl) === sameSiteUrl(run.site_url)
+        const wantsPageRead =
+          GAP_PAGE_KEYS.some((k) => gapEnabled.has(k)) ||
+          GAP_RUN_KEYS.some((k) => gapEnabled.has(k)) ||
+          (homeForGaps && gapEnabled.has("footer_copyright"))
+        if (wantsPageRead && page) {
+          scheduleOnSharedPage("qa_gaps_page", () =>
+            checkPageGaps(page, {
+              runId,
+              pageId,
+              pageUrl,
+              isHome: homeForGaps,
+              enabled: gapEnabled,
+            }).catch((e) => {
+              logger.error("QA-gap page checks failed:", e)
+              return GAP_PAGE_KEYS.filter((k) => gapEnabled.has(k)).flatMap((k) => lapse(k)(e))
+            }),
+          )
+        }
+        if (RESPONSIVE_KEYS.some((k) => gapEnabled.has(k))) {
+          schedule("qa_gaps_responsive", () =>
+            checkResponsiveGaps(pageUrl, runId, browser, gapEnabled, homeForGaps).catch((e) => {
+              logger.error("QA-gap responsive checks failed:", e)
+              return RESPONSIVE_KEYS.filter((k) => gapEnabled.has(k) && k !== "mobile_order").flatMap((k) => lapse(k)(e))
+            }),
+          )
+        }
+        if (VISION_KEYS.some((k) => gapEnabled.has(k))) {
+          schedule("qa_gaps_vision", () =>
+            checkVisionGaps(pageUrl, runId, pageId, browser, gapEnabled, homeForGaps).catch((e) => {
+              logger.error("QA-gap vision checks failed:", e)
+              return VISION_KEYS.filter((k) => gapEnabled.has(k)).flatMap((k) => lapse(k)(e))
+            }),
+          )
+        }
+        if (gapEnabled.has(SAFARI_DIFF_KEY)) {
+          // Key pages only (home, contact, about, services); the check decides.
+          schedule("qa_gaps_safari_diff", () =>
+            checkSafariLayoutDiff(pageUrl, run.site_url, runId, pageId, browser).catch((e) => {
+              logger.error("Safari layout diff failed:", e)
+              return lapse(SAFARI_DIFF_KEY)(e)
+            }),
+          )
+        }
+        if (homeForGaps && HOMEPAGE_KEYS.some((k) => gapEnabled.has(k))) {
+          schedule("qa_gaps_homepage", () =>
+            checkHomepageGaps(pageUrl, runId, browser, gapEnabled, {
+              runType: run.run_type,
+              isWoo: !!run.is_woocommerce,
+            }).catch((e) => {
+              logger.error("QA-gap homepage checks failed:", e)
+              return HOMEPAGE_KEYS.filter((k) => gapEnabled.has(k)).flatMap((k) => lapse(k)(e))
+            }),
+          )
+        }
       }
 
       // Fetch project details and settings for pre-release checks
@@ -1395,6 +1494,14 @@ export async function processCrawlPageJob(job: Job) {
             current_step: "All checks complete",
           })
           .eq("id", pageId)
+        // Raw-events line for TED's run log: which page just finished.
+        await logRunEvent({
+          runId,
+          kind: "page.done",
+          status: "info",
+          message: `Page checked: ${pageUrl}`,
+          detail: { pageId, url: pageUrl },
+        })
       } else {
         // If it's an override, we only mark the specific check as done in check_progress
         const checkKey = job.data.overrideChecks[0]
@@ -1441,6 +1548,16 @@ export async function processCrawlPageJob(job: Job) {
       "Error during page crawl",
     )
 
+    if (browserMissing) {
+      // Put the page back to pending so a healthy worker scans it from scratch.
+      if (pageId && !job.data.overrideChecks)
+        await supabase
+          .from("pages")
+          .update({ status: "pending", progress: 0, current_step: "Waiting for a worker with a browser" })
+          .eq("id", pageId)
+      throw error
+    }
+
     if (pageId) {
       const errorMessage = error.message.split("\n")[0] || "Unknown error"
       if (!job.data.overrideChecks) {
@@ -1479,7 +1596,7 @@ export async function processCrawlPageJob(job: Job) {
 
     throw error
   } finally {
-    if (!job.data.overrideChecks && !retryPending()) {
+    if (!job.data.overrideChecks && !retryPending() && !browserMissing) {
       // Step 6 & 7: Atomically increment pages_processed and check for run completion
       const { data: isComplete, error: rpcError } = await supabase.rpc(
         "increment_and_check_completion",
@@ -1561,7 +1678,7 @@ export async function processCrawlPageJob(job: Job) {
 /**
  * Run-level wrap-up once EVERY part of the run is done (all pages + any
  * standalone API checks): cross-browser check, result snapshot, timings,
- * screenshot precompute, then the TED report and AI fix. Called exactly once
+ * screenshot precompute, then the TED report. Called exactly once
  * per run — by the last page, or by the last API check (see reportGate).
  */
 export async function finalizeRun(runId: string): Promise<void> {
@@ -1571,6 +1688,14 @@ export async function finalizeRun(runId: string): Promise<void> {
     .eq("id", runId)
     .single()
   if (!run) return
+
+  // Run-level QA-gap checks (cross-page consistency). Before the TED report
+  // so their findings are in it. Best-effort: a failure writes lapse rows.
+  const gapStart = Date.now()
+  await runGapSiteChecks(runId).catch((e) =>
+    logger.error({ runId, error: e?.message }, "QA-gap site checks failed"),
+  )
+  recordTiming(runId, "qa_gaps_site", run.site_url, Date.now() - gapStart)
 
   // Run-level cross-browser visual check (no-op unless enabled). Runs
   // before the TED report so its findings are included in the summary.
@@ -1588,8 +1713,7 @@ export async function finalizeRun(runId: string): Promise<void> {
   // Analytics only: log + persist per-check timings. Never posted to TED.
   await saveTimingReport(runId)
 
-  // Prepare inlined screenshots now (scan time), so the report — whether
-  // posted immediately here or later by the AI-fix pass — is just string
+  // Prepare inlined screenshots now (scan time), so the report is just string
   // assembly, not network I/O on the critical path. Best-effort.
   await precomputeFindingMedia(runId).catch((e) =>
     logger.error("Screenshot precompute failed:", e),
@@ -1607,13 +1731,23 @@ export async function finalizeRun(runId: string): Promise<void> {
         return null
       },
     )
-    // Only trigger the AI fix when the report actually posted AND there
-    // were real issues. All-passed → say so and skip the fix.
-    await maybeTriggerAiFix(runId, run.ted_task_id, report)
+    await logRunEvent({
+      runId,
+      tedTaskId: run.ted_task_id,
+      kind: report ? "report.posted" : "report.failed",
+      status: report ? "ok" : "failed",
+      message: report
+        ? `Results posted to TED (${report.issueCount} issue${report.issueCount === 1 ? "" : "s"})`
+        : "Could not post the results to TED",
+      detail: report ? { issues: report.issueCount, hasIssues: report.hasIssues } : {},
+    })
+    // SCAN-ONLY: the scan report is the final word. Close out the TED tasks.
+    // (Was: maybeTriggerAiFix — queued the AI fix when there were issues.)
+    await finishRunAfterReport(runId, run.ted_task_id, report)
   }
 
   // Full scans have no task dependency: one triggered without a
-  // ted_task_id never enters the block above, so maybeTriggerAiFix — the
+  // ted_task_id never enters the block above, so finishRunAfterReport — the
   // ONLY place a full_scan releases the global run slot — is never reached
   // and the slot leaks until the staleness steal, blocking the next scan.
   // Release it here too. Idempotent: a no-op if it was already freed
@@ -1624,14 +1758,41 @@ export async function finalizeRun(runId: string): Promise<void> {
 }
 
 /**
- * Decide whether to run the AI fix after a run's TED report is posted.
- * - report === null  → the report didn't post (duplicate path / error): do nothing.
- * - AI fix module off → do nothing (the summary already went out).
- * - real issues found → post the "scan complete, AI Fix running" comment and
- *   queue the ai_fix_run job.
- * - everything passed → post a short "AI Fix skipped, no issues" comment and do
- *   NOT queue the fix.
+ * The run-end QA-gap checks: compare every page's collected facts (factsStore)
+ * and write the findings against the homepage row. Releases the facts.
  */
+async function runGapSiteChecks(runId: string): Promise<void> {
+  sweepFacts()
+  try {
+    const { data: run } = await supabase
+      .from("qa_runs")
+      .select("id, site_url, live_site_url, run_type, enabled_checks")
+      .eq("id", runId)
+      .single()
+    const enabled = new Set<string>(run?.enabled_checks || [])
+    if (!run || !GAP_RUN_KEYS.some((k) => enabled.has(k))) return
+    const { data: pages } = await supabase.from("pages").select("id, url").eq("run_id", runId)
+    const list = pages || []
+    if (list.length === 0) return
+    const home = list.find((p: any) => sameSiteUrl(p.url) === sameSiteUrl(run.site_url)) || list[0]
+    let findings: any[]
+    try {
+      findings = await runSiteConsistencyChecks(run as any, enabled, list.map((p: any) => p.url))
+    } catch (e: any) {
+      findings = GAP_RUN_KEYS.filter((k) => enabled.has(k)).flatMap((k) => lapse(k)(e))
+    }
+    if (findings.length) {
+      const rows = findings.map((f) => ({ ...f, page_id: home.id, run_id: runId }))
+      const { error } = await supabase.from("findings").insert(rows)
+      if (error) logger.error({ runId, error: error.message }, "QA-gap site checks: insert failed")
+    }
+  } finally {
+    releaseFacts(runId)
+    releaseVisionBudget(runId)
+    releaseSafariDiffBudget(runId)
+  }
+}
+
 /**
  * Build the "AI hit a 429" note for the full-scan TED comment, or "" if no AI
  * check lapsed on a rate limit this run. Reads the persisted lapse findings so
@@ -1669,19 +1830,25 @@ async function buildAi429Note(runId: string): Promise<string> {
   }
 }
 
-async function maybeTriggerAiFix(
+/**
+ * Close out a run after its TED report is posted. QACC is scan-only: the scan
+ * report is the final word, so there is no fix pass to hand off to.
+ * - report === null  → the report didn't post (duplicate path / error): do nothing.
+ * - full_scan        → post "scan complete", free the run slot, change no TED status.
+ * - everything else  → close out the TED tasks (issues found or not).
+ * (Was maybeTriggerAiFix, which queued the ai_fix_run job when there were issues.)
+ */
+async function finishRunAfterReport(
   runId: string,
   tedTaskId: string,
   report: { hasIssues: boolean; issueCount: number } | null,
 ): Promise<void> {
   if (!report) return
 
-  // Full scan: Test and Fix are separate suites. The scan report has ALREADY been
-  // posted (postFinalReportToTED does not defer for full_scan), so the scan is
-  // done here — do NOT auto-run the fix and do NOT change any TED status (a full
-  // scan is ad-hoc). The fix is a separate, on-demand action
-  // (POST /webhooks/ted/full-scan/fix). Free the global run slot here, since we
-  // skip markAllTedTasksCompleted which normally releases it.
+  // Full scan: the scan report has ALREADY been posted, so the scan is done
+  // here — do NOT change any TED status (a full scan is ad-hoc). Free the
+  // global run slot here, since we skip markAllTedTasksCompleted which
+  // normally releases it.
   const { data: fsRun } = await supabase
     .from("qa_runs")
     .select("run_type")
@@ -1691,45 +1858,52 @@ async function maybeTriggerAiFix(
     await releaseRunSlot(runId).catch(() => {})
     // If any AI-backed check lapsed because the model hit a 429 (quota / rate
     // limit), say so explicitly. Otherwise those checks render as a bare "could
-    // not complete" with no hint it was an AI quota problem the client can wait
-    // out or fix by upgrading the key. Read from the persisted lapse findings
-    // (authoritative) — the in-memory circuit breaker is already cleared by the
-    // releaseRunSlot above and never tracked vision 429s anyway.
+    // not complete" with no hint it was an AI quota problem. Read from the
+    // persisted lapse findings (authoritative) — the in-memory circuit breaker
+    // is already cleared by the releaseRunSlot above and never tracked vision
+    // 429s anyway.
     const ai429Note = await buildAi429Note(runId)
     await postTedComment(
       tedTaskId,
-      `<p>✅ <strong>Full scan complete.</strong> Review the results above. To apply automated (GitOps) fixes, use <em>Send to Fix</em>.</p>${ai429Note}`,
+      // SCAN-ONLY: was `... Review the results above. To apply automated (GitOps) fixes, use <em>Send to Fix</em>.`
+      `<p>✅ <strong>Full scan complete.</strong> Review the results above.</p>${ai429Note}`,
       `ext:qacc-fullscan-scandone-${runId}`,
       { runId },
     ).catch(() => {})
-    logger.info({ runId }, "full_scan: scan report posted; fix left for the on-demand fix endpoint.")
+    logger.info({ runId }, "full_scan: scan report posted.")
     return
   }
 
-  // If the AI-fix module is off, the run is finished here — close out the TED
-  // tasks so nothing is left "In Progress" and the flow can advance.
-  if (process.env.AI_FIX_MODULE_ENABLED !== "true") {
-    await markAllTedTasksCompleted(runId, tedTaskId)
-    return
-  }
+  // SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+  // The scan report is final, so the run always ends here: close out the TED
+  // tasks so the flow can advance (and the video barrier can run).
+  await markAllTedTasksCompleted(runId, tedTaskId)
 
-  if (report.hasIssues) {
-    // Real issues → hand off to the AI-fix pass. It posts the ONE combined
-    // section-wise report (issue → fix → pass) and then calls
-    // markAllTedTasksCompleted itself, so tasks close AFTER the fix.
-    await postScanCompleteComment(tedTaskId, runId)
-    // Break the ~5-min silence: post the DETECTION summary ("here's what we
-    // found") to the main thread now, before the fix pass runs. This is a plain
-    // comment — it carries no aiAssigned flag and does NOT complete the task;
-    // the end-of-run fix summary still owns both of those (Task 2, unchanged).
-    await postDetectionSummary(runId, tedTaskId)
-    qaQueue
-      .add("ai_fix_run", { runId, tedTaskId })
-      .catch((e) => logger.error("Failed to queue ai_fix_run:", e))
-  } else {
-    // Everything passed — postFinalReportToTED already posted the section-wise
-    // report (each check named + how it passed), so there's nothing to add here.
-    // No fix pass runs; just close out the TED tasks.
-    await markAllTedTasksCompleted(runId, tedTaskId)
-  }
+  // SCAN-ONLY: the old AI-fix hand-off, kept for later.
+  // // If the AI-fix module is off, the run is finished here — close out the TED
+  // // tasks so nothing is left "In Progress" and the flow can advance.
+  // if (process.env.AI_FIX_MODULE_ENABLED !== "true") {
+  //   await markAllTedTasksCompleted(runId, tedTaskId)
+  //   return
+  // }
+  //
+  // if (report.hasIssues) {
+  //   // Real issues → hand off to the AI-fix pass. It posts the ONE combined
+  //   // section-wise report (issue → fix → pass) and then calls
+  //   // markAllTedTasksCompleted itself, so tasks close AFTER the fix.
+  //   await postScanCompleteComment(tedTaskId, runId)
+  //   // Break the ~5-min silence: post the DETECTION summary ("here's what we
+  //   // found") to the main thread now, before the fix pass runs. This is a plain
+  //   // comment — it carries no aiAssigned flag and does NOT complete the task;
+  //   // the end-of-run fix summary still owns both of those (Task 2, unchanged).
+  //   await postDetectionSummary(runId, tedTaskId)
+  //   qaQueue
+  //     .add("ai_fix_run", { runId, tedTaskId })
+  //     .catch((e) => logger.error("Failed to queue ai_fix_run:", e))
+  // } else {
+  //   // Everything passed — postFinalReportToTED already posted the section-wise
+  //   // report (each check named + how it passed), so there's nothing to add here.
+  //   // No fix pass runs; just close out the TED tasks.
+  //   await markAllTedTasksCompleted(runId, tedTaskId)
+  // }
 }

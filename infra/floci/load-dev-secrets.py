@@ -33,6 +33,8 @@ ALLOW = [
     # Check providers
     "SCRAPER_API_KEY", "PAGESPEED_API_KEY", "GOOGLE_PAGESPEED_API_KEY",
     "GOOGLE_PLACES_API_KEY", "HUBSPOT_TOKEN",
+    # WebAudit (auditarena) site-audit service
+    "WEB_AUDIT_URL", "WEB_AUDIT_TOKEN",
     "ENCRYPTION_SECRET",
     # Repo reads for pre/internal/post (AI fix is off, so nothing pushes)
     "GIT_FIX_TOKEN",

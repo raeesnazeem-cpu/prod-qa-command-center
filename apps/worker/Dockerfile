@@ -19,8 +19,8 @@ RUN pnpm --filter worker build
 RUN pnpm --filter worker deploy --prod --legacy /out
 
 # --- runtime -------------------------------------------------------------------
-# Only Chromium: every check launches chromium. The SmartUI cross-browser check
-# (LambdaTest, out of scope) would need WebKit and skips without its token.
+# Chromium for every check, plus WebKit for the Safari layout-diff and homepage
+# gap checks (without it they report "Safari engine not available" on every scan).
 FROM node:20-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production \
@@ -32,7 +32,7 @@ COPY --from=build /out/node_modules ./node_modules
 # curl is for the ECS container health check.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
- && node node_modules/playwright/cli.js install --with-deps chromium \
+ && node node_modules/playwright/cli.js install --with-deps chromium webkit \
  && rm -rf /var/lib/apt/lists/* /root/.cache
 
 COPY --from=build /app/apps/worker/dist ./dist

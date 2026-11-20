@@ -17,6 +17,7 @@ const CHECK_LABELS: Record<string, string> = {
   dead_links: "Dead-Link Check",
   project_plan: "Project Plan Check",
   paid_media: "Paid Media Check",
+  cro_audit: "CRO (Conversion Review)",
   privacy_policy: "Privacy Policy Check",
   callnow_links: "Callnow Links",
   footer_logo: "Footer Logo",

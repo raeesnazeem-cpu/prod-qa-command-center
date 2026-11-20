@@ -1,4 +1,5 @@
 import { Job } from "bullmq"
+import { gapKeysByScope } from "@qacc/shared"
 import { supabase } from "../lib/supabase"
 import { qaQueue } from "../lib/queue"
 import { crawlSitemap } from "../crawlers/sitemapCrawler"
@@ -6,6 +7,7 @@ import * as activityService from "../services/activityService"
 import { wpPasswordCache } from "../lib/credentialsCache"
 import { resolveThemeType } from "../lib/themeType"
 import { postTedComment } from "../lib/tedSync"
+import { logRunEvent, checkLabel } from "../lib/runEvents"
 import { acquireRunSlot, releaseRunSlot } from "../lib/runSlot"
 import { armReportGate } from "../lib/reportGate"
 import { resetAiBreakers } from "../lib/aiFallback"
@@ -19,6 +21,75 @@ const logger = pino({
     options: { colorize: true },
   },
 })
+
+// Standalone API checks (each its own job, outside the page scan).
+// cro_audit (G99 WebAudit CRO review) is full-scan only.
+const API_CHECKS = ["project_plan", "paid_media", "cro_audit"]
+
+export function enabledApiChecksFor(run: { enabled_checks?: string[] | null; run_type?: string | null }): string[] {
+  return (run.enabled_checks || []).filter(
+    (c: string) => API_CHECKS.includes(c) && (c !== "cro_audit" || run.run_type === "full_scan"),
+  )
+}
+
+/** Queue the page scan for these pages: one job per page, or a batch of up to 10. */
+export async function enqueuePageJobs(
+  run: { id: string; project_id: string; enabled_checks?: string[] | null },
+  pages: { id: string; url: string }[],
+  wpPassword?: string,
+): Promise<void> {
+  const runId = run.id
+  const BATCH_SIZE = 10
+  const chunks: { id: string; url: string }[][] = []
+  for (let i = 0; i < pages.length; i += BATCH_SIZE) chunks.push(pages.slice(i, i + BATCH_SIZE))
+  const jobs = chunks.map((chunk) =>
+    chunk.length === 1
+      ? {
+          name: "crawl_page",
+          data: {
+            runId,
+            pageId: chunk[0].id,
+            url: chunk[0].url,
+            projectId: run.project_id,
+            enabledChecks: run.enabled_checks,
+            wpPassword,
+          },
+          opts: { attempts: 3, backoff: { type: "exponential", delay: 5000 } },
+        }
+      : {
+          name: "crawl_batch",
+          data: {
+            runId,
+            pages: chunk.map((p) => ({ id: p.id, url: p.url })),
+            projectId: run.project_id,
+            wpPassword,
+          },
+          opts: {
+            attempts: 3,
+            backoff: { type: "exponential", delay: 5000 },
+            lockDuration: 600000,
+          },
+        },
+  )
+  await qaQueue.addBulk(jobs as any)
+}
+
+/** Queue the standalone API checks. */
+export async function enqueueApiCheckJobs(runId: string, projectId: string, checks: string[]): Promise<void> {
+  for (const check of checks) {
+    const jobName = `check_${check}`
+    await qaQueue.add(
+      jobName,
+      { runId, projectId },
+      // cro_audit retries each page itself and records "could not complete"
+      // rows; a job-level retry would just call WebAudit again for every page.
+      check === "cro_audit"
+        ? { attempts: 1 }
+        : { attempts: 3, backoff: { type: "exponential", delay: 5000 } },
+    )
+    logger.info({ runId, jobName }, `Enqueued ${jobName} job successfully`)
+  }
+}
 
 export async function processStartRunJob(job: Job) {
   const { runId } = job.data
@@ -77,6 +148,16 @@ export async function processStartRunJob(job: Job) {
       "Another QA run is already in progress; deferring this run and retrying.",
     )
     await qaQueue.add("start_run", job.data, { delay: delayMs })
+    if (!job.data.slotWaitLogged) {
+      job.data.slotWaitLogged = true
+      await logRunEvent({
+        runId,
+        tedTaskId: run.ted_task_id,
+        kind: "run.waiting_slot",
+        status: "running",
+        message: "Waiting for another QA run to finish (one run at a time)",
+      })
+    }
     return
   }
 
@@ -95,6 +176,14 @@ export async function processStartRunJob(job: Job) {
       "Failed to update run status to running",
     )
   }
+  await logRunEvent({
+    runId,
+    tedTaskId: run.ted_task_id,
+    kind: "run.started",
+    status: "ok",
+    message: "Worker started the run",
+    detail: { checks: (run.enabled_checks || []).map((c: string) => checkLabel(c)), siteUrl: run.site_url },
+  })
 
   // If this run carries a video-recording subtask, tell it up front that it is
   // deliberately waiting: recording is the final verification step and runs only
@@ -186,9 +275,16 @@ export async function processStartRunJob(job: Job) {
       "grammar",
       "accessibility_check",
       "accessibility_features",
+      // QA-gap checks that need every page (page read, tablet/mobile pass, run-end comparisons).
+      ...gapKeysByScope("page"),
+      ...gapKeysByScope("responsive"),
+      ...gapKeysByScope("run"),
+      ...gapKeysByScope("vision"),
+      ...gapKeysByScope("keypage"),
     ]
 
     const HOMEPAGE_ONLY_CHECKS = [
+      ...gapKeysByScope("homepage"),
       "privacy_policy",
       "callnow_links",
       "hero_media",
@@ -206,6 +302,13 @@ export async function processStartRunJob(job: Job) {
       "review_reputation_check",
       "gbp_check",
       "blog_verification",
+      // Run in crawlPageJob's homepage block too. Without them a run whose only
+      // checks are these (a single post-release subtask, e.g. "Cross verify the
+      // live site link") enqueued no page job and stayed "running" forever.
+      "hamburger_menu",
+      "plugin_number",
+      "live_site_link",
+      "page_speed",
     ]
 
     // NOTE: video_recording is intentionally NOT a page check. It is a
@@ -298,6 +401,13 @@ export async function processStartRunJob(job: Job) {
     // if (urls.length > 0) urls = pickDemoPages(urls, run.site_url)
 
     logger.info({ runId, count: urls.length }, "URL collection complete")
+    await logRunEvent({
+      runId,
+      kind: "pages.found",
+      status: "ok",
+      message: `Found ${urls.length} page${urls.length === 1 ? "" : "s"} to check`,
+      detail: { pages: urls.length },
+    })
 
     // Step 4: Update run.pages_total with URL count
     const { error: totalError } = await supabase
@@ -374,10 +484,7 @@ export async function processStartRunJob(job: Job) {
 
     // Add jobs to queue for each page discovered
     // Standalone API checks enabled on this run (each is its own job).
-    const API_CHECKS = ["project_plan", "paid_media"]
-    const enabledApiChecks: string[] = (run.enabled_checks || []).filter(
-      (c: string) => API_CHECKS.includes(c),
-    )
+    const enabledApiChecks = enabledApiChecksFor(run)
 
     if (needsPageScan && insertedPages && insertedPages.length > 0) {
       // Pages and API checks run in parallel — arm the gate BEFORE enqueuing
@@ -386,72 +493,36 @@ export async function processStartRunJob(job: Job) {
 
       logger.info({ runId, count: insertedPages.length }, "Enqueuing scan jobs")
 
-      const BATCH_SIZE = 10
-      const chunks = []
-      for (let i = 0; i < insertedPages.length; i += BATCH_SIZE) {
-        chunks.push(insertedPages.slice(i, i + BATCH_SIZE))
-      }
-
-      const jobs = chunks.map((chunk) => {
-        if (chunk.length === 1) {
-          const page = chunk[0]
-          return {
-            name: "crawl_page",
-            data: {
-              runId,
-              pageId: page.id,
-              url: page.url,
-              projectId: run.project_id,
-              enabledChecks: run.enabled_checks,
-              wpPassword,
-            },
-
-            opts: {
-              attempts: 3,
-              backoff: { type: "exponential", delay: 5000 },
-            },
-          }
-        } else {
-          return {
-            name: "crawl_batch",
-            data: {
-              runId,
-              pages: chunk.map((p) => ({ id: p.id, url: p.url })),
-              projectId: run.project_id,
-              wpPassword,
-            },
-
-            opts: {
-              attempts: 3,
-              backoff: { type: "exponential", delay: 5000 },
-              lockDuration: 600000,
-            },
-          }
-        }
+      await enqueuePageJobs(run, insertedPages, wpPassword)
+      await logRunEvent({
+        runId,
+        kind: "checks.running",
+        status: "running",
+        message: `Running ${(run.enabled_checks || []).length} checks on ${insertedPages.length} pages`,
+        detail: { checks: run.enabled_checks || [], pages: insertedPages.length },
       })
-
-      await qaQueue.addBulk(jobs)
-      logger.info(
-        { runId, jobCount: jobs.length },
-        "Enqueued scan jobs successfully",
-      )
+      logger.info({ runId }, "Enqueued scan jobs successfully")
     }
 
     // Enqueue standalone API checks if they are enabled
-    for (const check of enabledApiChecks) {
-      const jobName = `check_${check}`
-      await qaQueue.add(
-        jobName,
-        { runId, projectId: run.project_id },
-        {
-          attempts: 3,
-          backoff: { type: "exponential", delay: 5000 },
-        },
-      )
-      logger.info({ runId, jobName }, `Enqueued ${jobName} job successfully`)
-    }
+    await enqueueApiCheckJobs(runId, run.project_id, enabledApiChecks)
   } catch (error: any) {
     logger.error({ runId, error: error.message }, "Error during sitemap crawl")
+    await logRunEvent({
+      runId,
+      tedTaskId: run.ted_task_id,
+      kind: "run.failed",
+      status: "failed",
+      message: `Run failed while collecting pages: ${String(error?.message || error).slice(0, 200)}`,
+    })
+    if (run.ted_task_id) {
+      await postTedComment(
+        String(run.ted_task_id),
+        `<p>❌ <strong>Test run failed</strong> while collecting the site's pages: ${escapeHtml(String(error?.message || error).slice(0, 300))}</p><p>To fix: check that ${escapeHtml(String(run.site_url || "the site"))} loads, then press Trigger manually again.</p>`,
+        `ext:qacc-run-failed-${runId}`,
+        { runId, projectId: run.project_id },
+      ).catch(() => {})
+    }
 
     // The run failed before it could reach the normal completion path, so free
     // the global run slot here — otherwise it would stay held until it goes
@@ -542,4 +613,8 @@ function pickDemoPages(urls: string[], siteUrl: string): string[] {
   // No backfill: 2 is the max, not a quota. If contact didn't match, the run
   // stays at just the homepage rather than padding with an arbitrary page.
   return out.slice(0, DEMO_PAGE_LIMIT)
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")
 }

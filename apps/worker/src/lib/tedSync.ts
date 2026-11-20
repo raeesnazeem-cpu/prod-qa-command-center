@@ -1,8 +1,14 @@
 import { supabase } from "./supabase"
+import { logRunEvent } from "./runEvents"
+import { TED_BASE } from "./tedClient"
+import { GAP_LABELS, GAP_NOT_FIXED } from "@qacc/shared"
+import { INTERNAL_TOKEN_HEADER, internalToken } from "@qacc/shared/internalAuth"
 import { getClientDomain } from "./tedClient"
 import { qaQueue } from "./queue"
 import { releaseRunSlot } from "./runSlot"
+import { parseCroContext, CroPageReport } from "./croReport"
 import pino from "pino"
+import { renderTestCaseSummary, type TestCaseRow } from "./resultSummary"
 import sharp from "sharp"
 import { downloadStoredObject } from "./supabaseStorage"
 
@@ -78,9 +84,10 @@ function displayHostFor(clientDomain?: string | null, runType?: string | null): 
   return `${label}.gogroth.com`
 }
 
-// Ordered raw→clean wording replacements for the CLIENT copy: strip the local /
-// fallback / clone / could-not-push plumbing and, when a fix landed, say simply
-// "committed and created a pull request". The raw QACC copy is untouched.
+// Ordered raw→clean wording replacements for the CLIENT copy. The raw QACC copy
+// is untouched.
+// SCAN-ONLY: the fix-pass entries (fallback repo / push / pull request wording)
+// are commented out below — QACC only scans, so that text is never produced.
 const CLIENT_WORDING: [RegExp, string][] = [
   // The client SEES that AI vision failed (kept, in plain words) but NOT the raw
   // provider error after the colon — that backend detail lives only in the worker
@@ -90,38 +97,39 @@ const CLIENT_WORDING: [RegExp, string][] = [
     /<br>\s*<small>AI vision unavailable:[\s\S]*?<\/small>/gi,
     "<br><small>⚠️ AI vision could not verify this automatically — flagged for manual review.</small>",
   ],
-  // The whole fallback "Note:" paragraph.
-  [/<p><strong>Note:<\/strong>[^]*?fallback repository and its hosted site[^]*?<\/p>/gi, ""],
-  // Repo label in the header.
-  [/\s*·\s*Repository:\s*<em>Fallback repository<\/em>/gi, ""],
-  [/<em>Fallback repository<\/em>/gi, "the repository"],
-  // Fix-status / push-clause fallback + could-not-push variants → uniform.
-  [/Pushed \d+ fix(?:es)? straight to <code>main<\/code> of the local fallback repository — the local test site now reflects (?:them|it)\./gi, "Committed and created a pull request."],
-  [/Pushed straight to <code>main<\/code> of the local fallback repository — the local test site now reflects it\./gi, "Committed and created a pull request."],
-  [/\d+ attempted fix(?:es)? — committed locally, but could not be pushed to the local fallback repository's <code>main<\/code> \(it may have uncommitted changes\); verified against the code on a clone only\./gi, "Committed and created a pull request."],
-  [/Committed locally, but could not be pushed to the local fallback repository's <code>main<\/code>; verified against the code on a clone only\./gi, "Committed and created a pull request."],
-  [/No code-level fixes were applicable this run — nothing to push to the local fallback repository\./gi, "No code-level fixes were applicable this run."],
-  [/\d+ fix(?:es)? committed locally, but the branch could not be pushed — nothing has reached the repository\./gi, "Committed and created a pull request."],
-  [/Committed locally, but the branch could not be pushed — nothing has reached the repository\./gi, "Committed and created a pull request."],
-  // PR-created / not-opened variants (branch mention) → uniform.
-  [/Pushed to branch <code>[^<]*<\/code>\s*[·;]\s*[Pp]ull request <strong>created<\/strong> — not merged\./gi, "Committed and created a pull request."],
-  [/Pushed to branch <code>[^<]*<\/code>\s*[·;]\s*pull request could not be opened automatically\./gi, "Committed and created a pull request."],
-  // renderFixLine proposed note + "(fallback repo)" banner.
-  [/\s*\(proposed — verified on a clone, not pushed\)/gi, ""],
-  [/\s*<em>\(fallback repo\)<\/em>/gi, ""],
-  [/\s*\(fallback repo\)/gi, ""],
-  // Dry-run leftovers (client rarely sees these).
-  [/\s*—?\s*verified against the repository, nothing pushed\.?/gi, ""],
-  [/Dry run — nothing pushed\.?/gi, ""],
-  // Safety catch-alls for anything not matched verbatim above.
-  [/local fallback repository(?:'s)?/gi, "the repository"],
-  [/could not be pushed[^.<]*\./gi, "committed and created a pull request."],
+  // SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+  // // The whole fallback "Note:" paragraph.
+  // [/<p><strong>Note:<\/strong>[^]*?fallback repository and its hosted site[^]*?<\/p>/gi, ""],
+  // // Repo label in the header.
+  // [/\s*·\s*Repository:\s*<em>Fallback repository<\/em>/gi, ""],
+  // [/<em>Fallback repository<\/em>/gi, "the repository"],
+  // // Fix-status / push-clause fallback + could-not-push variants → uniform.
+  // [/Pushed \d+ fix(?:es)? straight to <code>main<\/code> of the local fallback repository — the local test site now reflects (?:them|it)\./gi, "Committed and created a pull request."],
+  // [/Pushed straight to <code>main<\/code> of the local fallback repository — the local test site now reflects it\./gi, "Committed and created a pull request."],
+  // [/\d+ attempted fix(?:es)? — committed locally, but could not be pushed to the local fallback repository's <code>main<\/code> \(it may have uncommitted changes\); verified against the code on a clone only\./gi, "Committed and created a pull request."],
+  // [/Committed locally, but could not be pushed to the local fallback repository's <code>main<\/code>; verified against the code on a clone only\./gi, "Committed and created a pull request."],
+  // [/No code-level fixes were applicable this run — nothing to push to the local fallback repository\./gi, "No code-level fixes were applicable this run."],
+  // [/\d+ fix(?:es)? committed locally, but the branch could not be pushed — nothing has reached the repository\./gi, "Committed and created a pull request."],
+  // [/Committed locally, but the branch could not be pushed — nothing has reached the repository\./gi, "Committed and created a pull request."],
+  // // PR-created / not-opened variants (branch mention) → uniform.
+  // [/Pushed to branch <code>[^<]*<\/code>\s*[·;]\s*[Pp]ull request <strong>created<\/strong> — not merged\./gi, "Committed and created a pull request."],
+  // [/Pushed to branch <code>[^<]*<\/code>\s*[·;]\s*pull request could not be opened automatically\./gi, "Committed and created a pull request."],
+  // // renderFixLine proposed note + "(fallback repo)" banner.
+  // [/\s*\(proposed — verified on a clone, not pushed\)/gi, ""],
+  // [/\s*<em>\(fallback repo\)<\/em>/gi, ""],
+  // [/\s*\(fallback repo\)/gi, ""],
+  // // Dry-run leftovers (client rarely sees these).
+  // [/\s*—?\s*verified against the repository, nothing pushed\.?/gi, ""],
+  // [/Dry run — nothing pushed\.?/gi, ""],
+  // // Safety catch-alls for anything not matched verbatim above.
+  // [/local fallback repository(?:'s)?/gi, "the repository"],
+  // [/could not be pushed[^.<]*\./gi, "committed and created a pull request."],
 ]
 
 /**
  * Sanitize a report body for the CLIENT-facing TED copy:
  *   • swap the local fallback URL for the client's gogroth (pre) / live (post) host,
- *   • strip all fallback/clone/push plumbing wording → "committed and created a PR".
+ *   • replace raw AI-vision provider errors with a client-safe note.
  * The raw QACC copy is posted separately and is NOT passed through this.
  */
 export function sanitizeClientReport(
@@ -170,7 +178,8 @@ async function recordLocalTedComment(
         body_html: bodyHtml,
         event_key: eventKey,
         source: ctx.source || "report",
-        author: "AI Fix",
+        // SCAN-ONLY: was author "AI Fix".
+        author: "QACC",
       },
       { onConflict: "event_key", ignoreDuplicates: true },
     )
@@ -212,8 +221,44 @@ export async function postQaccInternalNote(
   })
 }
 
+// The QACC API's base URL. Defaults to production only when this worker talks to
+// production TED; a local worker (TED_API_BASE set) must name its API explicitly.
+function qaccApiBase(): string | null {
+  const explicit = process.env.QACC_API_URL
+  if (explicit) return explicit.replace(/\/+$/, "")
+  return process.env.TED_API_BASE ? null : "https://api.qacc.raees.dev"
+}
+
+// POST the comment to the API's /internal/ted-comment. True when TED took it.
+export async function relayTedCommentViaApi(
+  tedTaskId: string,
+  text: string,
+  eventKey: string,
+  aiAssigned: boolean,
+): Promise<boolean> {
+  const base = qaccApiBase()
+  const token = internalToken("ted-comment")
+  if (!base || !token) return false
+  try {
+    const r = await fetch(`${base}/internal/ted-comment`, {
+      method: "POST",
+      headers: { [INTERNAL_TOKEN_HEADER]: token, "Content-Type": "application/json" },
+      body: JSON.stringify({ taskId: tedTaskId, text, eventKey, ...(aiAssigned ? { aiAssigned: true } : {}) }),
+    })
+    if (r.ok) {
+      logger.info({ tedTaskId }, "Posted TED comment via the QACC API relay.")
+      return true
+    }
+    logger.warn({ tedTaskId, status: r.status }, "QACC API relay did not post the comment.")
+  } catch (err: any) {
+    logger.warn({ tedTaskId, error: err?.message }, "QACC API relay threw.")
+  }
+  return false
+}
+
 // Post a comment to a TED task, preferring the newer /comments/ai endpoint
-// (X-Api-Key + idempotent eventKey); fall back to the proven /comments (Bearer).
+// (X-Api-Key + idempotent eventKey), then the QACC API relay, then the proven
+// /comments (Bearer).
 // Returns true on success.
 export async function postTedComment(
   tedTaskId: string,
@@ -256,7 +301,7 @@ export async function postTedComment(
   if (xApiKey) {
     try {
       const r = await fetch(
-        `https://ted.growth99.com/api/tasks/${tedTaskId}/comments/ai`,
+        `${TED_BASE}/tasks/${tedTaskId}/comments/ai`,
         {
           method: "POST",
           headers: {
@@ -267,6 +312,8 @@ export async function postTedComment(
           body: JSON.stringify({
             text: clientText,
             eventKey,
+            // TED shows the comment as "TED QA Agent" (older TED ignores it).
+            agentName: "TED QA Agent",
             ...(ctx.aiAssigned === true ? { aiAssigned: true } : {}),
           }),
         },
@@ -286,21 +333,22 @@ export async function postTedComment(
         "/comments/ai threw; falling back to /comments (Bearer).",
       )
     }
-  } else {
-    logger.info(
-      { tedTaskId },
-      "X_API_KEY not set in worker; using /comments (Bearer) directly.",
-    )
   }
 
-  // 2. Fallback: /comments with Bearer (the currently-working endpoint).
+  // 2. Relay through the QACC API, which holds a working X_API_KEY — so the
+  // comment still shows as "TED QA Agent" when this worker has no key of its own.
+  if (await relayTedCommentViaApi(tedTaskId, clientText, eventKey, ctx.aiAssigned === true)) {
+    return true
+  }
+
+  // 3. Fallback: /comments with Bearer (posts under the token owner's name).
   if (!bearer) {
     logger.error({ tedTaskId }, "No TED_API_TOKEN for /comments fallback.")
     return false
   }
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${tedTaskId}/comments`,
+      `${TED_BASE}/tasks/${tedTaskId}/comments`,
       {
         method: "POST",
         headers: {
@@ -334,8 +382,8 @@ export async function postTedComment(
 }
 
 // TED statuses QACC writes. A check's subtask is closed "Completed" when it
-// passed, or failed but QACC APPLIED a fix. A check that FAILED and was NOT
-// fixed is left "In Progress" for a person to act on. Both strings must match
+// passed. A check that FAILED (real issues found) is left "In Progress" for a
+// person to act on. (SCAN-ONLY: QACC no longer applies fixes.) Both strings must match
 // TED exactly ("In Progress" is the same status the API writes at scan start;
 // confirm "Completed" against TED before relying on it in production).
 const TED_STATUS_COMPLETED = "Completed"
@@ -374,7 +422,7 @@ export async function postTedStatus(
   }
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${tedTaskId}/status`,
+      `${TED_BASE}/tasks/${tedTaskId}/status`,
       {
         method: "PUT",
         headers: {
@@ -382,8 +430,8 @@ export async function postTedStatus(
           Accept: "application/json",
           "Content-Type": "application/json",
         },
-        // QACC auto-fixes every failing check, so any task it closes was
-        // AI-assigned — flag it so TED's release flow records it as such.
+        // Any task QACC closes was handled by the QACC agent — flag it as
+        // AI-assigned so TED's release flow records it as such.
         body: JSON.stringify({ status, aiAssigned: true }),
       },
     )
@@ -421,8 +469,8 @@ export async function postTedStatus(
 // Three release.qa_post subtasks have no safe automated check and are owned by a
 // human ("Send email to client", "Verify backup size", "Two-Way Text Setup"), so
 // QACC never maps or closes them and they linger "Not Started" when the parent
-// closes. For now we close each with a fixed, honest failure reason + a
-// "no fix needed" note so the parent can advance. Matched ID-free on the subtask
+// closes. For now we close each with a set, honest failure reason so the
+// parent can advance. Matched ID-free on the subtask
 // title (normalized: lowercased, non-alphanumerics stripped).
 const POST_RELEASE_MANUAL_CLOSEOUTS: { matchers: string[]; reason: string }[] = [
   {
@@ -440,7 +488,7 @@ const POST_RELEASE_MANUAL_CLOSEOUTS: { matchers: string[]; reason: string }[] = 
 ]
 
 // Fetch a parent's subtasks from TED (read-only), match the human-owned ones
-// above, and close each Completed with its hardcoded reason + "no fix needed".
+// above, and close each Completed with its hardcoded reason.
 // Real-TED only: needs TED_API_TOKEN and a live parent, so it no-ops in local
 // preview (those subtasks only exist in real TED). Best-effort throughout.
 async function closeManualPostReleaseSubtasks(
@@ -452,7 +500,7 @@ async function closeManualPostReleaseSubtasks(
   let subtasks: { id: string; title: string }[] = []
   try {
     const r = await fetch(
-      `https://ted.growth99.com/api/tasks/${parentTaskId}/subtasks`,
+      `${TED_BASE}/tasks/${parentTaskId}/subtasks`,
       { headers: { Authorization: `Bearer ${bearer}`, Accept: "application/json" } },
     )
     if (!r.ok || !(r.headers.get("content-type") || "").includes("application/json")) {
@@ -475,19 +523,20 @@ async function closeManualPostReleaseSubtasks(
     const n = norm(st.title)
     const hit = POST_RELEASE_MANUAL_CLOSEOUTS.find((c) => c.matchers.some((m) => n.includes(m)))
     if (!hit) continue
-    const body = `<p>${esc(hit.reason)}. - no fix needed</p>`
+    // SCAN-ONLY: was `<p>${esc(hit.reason)}. - no fix needed</p>`
+    const body = `<p>${esc(hit.reason)}.</p>`
     await postTedComment(st.id, body, `ext:qacc-postrelease-manual-closeout-${runId}-${st.id}`, {
       runId,
       targetKind: "subtask",
       source: "status",
     }).catch(() => {})
     await postTedStatus(st.id, TED_STATUS_COMPLETED, runId).catch(() => {})
-    logger.info({ runId, subtaskId: st.id, title: st.title }, "Manual post-release subtask closed (hardcoded no-fix-needed).")
+    logger.info({ runId, subtaskId: st.id, title: st.title }, "Manual post-release subtask closed (hardcoded reason).")
   }
 }
 
 // Did this run's report hold the parent open because issues remain (a check
-// failed with no fix applied, or could not complete)? postSectionedReport writes
+// failed with real issues, or could not complete)? postSectionedReport writes
 // a QACC-only ledger row under this key; its own key so it never collides with
 // the scan-start `status:<id>:In Progress:<runId>` row. Such a parent is left
 // In Progress for a person, never closed.
@@ -499,13 +548,39 @@ export async function parentHeldOpen(runId: string, parentTaskId: string): Promi
     .select("id")
     .eq("event_key", heldOpenKey(String(parentTaskId), runId))
     .limit(1)
-  return !!data && data.length > 0
+  if (data && data.length > 0) return true
+  // Safety net: any subtask whose LATEST status this run is still In Progress
+  // means a person has work left, so the parent must not close.
+  return (await openSubtaskIds(runId, String(parentTaskId))).length > 0
+}
+
+// Subtasks (not the parent) whose latest status row for this run is In Progress.
+export async function openSubtaskIds(runId: string, parentTaskId: string): Promise<string[]> {
+  const { data } = await supabase
+    .from("ted_comments")
+    .select("ted_task_id, event_key, created_at")
+    .eq("qa_run_id", runId)
+    .like("event_key", "status:%")
+    .order("created_at", { ascending: true })
+  return latestOpenSubtasks(data || [], parentTaskId)
+}
+
+export function latestOpenSubtasks(
+  rows: { ted_task_id: string | null; event_key: string }[],
+  parentTaskId: string,
+): string[] {
+  const latest = new Map<string, string>()
+  for (const r of rows) {
+    const id = String(r.ted_task_id || "")
+    if (!id || id === String(parentTaskId)) continue
+    latest.set(id, String(r.event_key).split(":")[2] || "")
+  }
+  return [...latest].filter(([, st]) => st === TED_STATUS_IN_PROGRESS).map(([id]) => id)
 }
 
 // Close out a finished run in TED: mark the parent scan task Completed, and —
 // for internal-QA runs only — mark every mapped subtask Completed too. Called at
-// the very end of the run (after the AI-fix pass), so failing checks have already
-// been fixed/proposed and nothing is left "In Progress". Best-effort: a failure
+// the very end of the run, after the scan report is posted. Best-effort: a failure
 // on one task never blocks the others. Pre/post-release runs have no subtask map,
 // so only their parent task is closed.
 export async function markAllTedTasksCompleted(
@@ -547,6 +622,13 @@ export async function markAllTedTasksCompleted(
     // queued run can start while this run's TED closeout finishes. Idempotent
     // and best-effort; the staleness backstop covers any missed release.
     await releaseRunSlot(runId)
+    await logRunEvent({
+      runId,
+      tedTaskId: parentTaskId || null,
+      kind: "run.done",
+      status: "ok",
+      message: "Run finished · TED tasks being closed",
+    })
 
     const { data: run } = await supabase
       .from("qa_runs")
@@ -904,51 +986,9 @@ async function renderImageGrid(
 // <p>/<strong>/<ul>/<li> cleanly (the format the TED team itself uses). So we
 // use plain grouped lists, one heading per check.
 
-export const FRIENDLY: Record<string, string> = {
-  dead_links: "Dead Links & Broken Anchors",
-  broken_links: "Broken Links",
-  external_links: "External Links",
-  image_quality: "Image Quality (Watermark & Blur)",
-  image_relevance: "Image Relevance (Service Pages)",
-  media_crop: "Image & Video Cropping (Desktop / Tablet / Mobile)",
-  blog_sidebar: "Blog Post Sidebar",
-  hero_media: "Hero Video & Image Load",
-  false_breakpoint: "False Breaking Points",
-  cross_browser: "Cross-Browser Visual",
-  backend_check: "Backend / WordPress",
-  review_reputation_check: "Review & Reputation",
-  functionality_check: "Website Functionality",
-  gbp_check: "Google Business Profile",
-  privacy_policy: "Privacy Policy",
-  footer_logo: "Footer Logo",
-  single_script: "Single Script Features",
-  top_bar_sticky: "Top Bar & Sticky Header",
-  favicon: "Favicon",
-  contact_form: "Contact Form",
-  chatbot_consultation: "Chatbot & Virtual Consultation",
-  logo_chatbot: "Logo on Chatbot",
-  callnow_links: "Call Now & Links",
-  verify_plugin_updates: "Plugin Updates",
-  social_share_heading: "Social Share Heading",
-  learn_more_buttons: "Learn More Buttons",
-  url_tab_compare: "URL & Tab Comparison",
-  url_matching: "URL Matching",
-  text_share: "Text Share Metadata",
-  gsr_check: "General Search Result (GSR)",
-  page_speed: "Page Speed (PageSpeed Insights)",
-  project_plan: "Project Plan",
-  paid_media: "Paid Media",
-  spelling: "Spelling",
-  grammar: "Grammar",
-  meta_tags: "Meta Tags",
-  dummy_content: "Dummy Content",
-  console_errors: "Console Errors",
-  image_compliance: "Image Compliance",
-  accessibility: "Accessibility",
-  accessibility_check: "Full Accessibility",
-  accessibility_features: "Accessibility",
-  visual_regression: "Visual Regression",
-}
+// Check display names live in @qacc/shared so the API's TED comments use the same words.
+import { CHECK_LABELS } from "@qacc/shared"
+export const FRIENDLY: Record<string, string> = CHECK_LABELS
 
 // Per-check action shown on a subtask that FAILED and was NOT auto-fixed, next
 // to its "In Progress" status. Keyed by check factor. Source of truth is
@@ -960,6 +1000,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   dead_links: "Mention to check dead links one by one and fix according to context",
   learn_more_buttons: "Mention to check learn more buttons one by one and fix according to context",
   paid_media: "Mention to add Paid Media details in project details/notes",
+  cro_audit: "Mention to review the listed conversion (CRO) issues — calls to action, value proposition, trust signals — with the design team",
   dummy_content: "No fix possible. Review and replace content accordingly",
   privacy_policy: "Mention to add a Privacy Policy page and link it in the footer",
   footer_logo: "Mention to add the approved Growth99 footer logo with no tagline across all views",
@@ -993,6 +1034,7 @@ const NOT_FIXED_MESSAGE: Record<string, string> = {
   plugin_number: "Mention to verify the plugin count matches the expected set and remove any leftover or dev plugins",
   page_speed: "Mention to optimize page speed (compress images, defer JS, enable caching/CDN, reduce render-blocking)",
   hamburger_menu: "Mention to add or fix the hamburger menu so it appears and toggles open on mobile and tablet (under 1024px) and its links and buttons work",
+  ...GAP_NOT_FIXED,
 }
 
 const titleCase = (s: string) =>
@@ -1484,6 +1526,67 @@ export async function renderCheckSectionHtml(
       status: "errored",
       html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete: no service pages were identified in this scan, so no images were checked.</p>`,
     }
+  }
+
+  // CRO (G99 WebAudit): one row per checked page, pass or fail, each carrying
+  // the full WebAudit result in context_text (lib/croReport). Every page shows
+  // its score, the issues found, the fixes recommended and any high-impact
+  // failed checks — a pass is never a bare green line. Pass/fail follows
+  // WebAudit's own bands (Poor <70 fails).
+  if (factor === "cro_audit") {
+    if (group.length === 0)
+      return {
+        status: "errored",
+        html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete: no CRO result was recorded for this scan.</p>`,
+      }
+    const urlOf = (f: any, rep: CroPageReport | null) =>
+      (f.page_id && pageUrlById?.get(String(f.page_id))) || rep?.url || ""
+    const pageLink = (u: string) => (u ? `<a href="${esc(u)}">${esc(u)}</a>` : "this page")
+    const list = (items: string[]) => `<ul>${items.map((s) => `<li>${esc(s)}</li>`).join("")}</ul>`
+    // Latest row per page wins (a re-run replaces, never doubles).
+    const byPage = new Map<string, any>()
+    group.forEach((f: any, i: number) => byPage.set(f.page_id ? String(f.page_id) : `row-${i}`, f))
+    const rows = [...byPage.values()]
+    const failed = rows.filter((f) => isRealDefect(f))
+    const passed = rows.filter((f) => isCleanPassFinding(f))
+    const lapsed = rows.filter((f) => isToolLapseFinding(f))
+    const checked = failed.length + passed.length
+    if (checked === 0) {
+      const why = clipText(String(lapsed[0]?.description || "").replace(/\s+/g, " ").trim(), 240)
+      return {
+        status: "errored",
+        html: `<p>⚠️ <strong>${esc(label)}</strong> — Could not complete${why ? `: ${esc(why)}` : "."}</p>`,
+      }
+    }
+    let html = failed.length
+      ? `<p>❌ <strong>${esc(label)}</strong> — ${failed.length} of ${checked} page${checked > 1 ? "s" : ""} rated Poor (score under 70) by G99 WebAudit.</p>`
+      : `<p>✅ <strong>${esc(label)}</strong> — Passed. ${checked} page${checked > 1 ? "s" : ""} rated Average or better by G99 WebAudit. Suggestions below.</p>`
+    for (const f of [...failed, ...passed]) {
+      const rep = parseCroContext(f.context_text)
+      const u = urlOf(f, rep)
+      const verdict = isRealDefect(f) ? "❌" : "✅"
+      const score = rep?.score != null ? `Score ${rep.score}/100 (${rep.band})` : esc(String(f.title || ""))
+      html += `<p>📄 <strong>Page:</strong> ${pageLink(u)} — ${verdict} ${score}</p>`
+      if (!rep) {
+        const desc = clipText(String(f.description || "").replace(/\s+/g, " ").trim(), 300)
+        if (desc) html += `<p>${esc(desc)}</p>`
+        continue
+      }
+      if (rep.issues.length) html += `<p><strong>Issues found</strong></p>${list(rep.issues)}`
+      if (rep.fixes.length) html += `<p><strong>Fixes recommended</strong></p>${list(rep.fixes)}`
+      if (rep.failedChecks.length)
+        html += `<p><strong>High-impact failed checks</strong></p>${list(
+          rep.failedChecks.map((c) => `${c.impact ? `[${c.impact}] ` : ""}${c.name}${c.fix ? ` — ${c.fix}` : ""}`),
+        )}`
+      else html += `<p><small>No high-impact failed checks.</small></p>`
+      if (rep.reportUrl)
+        html += `<p><small>Full report: <a href="${esc(rep.reportUrl)}">G99 WebAudit</a></small></p>`
+    }
+    if (lapsed.length)
+      html += `<p><small>Could not check ${lapsed.length} page${lapsed.length > 1 ? "s" : ""}: ${lapsed
+        .map((f) => pageLink(urlOf(f, null)))
+        .join(", ")}</small></p>`
+    return { status: failed.length ? "failed" : "passed", html }
   }
 
   // Blog sidebar: one row per blog post. Rows are identical text across posts,
@@ -2112,14 +2215,10 @@ export async function buildSectionedReport(opts: {
     `<strong>${kind} QA — Report</strong><br>` +
     fullScanStamp +
     (runMeta?.site_url ? `Site: ${esc(runMeta.site_url)}<br>` : "")
-  // High-level test-case roll-up: one line per check (subtask) → Passed/Failed,
-  // failed first (sections are already sorted failed→passed). Deliberately icon-
-  // light — a single count line, then a plain-text list, so the summary reads as
-  // results, not a wall of emoji.
+  // Test-case summary: verdict, counts and the failed / could-not-run names up
+  // front; "Show full summary" opens the full pass/fail tables grouped by area.
   // One short reason per failed check, pulled from its first real defect
-  // (title, else the description) — HTML stripped and clipped to one sentence —
-  // so the roll-up reads "Contact Form — Failed: No contact form found" instead
-  // of a bare "Failed" the reader has to scroll down to explain.
+  // (title, else the description), HTML stripped and clipped to one sentence.
   const failReason = (factor: string): string => {
     const real = (byCheck.get(factor) || []).filter(isRealDefect)
     if (!real.length) return ""
@@ -2130,22 +2229,16 @@ export async function buildSectionedReport(opts: {
       .trim()
     return clipText(raw, 140)
   }
-  const rollupItems = sections
-    .map((s) => {
-      const label = esc(FRIENDLY[s.factor] || titleCase(s.factor))
-      if (s.status === "failed") {
-        const reason = failReason(s.factor)
-        return `<li>${label} — Failed${reason ? `: ${esc(reason)}` : ""}</li>`
-      }
-      if (s.status === "errored") return `<li>${label} — ${couldNotRunText(s.factor, byCheck.get(s.factor) || [])}</li>`
-      return `<li>${label} — Passed</li>`
-    })
-    .join("")
-  // Could-not-run checks that carry a visible reason (GSR) are listed too.
-  const shownErrored = sections.filter((s) => s.status === "errored").length
-  const overview =
-    `<p><strong>Test cases:</strong> ${tally.failed + tally.passed + shownErrored} total — ${tally.failed} failed, ${tally.passed} passed${shownErrored ? `, ${shownErrored} could not run` : ""}.</p>` +
-    (rollupItems ? `<ul>${rollupItems}</ul>` : "")
+  const overview = renderTestCaseSummary(
+    sections.map((s): TestCaseRow => ({
+      factor: s.factor,
+      label: FRIENDLY[s.factor] || titleCase(s.factor),
+      status: s.status,
+      reason: s.status === "failed" ? failReason(s.factor) : undefined,
+      couldNotRunHtml:
+        s.status === "errored" ? couldNotRunText(s.factor, byCheck.get(s.factor) || []) : undefined,
+    })),
+  )
 
   return { byCheck, sections, tally, titleHtml, overview, reportCtx }
 }
@@ -2191,12 +2284,17 @@ export async function postSectionedReport(opts: {
   // Checks a person still has to act on: failed with no fix applied (the
   // no-result loop below adds the checks that could not complete). Any of these
   // keeps the PARENT task open — see markParentOpenIfIssues.
-  const appliedFor = (factor: string) =>
+  // One applied fix must not close a check whose other issues are still open:
+  // a failed check stays open while ANY real issue has no applied fix.
+  const unfixedFor = (factor: string) =>
     (byCheck.get(factor) || []).filter(
-      (f: any) => f?.id && fixMap.get(String(f.id))?.applied,
+      (f: any) => isRealDefect(f) && !(f?.id && fixMap.get(String(f.id))?.applied),
     ).length
+  const stillOpen = (s: { factor: string; status: string }) =>
+    s.status === "failed" &&
+    (unfixedFor(s.factor) > 0 || !(byCheck.get(s.factor) || []).some(isRealDefect))
   let openIssues = sections.filter(
-    (s) => s.factor !== "video_recording" && s.status === "failed" && appliedFor(s.factor) === 0,
+    (s) => s.factor !== "video_recording" && stillOpen(s),
   ).length
 
   if (hasSubtasks) {
@@ -2264,8 +2362,9 @@ export async function postSectionedReport(opts: {
       }
       // A check that FAILED with no fix APPLIED is "failed and not fixed": leave
       // its subtask In Progress (not Completed) and append the per-check action a
-      // person must take. Pass, or fail-with-applied-fix, stay Completed.
-      const notFixed = sec.status === "failed" && applied === 0
+      // person must take. Only a pass, or a fail where EVERY issue got an
+      // applied fix, is Completed.
+      const notFixed = stillOpen(sec)
       const notFixedNote =
         notFixed && NOT_FIXED_MESSAGE[sec.factor]
           ? `<p>🔸 <strong>Not auto-fixed — action needed:</strong> ${esc(NOT_FIXED_MESSAGE[sec.factor])}.</p>`
@@ -2513,26 +2612,22 @@ export async function postDetectionSummary(runId: string, tedTaskId: string): Pr
       .trim()
     return clipText(raw, 140)
   }
-  // Failed first, then passed — same ordering as the fix summary's roll-up.
-  const rollupItems = [...failed, ...couldNotRun, ...passed]
-    .map((s) => {
-      const label = esc(FRIENDLY[s.factor] || titleCase(s.factor))
-      if (s.status === "failed") {
-        const reason = failReason(s.factor)
-        return `<li>${label} — Failed${reason ? `: ${esc(reason)}` : ""}</li>`
-      }
-      if (s.status === "errored") return `<li>${label} — ${couldNotRunText(s.factor, byCheck.get(s.factor) || [])}</li>`
-      return `<li>${label} — Passed</li>`
-    })
-    .join("")
+  const summary = renderTestCaseSummary(
+    [...failed, ...couldNotRun, ...passed].map((s): TestCaseRow => ({
+      factor: s.factor,
+      label: FRIENDLY[s.factor] || titleCase(s.factor),
+      status: s.status,
+      reason: s.status === "failed" ? failReason(s.factor) : undefined,
+      couldNotRunHtml:
+        s.status === "errored" ? couldNotRunText(s.factor, byCheck.get(s.factor) || []) : undefined,
+    })),
+  )
 
   const kind = runKind(runType)
   const body =
     `<p><strong>${kind} QA — Issues Detected</strong></p>` +
     (runMeta?.site_url ? `<p>Site: ${esc(runMeta.site_url)}</p>` : "") +
-    `<p><strong>Test cases:</strong> ${failed.length + passed.length + couldNotRun.length} total — ` +
-    `${failed.length} failed, ${passed.length} passed${couldNotRun.length ? `, ${couldNotRun.length} could not run` : ""}.</p>` +
-    (rollupItems ? `<ul>${rollupItems}</ul>` : "")
+    summary
 
   // Plain parent comment: NO aiAssigned, and it does not mark the task complete.
   await postTedComment(

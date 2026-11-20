@@ -3,12 +3,15 @@ import { Queue, Worker, Job } from "bullmq"
 import pino from "pino"
 import { processTestJob } from "./jobs/testJob"
 import { processStartRunJob } from "./jobs/startRunJob"
+import { processResumeRunJob } from "./jobs/resumeRunJob"
 import { processCrawlPageJob, finalizeRun } from "./jobs/crawlPageJob"
 import { processCaptureScreenshotJob } from "./jobs/captureScreenshotJob"
 import { processCrawlBatchJob } from "./jobs/crawlBatchJob"
 import { processCheckProjectPlanJob } from "./jobs/checkProjectPlanJob"
 import { processCheckPaidMediaJob } from "./jobs/checkPaidMediaJob"
-import { processAiFixRunJob } from "./jobs/aiFixRunJob"
+import { processCheckCroAuditJob } from "./jobs/checkCroAuditJob"
+// SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+// import { processAiFixRunJob } from "./jobs/aiFixRunJob"
 import {
   processVideoRecordingJob,
   processVideoUrlVerifyJob,
@@ -19,6 +22,7 @@ import { startStuckRunSweeper } from "./lib/stuckRunSweeper"
 import { releaseReportGate } from "./lib/reportGate"
 import { healthStatus, scanJobEnded, scanJobStarted } from "./lib/workerHealth"
 import { jobEnded, jobStarted } from "./lib/ecsTaskProtection"
+import { browserSelfCheck } from "./lib/browserCheck"
 
 const logger = pino({
   level: process.env.LOG_LEVEL || "info",
@@ -35,7 +39,7 @@ const queueName = "qa-jobs"
 // Run a standalone API check, then release its part of the run's report gate.
 // Released on success or on the LAST failed attempt (a failed check must not
 // block the report forever); earlier failures retry first. If this check was
-// the last part still running, it finalizes the run (TED report, AI fix).
+// the last part still running, it finalizes the run (TED report).
 async function runApiCheck(
   job: Job,
   check: string,
@@ -80,6 +84,9 @@ const worker = new Worker(
         case "start_run":
           await processStartRunJob(job)
           break
+        case "resume_run":
+          await processResumeRunJob(job)
+          break
         case "crawl_page":
           await processCrawlPageJob(job)
           break
@@ -92,8 +99,14 @@ const worker = new Worker(
         case "check_paid_media":
           await runApiCheck(job, "paid_media", processCheckPaidMediaJob)
           break
+        case "check_cro_audit":
+          await runApiCheck(job, "cro_audit", processCheckCroAuditJob)
+          break
+        // SCAN-ONLY: fix feature disabled — QACC only scans and reports findings.
+        // A leftover queued ai_fix_run job is dropped, not run.
         case "ai_fix_run":
-          await processAiFixRunJob(job)
+          // await processAiFixRunJob(job)
+          logger.info({ jobId: job.id }, "ai_fix_run skipped: QACC is scan-only.")
           break
         case "video_recording_check":
           await processVideoRecordingJob(job)
@@ -138,8 +151,41 @@ const worker = new Worker(
     concurrency: parseInt(process.env.WORKER_CONCURRENCY || "3", 10), // Reduced from 15 to prevent 100% CPU usage during browser scans
     drainDelay: 60, // Only poll every 60 seconds when the queue is empty
     stalledInterval: 300000, // 5 minutes
+    // Started below, only after the browser self-check passes.
+    autorun: false,
   },
 )
+
+// A worker with no usable browser must never take jobs (see lib/browserCheck).
+// WORKER_BROWSER_SELFCHECK=false skips the check (e.g. a worker that only runs
+// API checks on purpose).
+async function startWorker() {
+  if (process.env.WORKER_BROWSER_SELFCHECK !== "false") {
+    const problem = await browserSelfCheck()
+    if (problem) {
+      logger.fatal(
+        { problem },
+        "Browser self-check failed: this worker has no usable Playwright browser, so it will NOT take any jobs. Install the browsers (npx playwright install chromium) or stop this worker.",
+      )
+      await worker.close().catch(() => {})
+      process.exit(1)
+    }
+    logger.info("Browser self-check passed")
+  }
+  worker.run().catch((err) => logger.error(err, "Worker stopped with an error"))
+}
+startWorker()
+
+// A browser that broke after start-up: stop taking jobs. The job goes back to
+// the queue and a healthy worker picks it up; the container restarts this one.
+let stoppingForBrowser = false
+async function stopForMissingBrowser(err: Error) {
+  if (stoppingForBrowser) return
+  stoppingForBrowser = true
+  logger.fatal({ error: err.message }, "Browser is gone on this worker; stopping so no more pages fail here.")
+  await worker.close(true).catch(() => {})
+  process.exit(1)
+}
 
 // 3. Error Handling
 worker.on("error", (err) => {
@@ -148,6 +194,7 @@ worker.on("error", (err) => {
 
 worker.on("failed", (job, err) => {
   logger.error({ jobId: job?.id, error: err.message }, "Job failed")
+  if (err?.name === "BrowserUnavailableError") void stopForMissingBrowser(err)
 })
 
 worker.on("completed", (job) => {

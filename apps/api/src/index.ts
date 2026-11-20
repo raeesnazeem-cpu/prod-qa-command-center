@@ -32,6 +32,7 @@ import { tedCommentsRouter } from "./routes/tedComments"
 import { recordingsRouter } from "./routes/recordings"
 import { authRouter } from "./routes/auth"
 import { clerkAuth } from "./middleware/clerkAuth"
+import { internalRouter } from "./routes/internal"
 import { createBullBoard } from "@bull-board/api"
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter"
 import { ExpressAdapter } from "@bull-board/express"
@@ -56,6 +57,11 @@ app.use(
 app.use("/webhooks", express.raw({ type: "application/json" }), webhookRouter)
 
 app.use(express.json({ limit: "50mb" }))
+
+// Worker → API relay (token-authenticated). Before the rate limiter: one run
+// posts dozens of comments from the worker's single IP.
+app.use("/internal", internalRouter)
+
 app.use(defaultRateLimiter)
 
 // Headless mode: no Clerk. TED owns auth/RBAC. clerkAuth is a pass-through

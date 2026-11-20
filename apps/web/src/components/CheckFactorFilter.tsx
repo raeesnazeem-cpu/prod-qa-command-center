@@ -36,6 +36,7 @@ export const FILTER_TABS: FilterTab[] = [
   },
   { id: "hero_media", label: "Hero Media", factors: ["hero_media"] },
   { id: "paid_media", label: "Paid Media", factors: ["paid_media"] },
+  { id: "cro_audit", label: "CRO", factors: ["cro_audit"] },
   { id: "project_plan", label: "Project Plan", factors: ["project_plan"] },
 ]
 

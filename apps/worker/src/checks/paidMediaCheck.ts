@@ -154,7 +154,8 @@ export async function checkPaidMedia(
     return [
       f(
         "Paid Media details not found",
-        "No paid media plan or campaign details were found for this client in TED/HubSpot. No fix possible — please add the paid media details manually.",
+        // SCAN-ONLY: fix wording removed — was: "No paid media plan or campaign details were found for this client in TED/HubSpot. No fix possible — please add the paid media details manually.",
+        "No paid media plan or campaign details were found for this client in TED/HubSpot.",
         context,
       ),
     ]

@@ -54,7 +54,17 @@ const INFORMATIONAL_CHECKS = new Set(["plugin_number", "video_recording"])
 const IMAGE_RELEVANCE_PASS_TITLE = "No image relevance issues found"
 const IMAGE_RELEVANCE_LAPSE_TITLE = /^(image relevance )?check failed$/i
 
-export const AI_VERDICT_CHECKS = new Set(["grammar", "image_quality", "image_relevance", "project_plan"])
+export const AI_VERDICT_CHECKS = new Set([
+  "grammar",
+  "image_quality",
+  "image_relevance",
+  "project_plan",
+  // QA-gap vision checks (apps/worker/src/checks/gaps/visionGapsCheck.ts).
+  "hero_readability",
+  "hero_video_quality",
+  "image_text_cutoff",
+  "logo_visibility",
+])
 
 /**
  * blog_sidebar: one row per blog post, judged by exact titles (the description

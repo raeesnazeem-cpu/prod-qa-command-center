@@ -42,6 +42,7 @@ jest.mock("../supabase", () => {
 })
 jest.mock("../tedSync", () => ({
   postFinalReportToTED: jest.fn(async () => ops.push("ted report")),
+  postTedComment: jest.fn(async () => ops.push("ted stopped comment")),
 }))
 jest.mock("../runResults", () => ({ persistScanCheckResults: jest.fn(async () => {}) }))
 jest.mock("../runSlot", () => ({ releaseRunSlot: jest.fn(async () => {}) }))
@@ -68,7 +69,7 @@ beforeEach(() => {
 
 test("orphaned run: leftover pages failed, run completed, TED report posted", async () => {
   await sweepOnce()
-  expect(ops).toEqual(["update pages", "rpc reconcile_run_completion", "ted report"])
+  expect(ops).toEqual(["update pages", "ted stopped comment", "rpc reconcile_run_completion", "ted report"])
 })
 
 test("a job still queued for the run → left alone", async () => {
