@@ -1274,12 +1274,17 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
           // TED handed us. TED's pre_dev trigger doesn't always include the
           // qa_pre sibling, so resolving by template key is what makes the
           // routing reliable across clients.
-          preReleaseTaskId =
-            (await resolveTaskIdByTemplateKeyFromTED(
-              task.clientId,
-              PRE_RELEASE_TARGET_TEMPLATE_KEY,
-              /pre-?release/i,
-            )) || preReleaseTaskId
+          // A MANUAL trigger IS the release.qa_pre task — use it as-is. Re-resolving
+          // by template key can return a different (older) release.qa_pre task of
+          // the same client, so results landed there and the triggered task got
+          // no comment at all (TED task 12559 → reports went to 12555).
+          preReleaseTaskId = isManual
+            ? String(task.id)
+            : (await resolveTaskIdByTemplateKeyFromTED(
+                task.clientId,
+                PRE_RELEASE_TARGET_TEMPLATE_KEY,
+                /pre-?release/i,
+              )) || preReleaseTaskId
 
           // Discover that task's subtasks and map each to a QACC check by title
           // (same ID-free routing as internal QA). QACC then runs exactly the
@@ -2743,13 +2748,16 @@ webhookRouter.post(
           // Resolve the beta_site.internal_test target task QACC talks back to.
           // Prefer resolving by template key (client-agnostic); fall back to the
           // sibling task TED included in the payload.
-          targetTaskId =
-            (await resolveTaskIdByTemplateKeyFromTED(
-              task.clientId,
-              INTERNAL_QA_TARGET_TEMPLATE_KEY,
-              /internal beta site testing/i,
-            )) ||
-            (targetTask?.id ? String(targetTask.id) : null)
+          // A manual trigger IS the target task — use it as-is (re-resolving can
+          // pick an older task with the same template key).
+          targetTaskId = isManual
+            ? String(task.id)
+            : (await resolveTaskIdByTemplateKeyFromTED(
+                task.clientId,
+                INTERNAL_QA_TARGET_TEMPLATE_KEY,
+                /internal beta site testing/i,
+              )) ||
+              (targetTask?.id ? String(targetTask.id) : null)
 
           // Discover the parent's subtasks and map each to a QACC check by
           // title. QACC runs exactly the checks that map to a subtask (so it
@@ -3358,13 +3366,16 @@ webhookRouter.post(
           // Resolve the release.qa_post ("Complete QA post-release testing")
           // task — this is the scan task QACC talks back to, NOT the
           // release.security trigger. Fall back to the payload target if given.
-          scanTaskId =
-            (await resolveTaskIdByTemplateKeyFromTED(
-              task.clientId,
-              POST_RELEASE_TARGET_TEMPLATE_KEY,
-              /post-?release testing/i,
-            )) ||
-            (targetTask?.id ? String(targetTask.id) : null)
+          // A manual trigger IS the release.qa_post task — use it as-is
+          // (re-resolving can pick an older task with the same template key).
+          scanTaskId = isManual
+            ? String(task.id)
+            : (await resolveTaskIdByTemplateKeyFromTED(
+                task.clientId,
+                POST_RELEASE_TARGET_TEMPLATE_KEY,
+                /post-?release testing/i,
+              )) ||
+              (targetTask?.id ? String(targetTask.id) : null)
 
           // Discover the release.qa_post checklist subtasks and map each to a
           // QACC check by title (same ID-free routing as pre-release / internal

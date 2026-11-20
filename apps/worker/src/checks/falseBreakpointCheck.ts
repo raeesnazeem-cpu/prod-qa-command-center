@@ -81,6 +81,10 @@ interface Measurement {
 // Header font-size floor for the auto-fix cap lives in gitopsFix; here we only
 // cap how many header findings we emit.
 const MAX_HEADER_FINDINGS = 2
+// Pause before trusting a header wrap: JS menus re-lay out on a debounced
+// resize handler (often 100–500ms), so a wrap seen right after a resize can be
+// a mid-reflow frame.
+const HEADER_SETTLE_MS = Number(process.env.HEADER_SETTLE_MS || 700)
 
 export async function checkFalseBreakpoints(
   pageUrl: string,
@@ -291,6 +295,10 @@ export async function checkFalseBreakpoints(
             ".wp-block-navigation__responsive-container-open, .navbar-toggler, .w-nav-button, .header-burger-btn, .mobile_menu_bar, .fl-menu-mobile-toggle",
             '[class*="hamburger" i], [class*="burger" i], [class*="nav-toggle" i], [class*="navbar-toggle" i], header-drawer summary',
             'button[aria-label*="navigation" i], button[aria-controls][aria-expanded]:not(nav button)',
+            // An icon widget shown only below desktop (Elementor's usual mobile
+            // menu opener — often a popup trigger with no toggle class), and
+            // Font Awesome / eicons "bars" icons.
+            '.elementor-hidden-desktop .elementor-icon, [class*="fa-bars"], .e-fas-bars, .eicon-menu-bar',
           ].join(", ")
           const toggleCands = Array.from(header.querySelectorAll(TOGGLE_SEL))
           // Some headers render the toggle outside the <header> element (a
@@ -509,9 +517,22 @@ export async function checkFalseBreakpoints(
       if (headerSeen) {
         // Widest sampled width that wraps — wrap runs from here down to the
         // hamburger switchover, so this is the meaningful onset to report.
+        // A measure is taken two frames after the resize, which is too soon for
+        // menus that re-lay out in JS on a debounced resize handler (ElementsKit,
+        // "justified" menus): a header caught mid-reflow looks wrapped. Only a
+        // wrap that is still there after a settle pause is real (sandpoint: a
+        // "break at 1283px" on every page that no one could reproduce).
+        const settledWrap = async (width: number): Promise<boolean> => {
+          await measure(width)
+          await page.waitForTimeout(HEADER_SETTLE_MS)
+          return isWrapBreak(await measure(width))
+        }
         let widestWrapIdx = -1
+        let settleChecks = 0
         for (let i = samples.length - 1; i >= 0; i--) {
-          if (isWrapBreak(samples[i].m)) {
+          if (!isWrapBreak(samples[i].m)) continue
+          if (settleChecks++ >= 3) break // cap the extra cost on a header that never settles
+          if (await settledWrap(samples[i].width)) {
             widestWrapIdx = i
             break
           }
@@ -533,9 +554,16 @@ export async function checkFalseBreakpoints(
               else hi = mid
             }
             onsetWidth = lo
+            // The search uses quick measures; keep the refined onset only if it
+            // also survives the settle pause, else report the confirmed sample.
+            if (onsetWidth !== wrapSample.width && !(await settledWrap(onsetWidth)))
+              onsetWidth = wrapSample.width
           }
 
-          // Re-measure at the onset for culprit ids + screenshot evidence.
+          // Re-measure at the onset for culprit ids + screenshot evidence
+          // (after the settle pause, so the screenshot shows the real layout).
+          await measure(onsetWidth)
+          await page.waitForTimeout(HEADER_SETTLE_MS)
           const worst = await measure(onsetWidth)
           const h = worst.header!
           const whatWrapped = [

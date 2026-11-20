@@ -522,6 +522,17 @@ function extractUrlsFromHTML(html: string, baseUrl: string): ExtractedLink[] {
   }))
 }
 
+/** A custom 404 template page (/custom-404, /404, /404-page, /page-not-found). */
+export function is404TemplatePage(url: string): boolean {
+  let path = ""
+  try {
+    path = new URL(url).pathname
+  } catch {
+    return false
+  }
+  return /\/(custom-?)?404(-page)?\/?$|\/(page-)?not-found\/?$/i.test(path)
+}
+
 export async function checkOptimizedLinks(
   page: any,
   pageRecord: any,
@@ -530,6 +541,13 @@ export async function checkOptimizedLinks(
 ): Promise<Finding[]> {
   const pageUrl = pageRecord.url
   const runId = pageRecord.run_id
+
+  // A custom 404 TEMPLATE page (/custom-404, /404, /page-not-found) is not a
+  // page visitors reach by a link — it is shown for missing URLs, and is
+  // usually unpublished (answers 404 itself). Its links are not the site's, so
+  // a "broken link" on it was reported as a site problem nobody could find
+  // (TED task 57608: /?p=492 "found on /custom-404").
+  if (is404TemplatePage(pageUrl)) return []
 
   // Drop caches left by runs that never completed. Cheap (a scan of a map that
   // should normally hold one or two entries) and it bounds worst-case growth
@@ -575,6 +593,14 @@ export async function checkOptimizedLinks(
         extractedLinks = extractUrlsFromHTML(response.body, response.url || pageUrl)
       } catch (e: any) {
         fetchError = e
+      }
+      // The page itself is gone (404/410): it is not a live page, so there are
+      // no site links on it to check. Scanning its rendered DOM reported the
+      // 404 template's own links as the site's broken links.
+      const ownStatus = fetchError?.response?.statusCode
+      if (ownStatus === 404 || ownStatus === 410) {
+        logger.info({ pageUrl, status: ownStatus }, "Page itself answers 404/410; skipping its links")
+        return []
       }
 
       if (fetchError || anchorCount(extractedLinks) === 0) {
