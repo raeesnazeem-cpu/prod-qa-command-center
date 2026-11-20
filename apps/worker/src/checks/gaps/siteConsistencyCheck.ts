@@ -54,7 +54,16 @@ export function serviceMenus(nav: PageFacts["nav"]): { parent: string; parentHre
   const out: { parent: string; parentHref: string; items: { text: string; href: string }[] }[] = []
   for (const top of nav.filter((i) => i.depth === 0)) {
     if (!SERVICE_PARENT.test(top.text)) continue
-    const items = nav.filter((i) => i.depth >= 1 && i.parent === top.text && i.href && !/#$/.test(i.href))
+    // A child linking to an ANCHOR (/services/#injectables) is a category
+    // heading, not a service page: its URL slug is the parent page's, so
+    // comparing names to it is always a false "different name". Skip the
+    // heading and compare the services listed under it instead.
+    const isAnchor = (href: string) => /#./.test(href)
+    const items: PageFacts["nav"] = []
+    for (const i of nav.filter((x) => x.depth >= 1 && x.parent === top.text && x.href && !/#$/.test(x.href))) {
+      if (!isAnchor(i.href)) items.push(i)
+      else items.push(...nav.filter((c) => c.depth > i.depth && c.parent === i.text && c.href && !/#/.test(c.href)))
+    }
     if (items.length >= 2) out.push({ parent: top.text, parentHref: top.href, items: items.map((i) => ({ text: i.text, href: i.href })) })
   }
   return out

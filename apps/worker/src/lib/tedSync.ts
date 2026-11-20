@@ -2234,6 +2234,33 @@ export async function buildSectionedReport(opts: {
   return { byCheck, sections, tally, titleHtml, overview, reportCtx }
 }
 
+/**
+ * subtask id → true when it must stay In Progress. A subtask can own several
+ * checks; it is open while ANY of them is open (`isOpen`) or produced no result
+ * (mapped but missing from `sections`). The video subtask is skipped (its
+ * barrier owns its status). Pure — unit-tested.
+ */
+export function subtaskOpenMap(
+  sections: { factor: string; status: string }[],
+  subtaskMap: Record<string, string | string[]>,
+  isOpen: (s: { factor: string; status: string }) => boolean,
+): Map<string, boolean> {
+  const targetsOf = (raw: string | string[] | undefined) =>
+    Array.isArray(raw) ? raw : raw ? [raw] : []
+  const withResult = new Set(sections.map((s) => s.factor))
+  const open = new Map<string, boolean>()
+  for (const sec of sections) {
+    if (sec.factor === "video_recording") continue
+    for (const t of targetsOf(subtaskMap[sec.factor]))
+      open.set(t, (open.get(t) || false) || isOpen(sec))
+  }
+  for (const [factor, raw] of Object.entries(subtaskMap)) {
+    if (factor === "video_recording" || withResult.has(factor)) continue
+    for (const t of targetsOf(raw)) open.set(t, true) // no result → a person must check
+  }
+  return open
+}
+
 export async function postSectionedReport(opts: {
   runId: string
   tedTaskId: string
@@ -2312,6 +2339,13 @@ export async function postSectionedReport(opts: {
     // gets reported, stitched into a summary comment on the parent so nothing
     // is silently dropped. A subtask is marked Completed ONLY right after its
     // own pass/fail comment lands here.
+    // One subtask can own several checks (false_breakpoint + header_breakpoints
+    // both → "Header & Breakpoints"). Its status must reflect ALL of them:
+    // In Progress while ANY of its checks is still open, else Completed.
+    // Deciding per section let a later passing check overwrite an earlier
+    // failing one (TED task 57012: In Progress → Completed 30s later).
+    const targetOpen = subtaskOpenMap(sections, subtaskMap, stillOpen)
+
     const leftovers: typeof sections = []
     for (const sec of sections) {
       const raw = subtaskMap[sec.factor]
@@ -2377,12 +2411,12 @@ export async function postSectionedReport(opts: {
           },
         ).catch(() => {})
         // Set THIS subtask's status now that its comment has landed: In Progress
-        // when it failed and was not fixed, else Completed. Never the video
+        // while any check it owns is still open, else Completed. Never the video
         // subtask (the barrier owns its status).
         if (sec.factor !== "video_recording")
           await postTedStatus(
             target,
-            notFixed ? TED_STATUS_IN_PROGRESS : TED_STATUS_COMPLETED,
+            targetOpen.get(target) ? TED_STATUS_IN_PROGRESS : TED_STATUS_COMPLETED,
             runId,
           ).catch(() => {})
       }
@@ -2692,15 +2726,19 @@ export async function postFinalReportToTED(
     // Full scan splits Test and Fix: the scan ALWAYS publishes its own report and
     // never defers to a fix pass (the fix is a separate, on-demand action that
     // posts its own report later). So skip the defer branch for full_scan.
-    const isFullScan = runMeta?.run_type === "full_scan"
-    const moduleOn = process.env.AI_FIX_MODULE_ENABLED === "true"
-    if (shown.length > 0 && moduleOn && !isFullScan) {
-      logger.info(
-        { runId, issues: shown.length },
-        "Issues found + AI-fix on; deferring the section-wise report to the fix pass.",
-      )
-      return { hasIssues: true, issueCount: shown.length }
-    }
+    // SCAN-ONLY: there is no fix pass any more (finishRunAfterReport closes the
+    // tasks right after this), so the report must ALWAYS post here. Deferring
+    // when AI_FIX_MODULE_ENABLED=true left runs with issues with NO comments at
+    // all, and every task then closed Completed.
+    // const isFullScan = runMeta?.run_type === "full_scan"
+    // const moduleOn = process.env.AI_FIX_MODULE_ENABLED === "true"
+    // if (shown.length > 0 && moduleOn && !isFullScan) {
+    //   logger.info(
+    //     { runId, issues: shown.length },
+    //     "Issues found + AI-fix on; deferring the section-wise report to the fix pass.",
+    //   )
+    //   return { hasIssues: true, issueCount: shown.length }
+    // }
 
     // Otherwise there will be no fix pass (everything passed, or the module is
     // off), so post the section-wise report now — no fix lines to add.

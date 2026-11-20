@@ -192,6 +192,18 @@ describe("service menus, order and names", () => {
     expect(m).toHaveLength(1)
     expect(m[0].items.map((i) => i.text)).toEqual(["Lip Filler", "Botox"])
   })
+  it("treats #anchor dropdown entries as headings and uses the services under them", () => {
+    const m = serviceMenus([
+      { text: "Services", href: "https://s.test/services/", depth: 0 },
+      { text: "Injectables", href: "https://s.test/services/#injectables", depth: 1, parent: "Services" },
+      { text: "Dermal Fillers", href: "https://s.test/services/dermal-fillers/", depth: 2, parent: "Injectables" },
+      { text: "Kybella", href: "https://s.test/services/kybella/", depth: 2, parent: "Injectables" },
+      { text: "Peels", href: "https://s.test/services/#peels", depth: 1, parent: "Services" },
+      { text: "VI Peel", href: "https://s.test/services/vi-peel/", depth: 2, parent: "Peels" },
+    ])
+    expect(m).toHaveLength(1)
+    expect(m[0].items.map((i) => i.text)).toEqual(["Dermal Fillers", "Kybella", "VI Peel"])
+  })
   it("orderProblems detects missing and out-of-order services", () => {
     expect(orderProblems(["a", "b", "c"], ["a", "b", "c"])).toEqual({ missing: [], outOfOrder: false })
     expect(orderProblems(["a", "b", "c", "d"], ["b", "a", "c"])).toEqual({ missing: ["d"], outOfOrder: true })
