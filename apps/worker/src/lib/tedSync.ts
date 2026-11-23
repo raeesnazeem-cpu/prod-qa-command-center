@@ -541,7 +541,36 @@ async function closeManualPostReleaseSubtasks(
 // In Progress for a person, never closed.
 const heldOpenKey = (parentTaskId: string, runId: string) =>
   `held-open:${parentTaskId}:${runId}`
+// A post-release run never closes its parent ("Complete QA post-release testing").
+// In TED, that task turning Completed means "the site is live" and moves the
+// client from Onboarding to Client Base. A scan finishing is not that sign-off:
+// on Nov 19-20, 2026 runs with 4-13 failed checks closed the task and moved six
+// clients whose sites were not live. A person completes it after checking.
+export function runNeedsPersonSignOff(runType: string | null | undefined): boolean {
+  return runType === "post_release"
+}
+
+const signOffNoteKey = (parentTaskId: string, runId: string) =>
+  `ext:post-release-signoff-${parentTaskId}-${runId}`
+
 export async function parentHeldOpen(runId: string, parentTaskId: string): Promise<boolean> {
+  const { data: run } = await supabase
+    .from("qa_runs")
+    .select("run_type")
+    .eq("id", runId)
+    .maybeSingle()
+  if (runNeedsPersonSignOff(run?.run_type as string | undefined)) {
+    await postTedComment(
+      String(parentTaskId),
+      `<p>✅ <strong>QACC post-release scan finished.</strong> This task stays In Progress for a person: ` +
+        `check the live site and the results above, then mark it Completed. Marking it Completed moves ` +
+        `the client to Client Base in TED.</p>`,
+      signOffNoteKey(String(parentTaskId), runId),
+      { runId, targetKind: "parent", aiAssigned: true },
+    ).catch(() => {})
+    logger.info({ runId, parentTaskId }, "Post-release run — parent left In Progress for a person's sign-off.")
+    return true
+  }
   const { data } = await supabase
     .from("ted_comments")
     .select("id")
