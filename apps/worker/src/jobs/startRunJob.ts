@@ -518,7 +518,7 @@ export async function processStartRunJob(job: Job) {
     if (run.ted_task_id) {
       await postTedComment(
         String(run.ted_task_id),
-        `<p>❌ <strong>Test run failed</strong> while collecting the site's pages: ${escapeHtml(String(error?.message || error).slice(0, 300))}</p><p>To fix: check that ${escapeHtml(String(run.site_url || "the site"))} loads, then press Trigger manually again.</p>`,
+        `<p>❌ <strong>Test run failed</strong> while collecting the site's pages: ${escapeHtml(String(error?.message || error).slice(0, 300))}</p><p>Next step: check that ${escapeHtml(String(run.site_url || "the site"))} loads, then press Trigger manually again.</p>`,
         `ext:qacc-run-failed-${runId}`,
         { runId, projectId: run.project_id },
       ).catch(() => {})

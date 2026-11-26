@@ -72,7 +72,7 @@ async function recordLocalTedWrite(
         body_html: bodyHtml,
         event_key: eventKey,
         source,
-        author: "AI Fix",
+        author: "QACC",
       },
       { onConflict: "event_key", ignoreDuplicates: true },
     )
@@ -4407,15 +4407,7 @@ webhookRouter.post("/ted/full-scan/fix", async (req: Request, res: Response) => 
     return res.status(500).json({ error: "Failed to queue the fix." })
   }
 
-  // A comment so the operator sees the fix was accepted (no status change).
-  if (process.env.TED_API_TOKEN) {
-    await postTedComment(
-      String(run.ted_task_id),
-      `<p>🛠️ <strong>Fix module started</strong> for this full scan. The fix results — and the final video recording — will be posted here when it finishes.</p>`,
-      `ext:qacc-fullscan-fix-queued-${runId}`,
-      String(runId),
-    ).catch(() => {})
-  }
+  // No TED comment here: TED comments never mention fixes.
 
   console.log(`✅ Full-scan fix queued for run ${runId}.`)
   return res.status(200).json({

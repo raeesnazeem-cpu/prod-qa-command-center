@@ -128,7 +128,7 @@ export function couldNotStartText(reason: string, fix: string): string {
   return (
     `<p><strong>Could not start the test run.</strong></p>` +
     `<p>${esc(reason.trim())}</p>` +
-    `<p><strong>To fix:</strong> ${esc(fix.trim())}</p>`
+    `<p><strong>Next step:</strong> ${esc(fix.trim())}</p>`
   )
 }
 

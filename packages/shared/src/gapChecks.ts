@@ -91,7 +91,7 @@ export const GAP_CHECKS: GapCheckDef[] = [
   {
     key: "text_styling",
     label: "Font, Colour, Contrast & List Styles",
-    notFixed: "Mention to use the theme font and text colour on the listed paragraphs, fix unreadable text, and use one bullet style",
+    notFixed: "Mention to use the theme font and text colour on the listed paragraphs, correct unreadable text, and use one bullet style",
     scope: "page",
     pre: [FN_PRE],
     internal: [FN_INT],
@@ -100,7 +100,7 @@ export const GAP_CHECKS: GapCheckDef[] = [
   {
     key: "form_quality",
     label: "Form Consent, Fields & Scroll Bars",
-    notFixed: "Mention to add the standard consent checkbox to every form, keep consent links on this site, and fix the listed form field problems",
+    notFixed: "Mention to add the standard consent checkbox to every form, keep consent links on this site, and correct the listed form field problems",
     scope: "page",
     pre: ["contactform"],
     internal: [FN_INT],
@@ -109,7 +109,7 @@ export const GAP_CHECKS: GapCheckDef[] = [
   {
     key: "page_errors",
     label: "Page Errors & Visible Code",
-    notFixed: "Mention to fix the database/PHP errors and remove the raw code or shortcodes showing on the listed pages",
+    notFixed: "Mention to correct the database/PHP errors and remove the raw code or shortcodes showing on the listed pages",
     scope: "page",
     pre: [FN_PRE],
     internal: [FN_INT],
@@ -127,7 +127,7 @@ export const GAP_CHECKS: GapCheckDef[] = [
   {
     key: "blog_content",
     label: "Blog Internal Links, TOC & Formatting",
-    notFixed: "Mention to add at least 3 same-tab internal links per blog, fix the table of contents, remove duplicate titles and add Previous/Next post links",
+    notFixed: "Mention to add at least 3 same-tab internal links per blog, correct the table of contents, remove duplicate titles and add Previous/Next post links",
     scope: "page",
     pre: ["blogverification"],
     internal: ["blogverification"],
@@ -154,7 +154,7 @@ export const GAP_CHECKS: GapCheckDef[] = [
   {
     key: "image_display",
     label: "Stretched, Broken & Missing Images",
-    notFixed: "Mention to fix the stretched images (object-fit: cover / fixed ratio), re-upload the broken ones and fill the empty image spots",
+    notFixed: "Mention to correct the stretched images (object-fit: cover / set ratio), re-upload the broken ones and fill the empty image spots",
     scope: "page",
     pre: ["watermark"],
     internal: [FN_INT],
@@ -191,7 +191,7 @@ export const GAP_CHECKS: GapCheckDef[] = [
   {
     key: "equal_sizes",
     label: "Equal Card & Image Sizes",
-    notFixed: "Mention to use equal-height cards and fixed image ratios in the listed rows",
+    notFixed: "Mention to use equal-height cards and consistent image ratios in the listed rows",
     scope: "responsive",
     pre: [FN_PRE],
     internal: [FN_INT],
@@ -264,7 +264,7 @@ export const GAP_CHECKS: GapCheckDef[] = [
   {
     key: "safari_check",
     label: "Safari (WebKit) Check",
-    notFixed: "Mention to fix the Safari-only problems listed (favicon, hero video, layout, script errors)",
+    notFixed: "Mention to correct the Safari-only problems listed (favicon, hero video, layout, script errors)",
     scope: "homepage",
     pre: [FN_PRE],
     internal: ["browserdeviceview"],
@@ -319,7 +319,7 @@ export const GAP_CHECKS: GapCheckDef[] = [
     // Test phase only: guest cart, never checks out, never on post-release.
     key: "cart_add_to_cart",
     label: "Add to Cart on Mobile",
-    notFixed: "Mention to fix Add to Cart on mobile so 'View cart' appears, the header cart count goes up and the cart page lists the product",
+    notFixed: "Mention to correct Add to Cart on mobile so 'View cart' appears, the header cart count goes up and the cart page lists the product",
     scope: "homepage",
     pre: [FN_PRE],
     internal: [FN_INT],
@@ -366,7 +366,7 @@ export const GAP_CHECKS: GapCheckDef[] = [
   {
     key: "safari_layout_diff",
     label: "Safari vs Chrome Layout (Desktop / iPad / iPhone)",
-    notFixed: "Mention to fix the listed Safari-only layout differences (check them on an iPhone / iPad or in Safari)",
+    notFixed: "Mention to correct the listed Safari-only layout differences (check them on an iPhone / iPad or in Safari)",
     scope: "keypage",
     pre: [FN_PRE],
     internal: ["browserdeviceview"],
@@ -484,7 +484,7 @@ export const GAP_CHECKS: GapCheckDef[] = [
   {
     key: "url_problems",
     label: "URL Problems (test / gogroth / copy / city)",
-    notFixed: "Mention to fix the listed page URLs against the approved sitemap and redirect the old ones",
+    notFixed: "Mention to correct the listed page URLs against the approved sitemap and redirect the old ones",
     scope: "run",
     pre: ["tabname"],
     internal: ["urlmetadatasharing"],

@@ -167,7 +167,7 @@ export async function processResumeRunJob(job: Job): Promise<void> {
     if (run.ted_task_id)
       await postTedComment(
         String(run.ted_task_id),
-        `<p>❌ <strong>Could not resume the test run.</strong> ${reason.replace(/</g, "&lt;")}</p><p>To fix: press Trigger manually again.</p>`,
+        `<p>❌ <strong>Could not resume the test run.</strong> ${reason.replace(/</g, "&lt;")}</p><p>Next step: press Trigger manually again.</p>`,
         `ext:qacc-resume-failed-${runId}-${Date.now()}`,
         { runId, projectId: run.project_id },
       ).catch(() => {})
