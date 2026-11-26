@@ -414,27 +414,58 @@ export async function postTedStatus(
     )
   }
 
+  const xApiKey = process.env.X_API_KEY
   const bearer = process.env.TED_API_TOKEN
-  if (!bearer) {
-    logger.error({ tedTaskId }, "No TED_API_TOKEN; cannot set TED task status.")
+  if (!xApiKey && !bearer) {
+    logger.error({ tedTaskId }, "No X_API_KEY or TED_API_TOKEN; cannot set TED task status.")
     return false
   }
-  try {
-    const r = await fetch(
-      `${TED_BASE}/tasks/${tedTaskId}/status`,
-      {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${bearer}`,
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        // Any task QACC closes was handled by the QACC agent — flag it as
-        // AI-assigned so TED's release flow records it as such.
-        body: JSON.stringify({ status, aiAssigned: true }),
+  // Any task QACC closes was handled by the QACC agent — flag it as
+  // AI-assigned so TED's release flow records it as such.
+  const putStatus = (authHeaders: Record<string, string>) =>
+    fetch(`${TED_BASE}/tasks/${tedTaskId}/status`, {
+      method: "PUT",
+      headers: {
+        ...authHeaders,
+        Accept: "application/json",
+        "Content-Type": "application/json",
       },
-    )
-    if (r.ok && (r.headers.get("content-type") || "").includes("application/json")) {
+      body: JSON.stringify({ status, aiAssigned: true }),
+    })
+  const isJsonOk = (r: Response) =>
+    r.ok && (r.headers.get("content-type") || "").includes("application/json")
+  try {
+    // 1. Preferred: X-Api-Key, so the change is attributed to the agent key
+    // rather than the Bearer token's human owner.
+    let r: Response | null = null
+    if (xApiKey) {
+      try {
+        r = await putStatus({ "X-Api-Key": xApiKey })
+        if (!isJsonOk(r)) {
+          const preview = (await r.text().catch(() => "")).slice(0, 200)
+          logger.warn(
+            { tedTaskId, status: r.status, preview },
+            "Status via X-Api-Key refused; falling back to Bearer.",
+          )
+          r = null
+        }
+      } catch (err: any) {
+        logger.warn(
+          { tedTaskId, error: err?.message },
+          "Status via X-Api-Key threw; falling back to Bearer.",
+        )
+        r = null
+      }
+    }
+    // 2. Fallback: Bearer (shows as the token owner in TED).
+    if (!r) {
+      if (!bearer) {
+        logger.error({ tedTaskId }, "X-Api-Key status failed and no TED_API_TOKEN to fall back on.")
+        return false
+      }
+      r = await putStatus({ Authorization: `Bearer ${bearer}` })
+    }
+    if (isJsonOk(r)) {
       logger.info({ tedTaskId, status }, "Set TED task status.")
       // Keep a local QACC ledger row of the close — same shape/event_key as the
       // preview branch above (mirrors the report's "raw copy regardless of
