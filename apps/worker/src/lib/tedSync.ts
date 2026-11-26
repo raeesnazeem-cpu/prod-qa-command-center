@@ -468,8 +468,9 @@ export async function postTedStatus(
 // Three release.qa_post subtasks have no safe automated check and are owned by a
 // human ("Send email to client", "Verify backup size", "Two-Way Text Setup"), so
 // QACC never maps or closes them and they linger "Not Started" when the parent
-// closes. For now we close each with a set, honest failure reason so the
-// parent can advance. Matched ID-free on the subtask
+// closes. We post a set, honest reason on each and mark it In Progress, never
+// Completed: the fix is still manual, so a person must close it (and the
+// parent stays open until they do). Matched ID-free on the subtask
 // title (normalized: lowercased, non-alphanumerics stripped).
 const POST_RELEASE_MANUAL_CLOSEOUTS: { matchers: string[]; reason: string }[] = [
   {
@@ -487,7 +488,7 @@ const POST_RELEASE_MANUAL_CLOSEOUTS: { matchers: string[]; reason: string }[] = 
 ]
 
 // Fetch a parent's subtasks from TED (read-only), match the human-owned ones
-// above, and close each Completed with its hardcoded reason.
+// above, comment the hardcoded reason and set them In Progress (not Completed).
 // Real-TED only: needs TED_API_TOKEN and a live parent, so it no-ops in local
 // preview (those subtasks only exist in real TED). Best-effort throughout.
 async function closeManualPostReleaseSubtasks(
@@ -529,8 +530,9 @@ async function closeManualPostReleaseSubtasks(
       targetKind: "subtask",
       source: "status",
     }).catch(() => {})
-    await postTedStatus(st.id, TED_STATUS_COMPLETED, runId).catch(() => {})
-    logger.info({ runId, subtaskId: st.id, title: st.title }, "Manual post-release subtask closed (hardcoded reason).")
+    // Fix is still manual: leave it In Progress for a person, never Completed.
+    await postTedStatus(st.id, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
+    logger.info({ runId, subtaskId: st.id, title: st.title }, "Manual post-release subtask left In Progress (manual fix).")
   }
 }
 
@@ -678,9 +680,9 @@ export async function markAllTedTasksCompleted(
 
     const parent = parentTaskId || (run?.ted_task_id as string | undefined)
 
-    // Post-release only: close the human-owned checklist subtasks (email/backup/
-    // two-way text) that map to no automated check, so none linger "Not Started"
-    // when the parent closes. Runs BEFORE both parent-close paths (direct + the
+    // Post-release only: comment on the human-owned checklist subtasks (email/backup/
+    // two-way text) and set them In Progress (fix is manual), which also holds
+    // the parent open via parentHeldOpen. Runs BEFORE both parent-close paths (direct + the
     // deferred video barrier), so it's always "after all other tasks, before the
     // parent". Best-effort — never blocks the parent close.
     if (parent && run?.run_type === "post_release") {
@@ -1014,46 +1016,49 @@ export const FRIENDLY: Record<string, string> = CHECK_LABELS
 // to its "In Progress" status. Keyed by check factor. Source of truth is
 // docs/31-08-2026-ted-stages.html ("On Fail and not fixed" column). A check
 // absent here just gets no extra line (status still flips to In Progress).
+// TED comments never mention fixes: no fix lines, banners or "auto-fixed" notes.
+const NO_FIX_WORDING_IN_TED = true
+
 const NOT_FIXED_MESSAGE: Record<string, string> = {
   project_plan: "Mention to add project plan in project notes",
   hero_media: "Mention to add hero video",
-  dead_links: "Mention to check dead links one by one and fix according to context",
-  learn_more_buttons: "Mention to check learn more buttons one by one and fix according to context",
+  dead_links: "Mention to check dead links one by one and correct them according to context",
+  learn_more_buttons: "Mention to check learn more buttons one by one and correct them according to context",
   paid_media: "Mention to add Paid Media details in project details/notes",
   cro_audit: "Mention to review the listed conversion (CRO) issues — calls to action, value proposition, trust signals — with the design team",
-  dummy_content: "No fix possible. Review and replace content accordingly",
+  dummy_content: "Review and replace content accordingly",
   privacy_policy: "Mention to add a Privacy Policy page and link it in the footer",
   footer_logo: "Mention to add the approved Growth99 footer logo with no tagline across all views",
   single_script: "Mention to install the Growth99 single-script embed (G99+ code from Basecamp) site-wide",
   url_tab_compare: "Mention to reconcile the dev vs live page URLs and tab names",
   top_bar_sticky: "Mention to make the top bar header sticky on scroll",
   favicon: "Mention to add a working favicon (site icon)",
-  contact_form: "Mention to check the contact form with the team — decide whether to add it or correct the embed code (no automatic fix for the correction decision)",
+  contact_form: "Mention to check the contact form with the team — decide whether to add it or correct the embed code",
   chatbot_consultation: "Mention to add the Cliff Hanger chatbot & virtual consultation codes from Basecamp",
   logo_chatbot: "Mention to replace the chatbot launcher icon with the client's brand logo",
   callnow_links: "Mention to add the client's phone number to the TED contact notes so the floating Call Now button can be added site-wide",
   verify_plugin_updates: "Mention to update all plugins except All-in-Migration, LiteSpeed, WP-Rocket, Elementor & WooCommerce",
   social_share_heading: "Mention to add proper Open Graph & Twitter social-share meta tags (title, description & share image) so the Facebook, X & LinkedIn share previews render correctly",
-  false_breakpoint: "Fix the flagged element at the breaking width — reduce its width/overflow, or shrink the header font so nav and button stay on one line until the tablet breakpoint",
-  backend_check: "Mention to clean up the WordPress backend — remove default content (Hello world post, Sample Page, default tagline), close comments, add a custom 404, and fix the contact number",
-  review_reputation_check: "Mention to fix the /reviews page — ensure the review popup opens and the phone, email, social, and Google Business links are present and match the GMB listing",
-  functionality_check: "Mention to fix the broken interactive controls — resolve the JavaScript errors and layout breaks triggered when interacting with the page",
+  false_breakpoint: "Correct the flagged element at the breaking width — reduce its width/overflow, or shrink the header font so nav and button stay on one line until the tablet breakpoint",
+  backend_check: "Mention to clean up the WordPress backend — remove default content (Hello world post, Sample Page, default tagline), close comments, add a custom 404, and correct the contact number",
+  review_reputation_check: "Mention to correct the /reviews page — ensure the review popup opens and the phone, email, social, and Google Business links are present and match the GMB listing",
+  functionality_check: "Mention to correct the broken interactive controls — resolve the JavaScript errors and layout breaks triggered when interacting with the page",
   gbp_check: "Mention to complete the Google Business Profile — add the missing phone, matching website, hours, photos, or reviews",
   image_quality: "Mention to replace the flagged blurry and watermarked images with clean, sharp versions",
   image_relevance: "Mention to replace the flagged images on each service page with images that show that service",
   blog_sidebar: "Mention to add a sidebar to the listed blog posts with a search bar, a Recent Posts section and a Categories section",
-  media_crop: "Mention to fix the flagged images/videos so they are not cut off at the listed screen sizes (desktop, tablet or mobile)",
+  media_crop: "Mention to correct the flagged images/videos so they are not cut off at the listed screen sizes (desktop, tablet or mobile)",
   blog_verification: "Mention to migrate the missing blog posts from the client's live site to the beta site",
-  cross_browser: "Mention to review the SmartUI cross-browser diffs and fix the rendering differences",
+  cross_browser: "Mention to review the SmartUI cross-browser diffs and correct the rendering differences",
   gsr_check: "Review the listed Google search result titles and snippets and correct the invalid characters at the source (page title / meta description)",
   accessibility_check: "Mention to install the correct-tier UserWay accessibility widget matching the HubSpot plan",
-  accessibility_features: "Mention to fix the listed accessibility problems (alt text, form labels, link/button names, headings, page language)",
+  accessibility_features: "Mention to correct the listed accessibility problems (alt text, form labels, link/button names, headings, page language)",
   spelling: "Mention to correct the flagged misspelled words using the suggested spellings",
-  grammar: "Mention to fix the flagged grammar and punctuation issues in the page copy per the suggestions",
+  grammar: "Mention to correct the flagged grammar and punctuation issues in the page copy per the suggestions",
   live_site_link: "Mention to confirm the site is live on the correct client domain over HTTPS and not on a gogroth staging host",
   plugin_number: "Mention to verify the plugin count matches the expected set and remove any leftover or dev plugins",
   page_speed: "Mention to optimize page speed (compress images, defer JS, enable caching/CDN, reduce render-blocking)",
-  hamburger_menu: "Mention to add or fix the hamburger menu so it appears and toggles open on mobile and tablet (under 1024px) and its links and buttons work",
+  hamburger_menu: "Mention to add or correct the hamburger menu so it appears and toggles open on mobile and tablet (under 1024px) and its links and buttons work",
   ...GAP_NOT_FIXED,
 }
 
@@ -1461,7 +1466,9 @@ function renderNeedsLabel(fx: FixReportInfo): string {
 // deterministic spelling correction). Prefers a literal before → after taken
 // from the applied edits; falls back to the AI's description. Never invents one.
 export function renderFixLine(fx?: FixReportInfo, usedAi?: boolean): string {
-  if (!fx) return ""
+  // TED comments must never mention fixes (no "Fixed", "AI Fix", "Not changed",
+  // "suggested fix" lines). Kept as a no-op so callers stay unchanged.
+  if (!fx || NO_FIX_WORDING_IN_TED) return ""
   // Triaged but not auto-fixable → say so plainly, never leave it blank or
   // dressed up as a suggestion. Only reachable in the AI-fix path (the plain
   // QA report passes no fixMap, so fx is undefined there).
@@ -1593,7 +1600,7 @@ export async function renderCheckSectionHtml(
         continue
       }
       if (rep.issues.length) html += `<p><strong>Issues found</strong></p>${list(rep.issues)}`
-      if (rep.fixes.length) html += `<p><strong>Fixes recommended</strong></p>${list(rep.fixes)}`
+      if (rep.fixes.length) html += `<p><strong>Recommendations</strong></p>${list(rep.fixes)}`
       if (rep.failedChecks.length)
         html += `<p><strong>High-impact failed checks</strong></p>${list(
           rep.failedChecks.map((c) => `${c.impact ? `[${c.impact}] ` : ""}${c.name}${c.fix ? ` — ${c.fix}` : ""}`),
@@ -1822,7 +1829,7 @@ export async function renderCheckSectionHtml(
       // AI Fix line for THIS page: convert+enhance each flagged image, keep the
       // ones that re-pass the blur metric, and link the before/after carousel.
       const fix = f.page_id ? imageFix?.get(String(f.page_id)) : undefined
-      if (fix && fix.url) {
+      if (!NO_FIX_WORDING_IN_TED && fix && fix.url) {
         block += `<p>🤖 <strong>AI Fix</strong> — enhanced ${fix.enhanced} of ${fix.total} image${fix.total > 1 ? "s" : ""} on this page → <a href="${esc(fix.url)}">View before / after ↗</a></p>`
       }
       blocks.push(block)
@@ -2403,7 +2410,7 @@ export async function postSectionedReport(opts: {
       }
       const total = applied + proposed
       let header = ""
-      if (opts.perTargetFix && total > 0) {
+      if (!NO_FIX_WORDING_IN_TED && opts.perTargetFix && total > 0) {
         // Only applied edits count as fixes; suggestions are counted apart so
         // the banner never claims a change that wasn't made.
         const parts: string[] = []
@@ -2421,7 +2428,7 @@ export async function postSectionedReport(opts: {
       const notFixed = stillOpen(sec)
       const notFixedNote =
         notFixed && NOT_FIXED_MESSAGE[sec.factor]
-          ? `<p>🔸 <strong>Not auto-fixed — action needed:</strong> ${esc(NOT_FIXED_MESSAGE[sec.factor])}.</p>`
+          ? `<p>📝 <strong>Action needed:</strong> ${esc(NOT_FIXED_MESSAGE[sec.factor])}.</p>`
           : ""
       // Post the section (results + fix banner) to EACH owning subtask. The
       // idempotency key includes the subtask id so the same section landing on
@@ -2556,6 +2563,7 @@ export async function postSectionedReport(opts: {
 // TED task shows a clear hand-off. Only posts when the AI Fix module is enabled
 // (otherwise there is no fix pass to announce).
 export async function postScanCompleteComment(tedTaskId: string, runId: string) {
+  if (NO_FIX_WORDING_IN_TED) return
   if (process.env.AI_FIX_MODULE_ENABLED !== "true") return
   const text = `<p>✅ <strong>QA scan complete.</strong> AI Fix is now generating and applying corrections in the background — the fix report will follow shortly.</p>`
   await postTedComment(tedTaskId, text, `ext:qacc-scan-complete-${runId}`).catch(() => {})
