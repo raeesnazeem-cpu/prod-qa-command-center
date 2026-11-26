@@ -649,9 +649,9 @@ export async function postTedAiComment(
   return false
 }
 
-// Post a comment to a TED task, preferring the newer /comments/ai endpoint
-// (X-Api-Key + idempotent eventKey). If that endpoint is unavailable/errors,
-// fall back to the proven /comments endpoint (Bearer). Returns true on success.
+// Post a comment to a TED task as "TED QA Agent" via /comments/ai (X-Api-Key +
+// idempotent eventKey). No Bearer /comments fallback: that posts under the token
+// owner's name, so a failure is logged and left unposted. Returns true on success.
 async function postTedComment(
   taskId: string | number,
   text: string,
@@ -661,53 +661,13 @@ async function postTedComment(
   if (TED_PREVIEW_ONLY) {
     return recordLocalTedWrite(taskId, text, eventKey, "report", runId)
   }
-
-  const bearer = process.env.TED_API_TOKEN
-
-  const isJsonOk = (r: globalThis.Response) =>
-    r.ok && (r.headers.get("content-type") || "").includes("application/json")
-
-  // 1. Preferred: /comments/ai with X-Api-Key + eventKey (idempotent).
-  if (process.env.X_API_KEY) {
-    if (await postTedAiComment(taskId, text, eventKey)) return true
-    console.warn(`⚠️ /comments/ai did not take #${taskId}; falling back to /comments.`)
-  } else {
-    console.log("ℹ️ X_API_KEY not set; using /comments (Bearer) directly.")
-  }
-
-  // 2. Fallback: /comments with Bearer (the currently-working endpoint).
-  if (!bearer) {
-    console.error(
-      `❌ Cannot post comment to #${taskId}: neither X_API_KEY succeeded nor TED_API_TOKEN is set.`,
-    )
+  if (!process.env.X_API_KEY) {
+    console.error(`❌ Comment for TED #${taskId} NOT posted: X_API_KEY is not set.`)
     return false
   }
-  try {
-    const r = await fetch(
-      `${TED_BASE}/api/tasks/${taskId}/comments`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${bearer}`,
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text }),
-      },
-    )
-    if (isJsonOk(r)) {
-      console.log(`✅ Posted comment to TED #${taskId} via /comments (Bearer).`)
-      return true
-    }
-    const preview = (await r.text().catch(() => "")).slice(0, 200)
-    console.error(
-      `❌ Failed to post comment to TED #${taskId} via /comments (HTTP ${r.status}, content-type "${r.headers.get("content-type") || ""}"). Body: ${preview}`,
-    )
-    return false
-  } catch (err) {
-    console.error(`❌ Error posting comment to TED #${taskId} via /comments:`, err)
-    return false
-  }
+  if (await postTedAiComment(taskId, text, eventKey)) return true
+  console.error(`❌ Comment for TED #${taskId} NOT posted: /comments/ai refused it.`)
+  return false
 }
 
 // A trigger QACC acted on but that started no run: tell the TED task why and

@@ -256,8 +256,8 @@ export async function relayTedCommentViaApi(
 }
 
 // Post a comment to a TED task, preferring the newer /comments/ai endpoint
-// (X-Api-Key + idempotent eventKey), then the QACC API relay, then the proven
-// /comments (Bearer).
+// (X-Api-Key + idempotent eventKey), then the QACC API relay. Never /comments (Bearer),
+// which would show the comment under a person's name.
 // Returns true on success.
 export async function postTedComment(
   tedTaskId: string,
@@ -292,7 +292,6 @@ export async function postTedComment(
   }
 
   const xApiKey = process.env.X_API_KEY
-  const bearer = process.env.TED_API_TOKEN
   const isJsonOk = (r: Response) =>
     r.ok && (r.headers.get("content-type") || "").includes("application/json")
 
@@ -324,12 +323,12 @@ export async function postTedComment(
       const preview = (await r.text().catch(() => "")).slice(0, 200)
       logger.warn(
         { tedTaskId, status: r.status, preview },
-        "/comments/ai unavailable; falling back to /comments (Bearer).",
+        "/comments/ai unavailable; trying the QACC API relay.",
       )
     } catch (err: any) {
       logger.warn(
         { tedTaskId, error: err?.message },
-        "/comments/ai threw; falling back to /comments (Bearer).",
+        "/comments/ai threw; trying the QACC API relay.",
       )
     }
   }
@@ -340,44 +339,13 @@ export async function postTedComment(
     return true
   }
 
-  // 3. Fallback: /comments with Bearer (posts under the token owner's name).
-  if (!bearer) {
-    logger.error({ tedTaskId }, "No TED_API_TOKEN for /comments fallback.")
-    return false
-  }
-  try {
-    const r = await fetch(
-      `${TED_BASE}/tasks/${tedTaskId}/comments`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${bearer}`,
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          text: clientText,
-          ...(ctx.aiAssigned === true ? { aiAssigned: true } : {}),
-        }),
-      },
-    )
-    if (isJsonOk(r)) {
-      logger.info({ tedTaskId }, "Posted TED comment via /comments (Bearer).")
-      return true
-    }
-    const preview = (await r.text().catch(() => "")).slice(0, 200)
-    logger.error(
-      { tedTaskId, status: r.status, preview },
-      "Failed to post TED comment via /comments (response not JSON).",
-    )
-    return false
-  } catch (err: any) {
-    logger.error(
-      { tedTaskId, error: err?.message },
-      "Error posting TED comment via /comments.",
-    )
-    return false
-  }
+  // No Bearer fallback: /comments posts under the token owner's name (prod
+  // 2026-11-24: 65 reports showed as a person). Better unposted than misattributed.
+  logger.error(
+    { tedTaskId, eventKey },
+    "TED comment NOT posted: /comments/ai and the QACC API relay both failed. Set X_API_KEY (or QACC_API_URL + internal token).",
+  )
+  return false
 }
 
 // TED statuses QACC writes. A check's subtask is closed "Completed" when it
