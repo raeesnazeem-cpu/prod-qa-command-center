@@ -273,7 +273,6 @@ export async function processStartRunJob(job: Job) {
       "media_crop",
       "blog_sidebar",
       "grammar",
-      "accessibility_check",
       "accessibility_features",
       // QA-gap checks that need every page (page read, tablet/mobile pass, run-end comparisons).
       ...gapKeysByScope("page"),
@@ -309,6 +308,9 @@ export async function processStartRunJob(job: Job) {
       "plugin_number",
       "live_site_link",
       "page_speed",
+      // UserWay Pro/Basic vs HubSpot plan: the widget is site-wide and the check
+      // only runs on the homepage, so it must not force a full-site crawl.
+      "accessibility_check",
     ]
 
     // NOTE: video_recording is intentionally NOT a page check. It is a
