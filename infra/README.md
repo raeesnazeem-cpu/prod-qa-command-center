@@ -66,7 +66,7 @@ Put a ✔ next to each one when you have it.
 
 | # | What | Used in |
 |---|---|---|
-| 1 | Read access to the QACC Git repository, branch `feat/aws-floci` (or `main` once merged) | everything |
+| 1 | Read access to the QACC Git repository, branch `feat/aws-floci` | everything |
 | 2 | An AWS account where you have **AdministratorAccess** | step 3 |
 | 3 | The AWS region to use (default `us-east-1`) | step 4 |
 | 4 | The domain, e.g. `example.com` → QACC lives at `qacc.example.com` and `api.qacc.example.com` | step 4 |
