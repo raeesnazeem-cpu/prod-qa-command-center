@@ -273,7 +273,6 @@ export async function processStartRunJob(job: Job) {
       "media_crop",
       "blog_sidebar",
       "grammar",
-      "accessibility_check",
       "accessibility_features",
       // QA-gap checks that need every page (page read, tablet/mobile pass, run-end comparisons).
       ...gapKeysByScope("page"),
@@ -309,6 +308,9 @@ export async function processStartRunJob(job: Job) {
       "plugin_number",
       "live_site_link",
       "page_speed",
+      // UserWay Pro/Basic vs HubSpot plan: the widget is site-wide and the check
+      // only runs on the homepage, so it must not force a full-site crawl.
+      "accessibility_check",
     ]
 
     // NOTE: video_recording is intentionally NOT a page check. It is a
@@ -518,7 +520,7 @@ export async function processStartRunJob(job: Job) {
     if (run.ted_task_id) {
       await postTedComment(
         String(run.ted_task_id),
-        `<p>❌ <strong>Test run failed</strong> while collecting the site's pages: ${escapeHtml(String(error?.message || error).slice(0, 300))}</p><p>To fix: check that ${escapeHtml(String(run.site_url || "the site"))} loads, then press Trigger manually again.</p>`,
+        `<p>❌ <strong>Test run failed</strong> while collecting the site's pages: ${escapeHtml(String(error?.message || error).slice(0, 300))}</p><p>Next step: check that ${escapeHtml(String(run.site_url || "the site"))} loads, then press Trigger manually again.</p>`,
         `ext:qacc-run-failed-${runId}`,
         { runId, projectId: run.project_id },
       ).catch(() => {})

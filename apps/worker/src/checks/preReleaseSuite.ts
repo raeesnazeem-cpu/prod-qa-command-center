@@ -1146,6 +1146,34 @@ export async function checkFooterLogo(
     perView.push({ name, pass, reasons, variant: verdict.variant, notes: verdict.notes })
   }
 
+  // One view failing while another passes is the same footer logo seen by a
+  // different model in the vision fallback chain — usually a misread (TED task
+  // 57013: the logo was there, the tablet read said "different mark"). Ask
+  // again twice for that view; it fails only if the majority of reads fail.
+  if (perView.some((v) => v.pass) && perView.some((v) => !v.pass)) {
+    for (const v of perView.filter((x) => !x.pass)) {
+      const buf = footerBuffers.find((b) => b.name === v.name)?.buffer
+      if (!buf) continue
+      let passes = 0
+      let reads = 1 // the original failing read
+      for (let i = 0; i < 2; i++) {
+        const r = await verifyFooterLogo(buf).catch(() => null)
+        if (!r?.verdict) continue
+        reads++
+        const e = evaluateFooterLogo(r.verdict)
+        if (e.pass) {
+          passes++
+          v.variant = r.verdict.variant
+          v.notes = r.verdict.notes
+        }
+      }
+      if (passes > reads - passes) {
+        v.pass = true
+        v.reasons = []
+      }
+    }
+  }
+
   if (perView.length > 0) {
     const failed = perView.filter((v) => !v.pass)
     if (failed.length === 0) {

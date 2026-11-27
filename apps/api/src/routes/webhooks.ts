@@ -72,7 +72,7 @@ async function recordLocalTedWrite(
         body_html: bodyHtml,
         event_key: eventKey,
         source,
-        author: "AI Fix",
+        author: "QACC",
       },
       { onConflict: "event_key", ignoreDuplicates: true },
     )
@@ -649,9 +649,9 @@ export async function postTedAiComment(
   return false
 }
 
-// Post a comment to a TED task, preferring the newer /comments/ai endpoint
-// (X-Api-Key + idempotent eventKey). If that endpoint is unavailable/errors,
-// fall back to the proven /comments endpoint (Bearer). Returns true on success.
+// Post a comment to a TED task as "TED QA Agent" via /comments/ai (X-Api-Key +
+// idempotent eventKey). No Bearer /comments fallback: that posts under the token
+// owner's name, so a failure is logged and left unposted. Returns true on success.
 async function postTedComment(
   taskId: string | number,
   text: string,
@@ -661,53 +661,13 @@ async function postTedComment(
   if (TED_PREVIEW_ONLY) {
     return recordLocalTedWrite(taskId, text, eventKey, "report", runId)
   }
-
-  const bearer = process.env.TED_API_TOKEN
-
-  const isJsonOk = (r: globalThis.Response) =>
-    r.ok && (r.headers.get("content-type") || "").includes("application/json")
-
-  // 1. Preferred: /comments/ai with X-Api-Key + eventKey (idempotent).
-  if (process.env.X_API_KEY) {
-    if (await postTedAiComment(taskId, text, eventKey)) return true
-    console.warn(`⚠️ /comments/ai did not take #${taskId}; falling back to /comments.`)
-  } else {
-    console.log("ℹ️ X_API_KEY not set; using /comments (Bearer) directly.")
-  }
-
-  // 2. Fallback: /comments with Bearer (the currently-working endpoint).
-  if (!bearer) {
-    console.error(
-      `❌ Cannot post comment to #${taskId}: neither X_API_KEY succeeded nor TED_API_TOKEN is set.`,
-    )
+  if (!process.env.X_API_KEY) {
+    console.error(`❌ Comment for TED #${taskId} NOT posted: X_API_KEY is not set.`)
     return false
   }
-  try {
-    const r = await fetch(
-      `${TED_BASE}/api/tasks/${taskId}/comments`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${bearer}`,
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text }),
-      },
-    )
-    if (isJsonOk(r)) {
-      console.log(`✅ Posted comment to TED #${taskId} via /comments (Bearer).`)
-      return true
-    }
-    const preview = (await r.text().catch(() => "")).slice(0, 200)
-    console.error(
-      `❌ Failed to post comment to TED #${taskId} via /comments (HTTP ${r.status}, content-type "${r.headers.get("content-type") || ""}"). Body: ${preview}`,
-    )
-    return false
-  } catch (err) {
-    console.error(`❌ Error posting comment to TED #${taskId} via /comments:`, err)
-    return false
-  }
+  if (await postTedAiComment(taskId, text, eventKey)) return true
+  console.error(`❌ Comment for TED #${taskId} NOT posted: /comments/ai refused it.`)
+  return false
 }
 
 // A trigger QACC acted on but that started no run: tell the TED task why and
@@ -1274,12 +1234,17 @@ webhookRouter.post("/ted", async (req: Request, res: Response) => {
           // TED handed us. TED's pre_dev trigger doesn't always include the
           // qa_pre sibling, so resolving by template key is what makes the
           // routing reliable across clients.
-          preReleaseTaskId =
-            (await resolveTaskIdByTemplateKeyFromTED(
-              task.clientId,
-              PRE_RELEASE_TARGET_TEMPLATE_KEY,
-              /pre-?release/i,
-            )) || preReleaseTaskId
+          // A MANUAL trigger IS the release.qa_pre task — use it as-is. Re-resolving
+          // by template key can return a different (older) release.qa_pre task of
+          // the same client, so results landed there and the triggered task got
+          // no comment at all (TED task 12559 → reports went to 12555).
+          preReleaseTaskId = isManual
+            ? String(task.id)
+            : (await resolveTaskIdByTemplateKeyFromTED(
+                task.clientId,
+                PRE_RELEASE_TARGET_TEMPLATE_KEY,
+                /pre-?release/i,
+              )) || preReleaseTaskId
 
           // Discover that task's subtasks and map each to a QACC check by title
           // (same ID-free routing as internal QA). QACC then runs exactly the
@@ -2743,13 +2708,16 @@ webhookRouter.post(
           // Resolve the beta_site.internal_test target task QACC talks back to.
           // Prefer resolving by template key (client-agnostic); fall back to the
           // sibling task TED included in the payload.
-          targetTaskId =
-            (await resolveTaskIdByTemplateKeyFromTED(
-              task.clientId,
-              INTERNAL_QA_TARGET_TEMPLATE_KEY,
-              /internal beta site testing/i,
-            )) ||
-            (targetTask?.id ? String(targetTask.id) : null)
+          // A manual trigger IS the target task — use it as-is (re-resolving can
+          // pick an older task with the same template key).
+          targetTaskId = isManual
+            ? String(task.id)
+            : (await resolveTaskIdByTemplateKeyFromTED(
+                task.clientId,
+                INTERNAL_QA_TARGET_TEMPLATE_KEY,
+                /internal beta site testing/i,
+              )) ||
+              (targetTask?.id ? String(targetTask.id) : null)
 
           // Discover the parent's subtasks and map each to a QACC check by
           // title. QACC runs exactly the checks that map to a subtask (so it
@@ -3358,13 +3326,16 @@ webhookRouter.post(
           // Resolve the release.qa_post ("Complete QA post-release testing")
           // task — this is the scan task QACC talks back to, NOT the
           // release.security trigger. Fall back to the payload target if given.
-          scanTaskId =
-            (await resolveTaskIdByTemplateKeyFromTED(
-              task.clientId,
-              POST_RELEASE_TARGET_TEMPLATE_KEY,
-              /post-?release testing/i,
-            )) ||
-            (targetTask?.id ? String(targetTask.id) : null)
+          // A manual trigger IS the release.qa_post task — use it as-is
+          // (re-resolving can pick an older task with the same template key).
+          scanTaskId = isManual
+            ? String(task.id)
+            : (await resolveTaskIdByTemplateKeyFromTED(
+                task.clientId,
+                POST_RELEASE_TARGET_TEMPLATE_KEY,
+                /post-?release testing/i,
+              )) ||
+              (targetTask?.id ? String(targetTask.id) : null)
 
           // Discover the release.qa_post checklist subtasks and map each to a
           // QACC check by title (same ID-free routing as pre-release / internal
@@ -4396,15 +4367,7 @@ webhookRouter.post("/ted/full-scan/fix", async (req: Request, res: Response) => 
     return res.status(500).json({ error: "Failed to queue the fix." })
   }
 
-  // A comment so the operator sees the fix was accepted (no status change).
-  if (process.env.TED_API_TOKEN) {
-    await postTedComment(
-      String(run.ted_task_id),
-      `<p>🛠️ <strong>Fix module started</strong> for this full scan. The fix results — and the final video recording — will be posted here when it finishes.</p>`,
-      `ext:qacc-fullscan-fix-queued-${runId}`,
-      String(runId),
-    ).catch(() => {})
-  }
+  // No TED comment here: TED comments never mention fixes.
 
   console.log(`✅ Full-scan fix queued for run ${runId}.`)
   return res.status(200).json({

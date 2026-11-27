@@ -46,19 +46,25 @@ describe("postTedComment — worker without its own key relays through the API",
     expect(JSON.parse(sent.body)).toEqual({ taskId: "65011", text: "<p>result</p>", eventKey: "qacc-status:1" })
   })
 
-  it("falls back to Bearer only when the relay fails", async () => {
+  it("never posts with the Bearer token when the relay fails (would show a person's name)", async () => {
     mockFetch({ "/internal/ted-comment": 502, "/comments": 200 })
-    expect(await postTedComment("65011", "x", "qacc-status:2")).toBe(true)
-    expect(calls.map((c) => c.url)).toEqual([
-      "https://api.qacc.raees.dev/internal/ted-comment",
-      "https://ted.growth99.com/api/tasks/65011/comments",
-    ])
+    expect(await postTedComment("65011", "x", "qacc-status:2")).toBe(false)
+    expect(calls.map((c) => c.url)).toEqual(["https://api.qacc.raees.dev/internal/ted-comment"])
+  })
+
+  it("uses /comments/ai as TED QA Agent when the worker has its own key", async () => {
+    process.env.X_API_KEY = "agent-key"
+    mockFetch({ "/comments/ai": 200, "/comments": 200 })
+    expect(await postTedComment("65011", "x", "qacc-status:4")).toBe(true)
+    expect(calls.map((c) => c.url)).toEqual(["https://ted.growth99.com/api/tasks/65011/comments/ai"])
+    expect(JSON.parse(calls[0].init.body).agentName).toBe("TED QA Agent")
   })
 
   it("a local worker (TED_API_BASE set) never relays to the production API", async () => {
     process.env.TED_API_BASE = "http://localhost:8197"
     mockFetch({ "/comments": 200 })
-    await postTedComment("900004", "x", "qacc-status:3")
+    expect(await postTedComment("900004", "x", "qacc-status:3")).toBe(false)
     expect(calls.some((c) => c.url.includes("qacc.raees.dev"))).toBe(false)
+    expect(calls.some((c) => c.url.endsWith("/comments"))).toBe(false)
   })
 })

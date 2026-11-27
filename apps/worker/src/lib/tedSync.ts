@@ -257,8 +257,8 @@ export async function relayTedCommentViaApi(
 }
 
 // Post a comment to a TED task, preferring the newer /comments/ai endpoint
-// (X-Api-Key + idempotent eventKey), then the QACC API relay, then the proven
-// /comments (Bearer).
+// (X-Api-Key + idempotent eventKey), then the QACC API relay. Never /comments (Bearer),
+// which would show the comment under a person's name.
 // Returns true on success.
 export async function postTedComment(
   tedTaskId: string,
@@ -293,7 +293,6 @@ export async function postTedComment(
   }
 
   const xApiKey = process.env.X_API_KEY
-  const bearer = process.env.TED_API_TOKEN
   const isJsonOk = (r: Response) =>
     r.ok && (r.headers.get("content-type") || "").includes("application/json")
 
@@ -325,12 +324,12 @@ export async function postTedComment(
       const preview = (await r.text().catch(() => "")).slice(0, 200)
       logger.warn(
         { tedTaskId, status: r.status, preview },
-        "/comments/ai unavailable; falling back to /comments (Bearer).",
+        "/comments/ai unavailable; trying the QACC API relay.",
       )
     } catch (err: any) {
       logger.warn(
         { tedTaskId, error: err?.message },
-        "/comments/ai threw; falling back to /comments (Bearer).",
+        "/comments/ai threw; trying the QACC API relay.",
       )
     }
   }
@@ -341,44 +340,13 @@ export async function postTedComment(
     return true
   }
 
-  // 3. Fallback: /comments with Bearer (posts under the token owner's name).
-  if (!bearer) {
-    logger.error({ tedTaskId }, "No TED_API_TOKEN for /comments fallback.")
-    return false
-  }
-  try {
-    const r = await fetch(
-      `${TED_BASE}/tasks/${tedTaskId}/comments`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${bearer}`,
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          text: clientText,
-          ...(ctx.aiAssigned === true ? { aiAssigned: true } : {}),
-        }),
-      },
-    )
-    if (isJsonOk(r)) {
-      logger.info({ tedTaskId }, "Posted TED comment via /comments (Bearer).")
-      return true
-    }
-    const preview = (await r.text().catch(() => "")).slice(0, 200)
-    logger.error(
-      { tedTaskId, status: r.status, preview },
-      "Failed to post TED comment via /comments (response not JSON).",
-    )
-    return false
-  } catch (err: any) {
-    logger.error(
-      { tedTaskId, error: err?.message },
-      "Error posting TED comment via /comments.",
-    )
-    return false
-  }
+  // No Bearer fallback: /comments posts under the token owner's name (prod
+  // 2026-11-24: 65 reports showed as a person). Better unposted than misattributed.
+  logger.error(
+    { tedTaskId, eventKey },
+    "TED comment NOT posted: /comments/ai and the QACC API relay both failed. Set X_API_KEY (or QACC_API_URL + internal token).",
+  )
+  return false
 }
 
 // TED statuses QACC writes. A check's subtask is closed "Completed" when it
@@ -415,27 +383,58 @@ export async function postTedStatus(
     )
   }
 
+  const xApiKey = process.env.X_API_KEY
   const bearer = process.env.TED_API_TOKEN
-  if (!bearer) {
-    logger.error({ tedTaskId }, "No TED_API_TOKEN; cannot set TED task status.")
+  if (!xApiKey && !bearer) {
+    logger.error({ tedTaskId }, "No X_API_KEY or TED_API_TOKEN; cannot set TED task status.")
     return false
   }
-  try {
-    const r = await fetch(
-      `${TED_BASE}/tasks/${tedTaskId}/status`,
-      {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${bearer}`,
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        // Any task QACC closes was handled by the QACC agent — flag it as
-        // AI-assigned so TED's release flow records it as such.
-        body: JSON.stringify({ status, aiAssigned: true }),
+  // Any task QACC closes was handled by the QACC agent — flag it as
+  // AI-assigned so TED's release flow records it as such.
+  const putStatus = (authHeaders: Record<string, string>) =>
+    fetch(`${TED_BASE}/tasks/${tedTaskId}/status`, {
+      method: "PUT",
+      headers: {
+        ...authHeaders,
+        Accept: "application/json",
+        "Content-Type": "application/json",
       },
-    )
-    if (r.ok && (r.headers.get("content-type") || "").includes("application/json")) {
+      body: JSON.stringify({ status, aiAssigned: true }),
+    })
+  const isJsonOk = (r: Response) =>
+    r.ok && (r.headers.get("content-type") || "").includes("application/json")
+  try {
+    // 1. Preferred: X-Api-Key, so the change is attributed to the agent key
+    // rather than the Bearer token's human owner.
+    let r: Response | null = null
+    if (xApiKey) {
+      try {
+        r = await putStatus({ "X-Api-Key": xApiKey })
+        if (!isJsonOk(r)) {
+          const preview = (await r.text().catch(() => "")).slice(0, 200)
+          logger.warn(
+            { tedTaskId, status: r.status, preview },
+            "Status via X-Api-Key refused; falling back to Bearer.",
+          )
+          r = null
+        }
+      } catch (err: any) {
+        logger.warn(
+          { tedTaskId, error: err?.message },
+          "Status via X-Api-Key threw; falling back to Bearer.",
+        )
+        r = null
+      }
+    }
+    // 2. Fallback: Bearer (shows as the token owner in TED).
+    if (!r) {
+      if (!bearer) {
+        logger.error({ tedTaskId }, "X-Api-Key status failed and no TED_API_TOKEN to fall back on.")
+        return false
+      }
+      r = await putStatus({ Authorization: `Bearer ${bearer}` })
+    }
+    if (isJsonOk(r)) {
       logger.info({ tedTaskId, status }, "Set TED task status.")
       // Keep a local QACC ledger row of the close — same shape/event_key as the
       // preview branch above (mirrors the report's "raw copy regardless of
@@ -469,8 +468,9 @@ export async function postTedStatus(
 // Three release.qa_post subtasks have no safe automated check and are owned by a
 // human ("Send email to client", "Verify backup size", "Two-Way Text Setup"), so
 // QACC never maps or closes them and they linger "Not Started" when the parent
-// closes. For now we close each with a set, honest failure reason so the
-// parent can advance. Matched ID-free on the subtask
+// closes. We post a set, honest reason on each and mark it In Progress, never
+// Completed: the fix is still manual, so a person must close it (and the
+// parent stays open until they do). Matched ID-free on the subtask
 // title (normalized: lowercased, non-alphanumerics stripped).
 const POST_RELEASE_MANUAL_CLOSEOUTS: { matchers: string[]; reason: string }[] = [
   {
@@ -488,7 +488,7 @@ const POST_RELEASE_MANUAL_CLOSEOUTS: { matchers: string[]; reason: string }[] = 
 ]
 
 // Fetch a parent's subtasks from TED (read-only), match the human-owned ones
-// above, and close each Completed with its hardcoded reason.
+// above, comment the hardcoded reason and set them In Progress (not Completed).
 // Real-TED only: needs TED_API_TOKEN and a live parent, so it no-ops in local
 // preview (those subtasks only exist in real TED). Best-effort throughout.
 async function closeManualPostReleaseSubtasks(
@@ -530,8 +530,9 @@ async function closeManualPostReleaseSubtasks(
       targetKind: "subtask",
       source: "status",
     }).catch(() => {})
-    await postTedStatus(st.id, TED_STATUS_COMPLETED, runId).catch(() => {})
-    logger.info({ runId, subtaskId: st.id, title: st.title }, "Manual post-release subtask closed (hardcoded reason).")
+    // Fix is still manual: leave it In Progress for a person, never Completed.
+    await postTedStatus(st.id, TED_STATUS_IN_PROGRESS, runId).catch(() => {})
+    logger.info({ runId, subtaskId: st.id, title: st.title }, "Manual post-release subtask left In Progress (manual fix).")
   }
 }
 
@@ -542,7 +543,36 @@ async function closeManualPostReleaseSubtasks(
 // In Progress for a person, never closed.
 const heldOpenKey = (parentTaskId: string, runId: string) =>
   `held-open:${parentTaskId}:${runId}`
+// A post-release run never closes its parent ("Complete QA post-release testing").
+// In TED, that task turning Completed means "the site is live" and moves the
+// client from Onboarding to Client Base. A scan finishing is not that sign-off:
+// on Nov 19-20, 2026 runs with 4-13 failed checks closed the task and moved six
+// clients whose sites were not live. A person completes it after checking.
+export function runNeedsPersonSignOff(runType: string | null | undefined): boolean {
+  return runType === "post_release"
+}
+
+const signOffNoteKey = (parentTaskId: string, runId: string) =>
+  `ext:post-release-signoff-${parentTaskId}-${runId}`
+
 export async function parentHeldOpen(runId: string, parentTaskId: string): Promise<boolean> {
+  const { data: run } = await supabase
+    .from("qa_runs")
+    .select("run_type")
+    .eq("id", runId)
+    .maybeSingle()
+  if (runNeedsPersonSignOff(run?.run_type as string | undefined)) {
+    await postTedComment(
+      String(parentTaskId),
+      `<p>✅ <strong>QACC post-release scan finished.</strong> This task stays In Progress for a person: ` +
+        `check the live site and the results above, then mark it Completed. Marking it Completed moves ` +
+        `the client to Client Base in TED.</p>`,
+      signOffNoteKey(String(parentTaskId), runId),
+      { runId, targetKind: "parent", aiAssigned: true },
+    ).catch(() => {})
+    logger.info({ runId, parentTaskId }, "Post-release run — parent left In Progress for a person's sign-off.")
+    return true
+  }
   const { data } = await supabase
     .from("ted_comments")
     .select("id")
@@ -650,9 +680,9 @@ export async function markAllTedTasksCompleted(
 
     const parent = parentTaskId || (run?.ted_task_id as string | undefined)
 
-    // Post-release only: close the human-owned checklist subtasks (email/backup/
-    // two-way text) that map to no automated check, so none linger "Not Started"
-    // when the parent closes. Runs BEFORE both parent-close paths (direct + the
+    // Post-release only: comment on the human-owned checklist subtasks (email/backup/
+    // two-way text) and set them In Progress (fix is manual), which also holds
+    // the parent open via parentHeldOpen. Runs BEFORE both parent-close paths (direct + the
     // deferred video barrier), so it's always "after all other tasks, before the
     // parent". Best-effort — never blocks the parent close.
     if (parent && run?.run_type === "post_release") {
@@ -994,46 +1024,49 @@ export const FRIENDLY: Record<string, string> = CHECK_LABELS
 // to its "In Progress" status. Keyed by check factor. Source of truth is
 // docs/31-08-2026-ted-stages.html ("On Fail and not fixed" column). A check
 // absent here just gets no extra line (status still flips to In Progress).
+// TED comments never mention fixes: no fix lines, banners or "auto-fixed" notes.
+const NO_FIX_WORDING_IN_TED = true
+
 const NOT_FIXED_MESSAGE: Record<string, string> = {
   project_plan: "Mention to add project plan in project notes",
   hero_media: "Mention to add hero video",
-  dead_links: "Mention to check dead links one by one and fix according to context",
-  learn_more_buttons: "Mention to check learn more buttons one by one and fix according to context",
+  dead_links: "Mention to check dead links one by one and correct them according to context",
+  learn_more_buttons: "Mention to check learn more buttons one by one and correct them according to context",
   paid_media: "Mention to add Paid Media details in project details/notes",
   cro_audit: "Mention to review the listed conversion (CRO) issues — calls to action, value proposition, trust signals — with the design team",
-  dummy_content: "No fix possible. Review and replace content accordingly",
+  dummy_content: "Review and replace content accordingly",
   privacy_policy: "Mention to add a Privacy Policy page and link it in the footer",
   footer_logo: "Mention to add the approved Growth99 footer logo with no tagline across all views",
   single_script: "Mention to install the Growth99 single-script embed (G99+ code from Basecamp) site-wide",
   url_tab_compare: "Mention to reconcile the dev vs live page URLs and tab names",
   top_bar_sticky: "Mention to make the top bar header sticky on scroll",
   favicon: "Mention to add a working favicon (site icon)",
-  contact_form: "Mention to check the contact form with the team — decide whether to add it or correct the embed code (no automatic fix for the correction decision)",
+  contact_form: "Mention to check the contact form with the team — decide whether to add it or correct the embed code",
   chatbot_consultation: "Mention to add the Cliff Hanger chatbot & virtual consultation codes from Basecamp",
   logo_chatbot: "Mention to replace the chatbot launcher icon with the client's brand logo",
   callnow_links: "Mention to add the client's phone number to the TED contact notes so the floating Call Now button can be added site-wide",
   verify_plugin_updates: "Mention to update all plugins except All-in-Migration, LiteSpeed, WP-Rocket, Elementor & WooCommerce",
   social_share_heading: "Mention to add proper Open Graph & Twitter social-share meta tags (title, description & share image) so the Facebook, X & LinkedIn share previews render correctly",
-  false_breakpoint: "Fix the flagged element at the breaking width — reduce its width/overflow, or shrink the header font so nav and button stay on one line until the tablet breakpoint",
-  backend_check: "Mention to clean up the WordPress backend — remove default content (Hello world post, Sample Page, default tagline), close comments, add a custom 404, and fix the contact number",
-  review_reputation_check: "Mention to fix the /reviews page — ensure the review popup opens and the phone, email, social, and Google Business links are present and match the GMB listing",
-  functionality_check: "Mention to fix the broken interactive controls — resolve the JavaScript errors and layout breaks triggered when interacting with the page",
+  false_breakpoint: "Correct the flagged element at the breaking width — reduce its width/overflow, or shrink the header font so nav and button stay on one line until the tablet breakpoint",
+  backend_check: "Mention to clean up the WordPress backend — remove default content (Hello world post, Sample Page, default tagline), close comments, add a custom 404, and correct the contact number",
+  review_reputation_check: "Mention to correct the /reviews page — ensure the review popup opens and the phone, email, social, and Google Business links are present and match the GMB listing",
+  functionality_check: "Mention to correct the broken interactive controls — resolve the JavaScript errors and layout breaks triggered when interacting with the page",
   gbp_check: "Mention to complete the Google Business Profile — add the missing phone, matching website, hours, photos, or reviews",
   image_quality: "Mention to replace the flagged blurry and watermarked images with clean, sharp versions",
   image_relevance: "Mention to replace the flagged images on each service page with images that show that service",
   blog_sidebar: "Mention to add a sidebar to the listed blog posts with a search bar, a Recent Posts section and a Categories section",
-  media_crop: "Mention to fix the flagged images/videos so they are not cut off at the listed screen sizes (desktop, tablet or mobile)",
+  media_crop: "Mention to correct the flagged images/videos so they are not cut off at the listed screen sizes (desktop, tablet or mobile)",
   blog_verification: "Mention to migrate the missing blog posts from the client's live site to the beta site",
-  cross_browser: "Mention to review the SmartUI cross-browser diffs and fix the rendering differences",
+  cross_browser: "Mention to review the SmartUI cross-browser diffs and correct the rendering differences",
   gsr_check: "Review the listed Google search result titles and snippets and correct the invalid characters at the source (page title / meta description)",
   accessibility_check: "Mention to install the correct-tier UserWay accessibility widget matching the HubSpot plan",
-  accessibility_features: "Mention to fix the listed accessibility problems (alt text, form labels, link/button names, headings, page language)",
+  accessibility_features: "Mention to correct the listed accessibility problems (alt text, form labels, link/button names, headings, page language)",
   spelling: "Mention to correct the flagged misspelled words using the suggested spellings",
-  grammar: "Mention to fix the flagged grammar and punctuation issues in the page copy per the suggestions",
+  grammar: "Mention to correct the flagged grammar and punctuation issues in the page copy per the suggestions",
   live_site_link: "Mention to confirm the site is live on the correct client domain over HTTPS and not on a gogroth staging host",
   plugin_number: "Mention to verify the plugin count matches the expected set and remove any leftover or dev plugins",
   page_speed: "Mention to optimize page speed (compress images, defer JS, enable caching/CDN, reduce render-blocking)",
-  hamburger_menu: "Mention to add or fix the hamburger menu so it appears and toggles open on mobile and tablet (under 1024px) and its links and buttons work",
+  hamburger_menu: "Mention to add or correct the hamburger menu so it appears and toggles open on mobile and tablet (under 1024px) and its links and buttons work",
   ...GAP_NOT_FIXED,
 }
 
@@ -1441,7 +1474,9 @@ function renderNeedsLabel(fx: FixReportInfo): string {
 // deterministic spelling correction). Prefers a literal before → after taken
 // from the applied edits; falls back to the AI's description. Never invents one.
 export function renderFixLine(fx?: FixReportInfo, usedAi?: boolean): string {
-  if (!fx) return ""
+  // TED comments must never mention fixes (no "Fixed", "AI Fix", "Not changed",
+  // "suggested fix" lines). Kept as a no-op so callers stay unchanged.
+  if (!fx || NO_FIX_WORDING_IN_TED) return ""
   // Triaged but not auto-fixable → say so plainly, never leave it blank or
   // dressed up as a suggestion. Only reachable in the AI-fix path (the plain
   // QA report passes no fixMap, so fx is undefined there).
@@ -1573,7 +1608,7 @@ export async function renderCheckSectionHtml(
         continue
       }
       if (rep.issues.length) html += `<p><strong>Issues found</strong></p>${list(rep.issues)}`
-      if (rep.fixes.length) html += `<p><strong>Fixes recommended</strong></p>${list(rep.fixes)}`
+      if (rep.fixes.length) html += `<p><strong>Recommendations</strong></p>${list(rep.fixes)}`
       if (rep.failedChecks.length)
         html += `<p><strong>High-impact failed checks</strong></p>${list(
           rep.failedChecks.map((c) => `${c.impact ? `[${c.impact}] ` : ""}${c.name}${c.fix ? ` — ${c.fix}` : ""}`),
@@ -1802,7 +1837,7 @@ export async function renderCheckSectionHtml(
       // AI Fix line for THIS page: convert+enhance each flagged image, keep the
       // ones that re-pass the blur metric, and link the before/after carousel.
       const fix = f.page_id ? imageFix?.get(String(f.page_id)) : undefined
-      if (fix && fix.url) {
+      if (!NO_FIX_WORDING_IN_TED && fix && fix.url) {
         block += `<p>🤖 <strong>AI Fix</strong> — enhanced ${fix.enhanced} of ${fix.total} image${fix.total > 1 ? "s" : ""} on this page → <a href="${esc(fix.url)}">View before / after ↗</a></p>`
       }
       blocks.push(block)
@@ -2243,6 +2278,33 @@ export async function buildSectionedReport(opts: {
   return { byCheck, sections, tally, titleHtml, overview, reportCtx }
 }
 
+/**
+ * subtask id → true when it must stay In Progress. A subtask can own several
+ * checks; it is open while ANY of them is open (`isOpen`) or produced no result
+ * (mapped but missing from `sections`). The video subtask is skipped (its
+ * barrier owns its status). Pure — unit-tested.
+ */
+export function subtaskOpenMap(
+  sections: { factor: string; status: string }[],
+  subtaskMap: Record<string, string | string[]>,
+  isOpen: (s: { factor: string; status: string }) => boolean,
+): Map<string, boolean> {
+  const targetsOf = (raw: string | string[] | undefined) =>
+    Array.isArray(raw) ? raw : raw ? [raw] : []
+  const withResult = new Set(sections.map((s) => s.factor))
+  const open = new Map<string, boolean>()
+  for (const sec of sections) {
+    if (sec.factor === "video_recording") continue
+    for (const t of targetsOf(subtaskMap[sec.factor]))
+      open.set(t, (open.get(t) || false) || isOpen(sec))
+  }
+  for (const [factor, raw] of Object.entries(subtaskMap)) {
+    if (factor === "video_recording" || withResult.has(factor)) continue
+    for (const t of targetsOf(raw)) open.set(t, true) // no result → a person must check
+  }
+  return open
+}
+
 export async function postSectionedReport(opts: {
   runId: string
   tedTaskId: string
@@ -2321,6 +2383,13 @@ export async function postSectionedReport(opts: {
     // gets reported, stitched into a summary comment on the parent so nothing
     // is silently dropped. A subtask is marked Completed ONLY right after its
     // own pass/fail comment lands here.
+    // One subtask can own several checks (false_breakpoint + header_breakpoints
+    // both → "Header & Breakpoints"). Its status must reflect ALL of them:
+    // In Progress while ANY of its checks is still open, else Completed.
+    // Deciding per section let a later passing check overwrite an earlier
+    // failing one (TED task 57012: In Progress → Completed 30s later).
+    const targetOpen = subtaskOpenMap(sections, subtaskMap, stillOpen)
+
     const leftovers: typeof sections = []
     for (const sec of sections) {
       const raw = subtaskMap[sec.factor]
@@ -2349,7 +2418,7 @@ export async function postSectionedReport(opts: {
       }
       const total = applied + proposed
       let header = ""
-      if (opts.perTargetFix && total > 0) {
+      if (!NO_FIX_WORDING_IN_TED && opts.perTargetFix && total > 0) {
         // Only applied edits count as fixes; suggestions are counted apart so
         // the banner never claims a change that wasn't made.
         const parts: string[] = []
@@ -2367,7 +2436,7 @@ export async function postSectionedReport(opts: {
       const notFixed = stillOpen(sec)
       const notFixedNote =
         notFixed && NOT_FIXED_MESSAGE[sec.factor]
-          ? `<p>🔸 <strong>Not auto-fixed — action needed:</strong> ${esc(NOT_FIXED_MESSAGE[sec.factor])}.</p>`
+          ? `<p>📝 <strong>Action needed:</strong> ${esc(NOT_FIXED_MESSAGE[sec.factor])}.</p>`
           : ""
       // Post the section (results + fix banner) to EACH owning subtask. The
       // idempotency key includes the subtask id so the same section landing on
@@ -2386,12 +2455,12 @@ export async function postSectionedReport(opts: {
           },
         ).catch(() => {})
         // Set THIS subtask's status now that its comment has landed: In Progress
-        // when it failed and was not fixed, else Completed. Never the video
+        // while any check it owns is still open, else Completed. Never the video
         // subtask (the barrier owns its status).
         if (sec.factor !== "video_recording")
           await postTedStatus(
             target,
-            notFixed ? TED_STATUS_IN_PROGRESS : TED_STATUS_COMPLETED,
+            targetOpen.get(target) ? TED_STATUS_IN_PROGRESS : TED_STATUS_COMPLETED,
             runId,
           ).catch(() => {})
       }
@@ -2502,6 +2571,7 @@ export async function postSectionedReport(opts: {
 // TED task shows a clear hand-off. Only posts when the AI Fix module is enabled
 // (otherwise there is no fix pass to announce).
 export async function postScanCompleteComment(tedTaskId: string, runId: string) {
+  if (NO_FIX_WORDING_IN_TED) return
   if (process.env.AI_FIX_MODULE_ENABLED !== "true") return
   const text = `<p>✅ <strong>QA scan complete.</strong> AI Fix is now generating and applying corrections in the background — the fix report will follow shortly.</p>`
   await postTedComment(tedTaskId, text, `ext:qacc-scan-complete-${runId}`).catch(() => {})
@@ -2701,15 +2771,19 @@ export async function postFinalReportToTED(
     // Full scan splits Test and Fix: the scan ALWAYS publishes its own report and
     // never defers to a fix pass (the fix is a separate, on-demand action that
     // posts its own report later). So skip the defer branch for full_scan.
-    const isFullScan = runMeta?.run_type === "full_scan"
-    const moduleOn = process.env.AI_FIX_MODULE_ENABLED === "true"
-    if (shown.length > 0 && moduleOn && !isFullScan) {
-      logger.info(
-        { runId, issues: shown.length },
-        "Issues found + AI-fix on; deferring the section-wise report to the fix pass.",
-      )
-      return { hasIssues: true, issueCount: shown.length }
-    }
+    // SCAN-ONLY: there is no fix pass any more (finishRunAfterReport closes the
+    // tasks right after this), so the report must ALWAYS post here. Deferring
+    // when AI_FIX_MODULE_ENABLED=true left runs with issues with NO comments at
+    // all, and every task then closed Completed.
+    // const isFullScan = runMeta?.run_type === "full_scan"
+    // const moduleOn = process.env.AI_FIX_MODULE_ENABLED === "true"
+    // if (shown.length > 0 && moduleOn && !isFullScan) {
+    //   logger.info(
+    //     { runId, issues: shown.length },
+    //     "Issues found + AI-fix on; deferring the section-wise report to the fix pass.",
+    //   )
+    //   return { hasIssues: true, issueCount: shown.length }
+    // }
 
     // Otherwise there will be no fix pass (everything passed, or the module is
     // off), so post the section-wise report now — no fix lines to add.

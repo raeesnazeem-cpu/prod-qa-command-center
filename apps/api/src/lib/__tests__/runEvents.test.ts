@@ -100,7 +100,7 @@ describe("TriggerTracker", () => {
 describe("comment texts", () => {
   it("could-not-start says the reason and the fix", () => {
     expect(couldNotStartText("No project.", "create it.")).toBe(
-      "<p><strong>Could not start the test run.</strong></p><p>No project.</p><p><strong>To fix:</strong> create it.</p>",
+      "<p><strong>Could not start the test run.</strong></p><p>No project.</p><p><strong>Next step:</strong> create it.</p>",
     )
   })
   it("started names url, source, checks and run", () => {
