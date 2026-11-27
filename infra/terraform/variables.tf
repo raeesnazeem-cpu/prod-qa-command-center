@@ -193,6 +193,11 @@ variable "public_web_url" {
   description = "Browser URL of the web app (CORS + SSO return), e.g. https://qacc.<domain>"
   type        = string
 }
+variable "worker_api_url" {
+  description = "API address the worker uses for its backup TED comment route (/internal/ted-comment) when X_API_KEY is refused. Empty = built from api_host (https when https_enabled). On floci leave empty: the route is off there and comments rely on X_API_KEY."
+  type        = string
+  default     = ""
+}
 
 variable "system_org_id" {
   type = string

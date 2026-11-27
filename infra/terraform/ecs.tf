@@ -61,8 +61,17 @@ locals {
     RUN_METRICS_ENV       = var.env
   } : {})
 
+  # Backup route for TED comments when X_API_KEY is refused (the worker never
+  # falls back to the Bearer token: that posts under a person's name).
+  worker_api_url = var.worker_api_url != "" ? var.worker_api_url : (
+    var.use_floci ? "" : (
+      var.https_enabled ? "https://${var.api_host}" : "http://${var.api_host}:${var.alb_listener_port}"
+    )
+  )
+
   worker_env = merge(local.app_env, local.recorder_launch_env, {
     PORT                    = "8080"
+    QACC_API_URL            = local.worker_api_url
     VIDEO_RECORDING_ENABLED = tostring(var.recording_enabled)
     # Runs allowed at once = the most worker tasks autoscaling may start.
     RUN_SLOT_LIMIT = tostring(var.worker_max_count)

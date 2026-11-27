@@ -172,14 +172,14 @@ describe("TED report — cro_audit section", () => {
     page_id: pageId,
   })
 
-  it("a pass still shows score, issues found, fixes recommended and failed checks", async () => {
+  it("a pass still shows score, issues found, recommendations and failed checks", async () => {
     const r = await render([row("p1", "https://site.com/", 82)])
     expect(r.status).toBe("passed")
     expect(r.html).toContain("Passed")
     expect(r.html).toContain("Score 82/100 (Average)")
     expect(r.html).toContain("Issues found")
     expect(r.html).toContain("Hero has no clear call to action.")
-    expect(r.html).toContain("Fixes recommended")
+    expect(r.html).toContain("Recommendations")
     expect(r.html).toContain("Book a consultation")
     expect(r.html).toContain("High-impact failed checks")
     expect(r.html).toContain("[critical] Primary CTA above the fold — Add a CTA in the hero.")

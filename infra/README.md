@@ -184,6 +184,7 @@ cp infra/aws/secrets.env.example infra/aws/secrets.env
 
 Open `infra/aws/secrets.env` and paste each value from the owner after the `=`.
 The first five **must** be the same as today's QACC (TED already uses them).
+`X_API_KEY` matters most: every comment QACC posts in TED uses it, with no backup.
 
 Then:
 
@@ -485,6 +486,7 @@ A final database snapshot `qacc-prod-final` is kept.
 | Browser shows the login page again after TED login | TED's `QACC_URL` allowlist (step 12) or a different `TED_SSO_SECRET`. |
 | Workers never go above 1 | `worker_max_count` must be bigger than `worker_min_count`. Check ECS → service → *Auto Scaling*, and the CloudWatch metric `QACC / RunsInFlight`. |
 | A site blocks the scanner (403) | Give the site owner the `nat_public_ip`. |
+| Runs finish but no comments appear in TED (worker log: `TED comment NOT posted`) | `X_API_KEY` in `secrets.env` is wrong or empty. QACC never posts comments with `TED_API_TOKEN`. Fix it, run `02-make-secrets.sh`, then `deploy.sh`. (While `ted_preview_only = true` nothing reaches TED by design.) |
 
 Anything else: send the owner the command you ran, the full error text, and the time.
 
